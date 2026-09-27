@@ -1,0 +1,21 @@
+{
+  "name": "chatgpt-api-launcher",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/shim.mjs",
+  "scripts": {
+    "start": "node src/shim.mjs",
+    "test": "node tests/history-compat-test.mjs && node tests/non-gpt-compat-test.mjs && node tests/router-test.mjs",
+    "test:windows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/launcher-test.ps1"
+  },
+  "dependencies": {
+    "https-proxy-agent": "^7.0.6",
+    "undici": "^7.10.0",
+    "ws": "^8.18.0"
+  },
+  "description": "Windows dual-entry launcher with a local Responses compatibility router",
+  "engines": {
+    "node": ">=22.14"
+  }
+}

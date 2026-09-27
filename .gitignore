@@ -1,0 +1,26 @@
+# User data: credentials, client configuration snapshots, history, logs and cache.
+/data/
+/.env
+/.env.*
+!/.env.example
+/*-state.json
+/models-*.json
+/reasoning-levels.json
+/model-template.json
+/official-settings.json
+/config-before-launchers.toml
+/*.lock
+!/package-lock.json
+# Runtime binaries and installed third-party dependencies ship only in a local bundle.
+/runtime/*
+!/runtime/README.md
+node_modules/
+# Temporary legacy tree, removed once its running process exits.
+/shim/
+/backup/
+*.log
+*.tmp
+*.lnk
+__pycache__/
+.DS_Store
+Thumbs.db
