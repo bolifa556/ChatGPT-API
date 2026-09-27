@@ -47,6 +47,23 @@ function Recover-OldOverrides {
     Write-Utf8File $configPath $content
 }
 try {
+    $legacyLayout = Get-LegacyLayoutState $packageDir
+    if ($legacyLayout -and $legacyLayout.pending -and @(Get-MainApp).Count -eq 0) {
+        # Let the old watcher restore its journal before selecting the new paths.
+        for ($n=0; $n -lt 60 -and (Test-RecordedProcess $legacyLayout.watcher); $n++) {
+            if (@(Get-MainApp).Count -gt 0) { break }
+            Start-Sleep -Milliseconds 200
+        }
+        if (@(Get-MainApp).Count -eq 0) {
+            if (Test-RecordedProcess $legacyLayout.watcher) { throw '旧入口仍在恢复配置，请稍后再打开。' }
+            # A crashed watcher can leave a router behind. Only recorded helpers
+            # are stopped, with their PID, executable, creation time and marker checked.
+            Stop-Helpers
+            if (-not (Initialize-PackageLayout $packageDir)) { throw '旧版转发器仍在退出，目录迁移尚未完成，请稍后再打开。' }
+            $runtimePath = Get-LauncherDataPath $packageDir 'runtime-state.json'
+            $lockPath = Get-LauncherDataPath $packageDir 'launcher.lock'
+        }
+    }
     try { $lock = [IO.File]::Open($lockPath,'OpenOrCreate','ReadWrite','None') }
     catch { throw '另一个入口正在准备配置，请稍后再点击。' }
     $package = Get-AppxPackage -Name OpenAI.Codex | Sort-Object Version -Descending | Select-Object -First 1
