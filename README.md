@@ -42,7 +42,7 @@ data/                        当前机器的私有数据，不提交 Git
   diagnostics/               本机诊断和测试结果
   testing/                   测试用虚拟配置，不用于客户端
 docs/                        使用与架构说明
-tests/                       可复用、无真实账号的测试
+tests/                       默认离线回归测试及显式运行的真实接口测试
 .github/workflows/           Windows 自动检查定义
 ```
 
@@ -60,8 +60,10 @@ npm test
 npm run test:windows
 ```
 
-也可直接使用 `runtime/node.exe` 运行 `tests/*.mjs`，用 Windows PowerShell 5.1 执行 `tests/launcher-test.ps1`。测试使用本地模拟服务器和虚拟配置，不调用收费模型，不读真实聊天记录。
+也可使用 `runtime/node.exe` 运行各 `*-test.mjs`，用 Windows PowerShell 5.1 执行 `tests/launcher-test.ps1`。默认测试使用本地模拟服务器和虚拟配置，不调用真实模型，不读真实聊天记录。
 
-详见 [配置与使用](docs/configuration.md)、[路由与兼容机制](docs/architecture.md)、[维护说明](docs/maintenance.md)。
+`tests/live-models.mjs` 与 `tests/native-client-live.mjs` 是单独运行的真实接口验证，会使用本机配置和账号发起实际请求；后者使用原生客户端的临时对话，不保存会话文件。运行方式和结果见 [验证记录](docs/model-verification-2026-09-27.md)。
+
+详见 [配置与使用](docs/configuration.md)、[路由与兼容机制](docs/architecture.md)、[消息转换协议](docs/message-protocol.md)、[维护说明](docs/maintenance.md)。
 
 项目是独立的本地工具，不是 OpenAI 官方产品。图标取自用户已安装的应用；第三方品牌与依赖的权利归原权利人。尚未为本项目指定对外发布许可证。

@@ -25,6 +25,10 @@
 - GPT 可用的原生加密思考继续保留；跨厂商可读思考或摘要转换为助手历史上下文；仅无法解读的加密部分不提交给不兼容的目标。
 - GPT 加密压缩块没有可读上下文时明确报错，避免默默丢失上下文。
 - 非 GPT 返回的思考 ID 标记来源，避免再切回 GPT 时误当成官方加密状态。
+- 同模型思考按来源标记保留；词元使用标准 Chat reasoning_content，阿里云仅结构化输出请求切换为 Chat response_format，其他请求保持 Responses。
+- 官方 Responses Lite 的完整项目从 output_item.done 收集；最终 output 为空时仍保留真实历史。增量工具和最终项目使用一致的 ID，不合并不同项目的字段。
+
+完整字段映射、压缩边界与逐模型路由见 [消息转换协议](message-protocol.md)。
 
 这些转换仅发生在请求与响应副本中，不修改客户端的历史文件和对话数据库。格式兼容也不能保证某个上游模型具备浏览器、图像或客户端特定工具的实际能力。
 
@@ -34,6 +38,7 @@
 | --- | --- |
 | `src/shim.mjs` | HTTP/WS 路由、认证隔离、模型缓存、流式响应 |
 | `src/non-gpt-compat.mjs` | 非 GPT 消息及工具映射 |
+| `src/chat-compat.mjs` | 指定上游的 Responses/Chat 双向转换 |
 | `src/history-compat.mjs` | 思考上下文保留、跨模型 ID 修正 |
 | `src/sse.mjs` | SSE 解码、压缩流、Unicode 分片 |
 | `src/Launcher-State.ps1` | 登录判断、临时配置和恢复 |

@@ -6,7 +6,7 @@
   "main": "src/shim.mjs",
   "scripts": {
     "start": "node src/shim.mjs",
-    "test": "node tests/history-compat-test.mjs && node tests/non-gpt-compat-test.mjs && node tests/router-test.mjs",
+    "test": "node tests/history-compat-test.mjs && node tests/non-gpt-compat-test.mjs && node tests/protocol-test.mjs && node tests/router-test.mjs && node tests/ws-reconnect-test.mjs",
     "test:windows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/launcher-test.ps1"
   },
   "dependencies": {

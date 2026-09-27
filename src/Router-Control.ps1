@@ -1,6 +1,6 @@
 ﻿function Get-RouterBuildId([string]$packageDir) {
     $bytes = New-Object 'System.Collections.Generic.List[byte]'
-    foreach($name in @('shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs')) {
+    foreach($name in @('shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs')) {
         $bytes.AddRange([IO.File]::ReadAllBytes((Join-Path $packageDir ('src\'+$name))))
     }
     $hash = [Security.Cryptography.SHA256]::Create()

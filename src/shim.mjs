@@ -9,8 +9,9 @@ import { fileURLToPath } from 'node:url';
 import { Agent, ProxyAgent, request } from 'undici';
 import WebSocket, { WebSocketServer } from 'ws';
 import { HttpsProxyAgent } from 'https-proxy-agent';
-import { normalizeGptHistory, isGptModel } from './history-compat.mjs';
+import { normalizeGptHistory, isGptModel, ResponseOutput } from './history-compat.mjs';
 import { NonGptAdapter, NonGptEvents } from './non-gpt-compat.mjs';
+import { usesChat, chatRequest, chatResponse, ChatEvents } from './chat-compat.mjs';
 import { decodedStream, ssePackets, encodeSse } from './sse.mjs';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
@@ -45,7 +46,7 @@ const gatewayDispatcher = new Agent(transport === 'ssh' ? { connect: { hostname:
 const officialDispatcher = officialProxy ? new ProxyAgent({ uri: officialProxy, connect: { timeout: 10000 } }) : new Agent({ connect: { timeout: 10000 } });
 const sourceId = crypto.createHash('sha256').update(gatewayBase + '\n' + env.API_KEY).digest('hex');
 const buildHash = crypto.createHash('sha256');
-for (const name of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs']) buildHash.update(fs.readFileSync(path.join(dir, name)));
+for (const name of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs']) buildHash.update(fs.readFileSync(path.join(dir, name)));
 const buildId = buildHash.digest('hex');
 const cachePath = path.join(cacheDir, 'catalog-state.json');
 const logFile = path.join(dataDir, 'logs', 'shim.log');
@@ -173,8 +174,10 @@ function historyForTarget(payload, which) {
 function prepareRequest(payload, which, pathname = '/v1/responses') {
   if (which === 'gateway' && !isGptModel(payload.model)) {
     if (pathname.endsWith('/responses/compact')) throw Object.assign(new Error('GPT opaque compaction is unavailable for non-GPT models.'), { status: 400, code: 'incompatible_compacted_history' });
-    const adapter = new NonGptAdapter(payload);
-    return { payload: adapter.request(), changed: true, adapter };
+    const chat = usesChat(payload);
+    const adapter = new NonGptAdapter(payload, { preserveReasoning: /^(阿里云订阅|词元计划|vllm)\//.test(payload.model) });
+    const converted = adapter.request();
+    return { payload: chat ? chatRequest(converted) : converted, changed: true, adapter, chat };
   }
   return historyForTarget(payload, which);
 }
@@ -219,7 +222,26 @@ async function readBody(req) {
   return decodeBody(Buffer.concat(chunks), req.headers['content-encoding']);
 }
 function json(res, code, value) { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); }
-function health() { return { status: status.gateway.ready ? 'ok' : 'degraded', service: 'chatgpt-api-router', version: 2, compatibilityVersion: 1, buildId, mode, sourceId, gatewayBase, ...status, officialModels: catalog.official.length, gatewayModels: catalog.gatewayIds.length }; }
+function protocolError(e) { return { type: 'error', status: e.status || 502, error: { type: 'server_error', code: e.code || 'upstream_error', message: e.message } }; }
+async function* convertedEvents(stream, adapted) {
+  const events = adapted.adapter ? new NonGptEvents(adapted.adapter) : null;
+  const chat = adapted.chat ? new ChatEvents(adapted.payload.model) : null;
+  let terminal = false;
+  for await (const packet of ssePackets(stream)) {
+    if (packet.done && chat) break;
+    if (!packet.data) continue;
+    for (const event of chat ? chat.convert(packet.data) : [packet.data]) {
+      if (['response.completed','response.incomplete','response.failed','error'].includes(event.type)) terminal = true;
+      for (const converted of events ? events.convert(event) : [event]) yield converted;
+    }
+  }
+  if (chat) for (const event of chat.finish()) {
+    for (const converted of events.convert(event)) yield converted;
+  }
+  if (events) events.finish();
+  else if (!terminal) throw Object.assign(new Error('Upstream stream ended before a terminal response event.'), { status: 502, code: 'incomplete_upstream_response' });
+}
+function health() { return { status: status.gateway.ready ? 'ok' : 'degraded', service: 'chatgpt-api-router', version: 2, compatibilityVersion: 2, buildId, mode, sourceId, gatewayBase, ...status, officialModels: catalog.official.length, gatewayModels: catalog.gatewayIds.length }; }
 async function handleHttp(req, res) {
   const url = new URL(req.url, 'http://localhost');
   if (['/healthz','/v1/healthz','/readyz'].includes(url.pathname)) {
@@ -239,25 +261,31 @@ async function handleHttp(req, res) {
   res.on('close', () => { if (!res.writableEnded) controller.abort(); });
   const started = Date.now();
   try {
-    const upstream = await request(targetUrl(which, url), { method: req.method, body, headers, dispatcher: which === 'official' ? officialDispatcher : gatewayDispatcher,
+    const upstream = await request(adapted.chat ? gatewayBase + '/chat/completions' + url.search : targetUrl(which, url), { method: req.method, body, headers, dispatcher: which === 'official' ? officialDispatcher : gatewayDispatcher,
       signal: controller.signal, headersTimeout: 120000, bodyTimeout: 300000 });
     const outgoing = { ...upstream.headers }; for (const name of ['connection','transfer-encoding','keep-alive']) delete outgoing[name];
     if (adapted.adapter && upstream.statusCode >= 200 && upstream.statusCode < 300) {
       const stream = decodedStream(upstream.body, upstream.headers['content-encoding']);
       delete outgoing['content-length']; delete outgoing['content-encoding'];
       outgoing['x-chatgpt-api-adapted'] = 'true';
-      res.writeHead(upstream.statusCode, outgoing);
       if (String(upstream.headers['content-type']).includes('text/event-stream')) {
-        const events = new NonGptEvents(adapted.adapter);
-        for await (const packet of ssePackets(stream)) {
-          if (res.destroyed) break;
-          if (packet.data) for (const event of events.convert(packet.data)) res.write(encodeSse(event));
-          else res.write(packet.raw + '\n\n');
+        res.writeHead(upstream.statusCode, outgoing);
+        try {
+          for await (const event of convertedEvents(stream, adapted)) {
+            if (res.destroyed) break;
+            res.write(encodeSse(event));
+          }
+        } catch (e) {
+          if (!res.destroyed) res.write(encodeSse(protocolError(e)));
+          log('Stream conversion error ' + e.message);
         }
       } else {
         const chunks = []; let size = 0;
         for await (const chunk of stream) { size += chunk.length; if (size > 64 * 1024 * 1024) throw new Error('Upstream response exceeds limit'); chunks.push(chunk); }
-        res.write(JSON.stringify(adapted.adapter.response(JSON.parse(Buffer.concat(chunks).toString('utf8')))));
+        const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        const response = adapted.adapter.response(adapted.chat ? chatResponse(data, parsed.model) : data);
+        res.writeHead(upstream.statusCode, outgoing);
+        res.write(JSON.stringify(response));
       }
       log('non-GPT compatibility model=' + parsed.model + ' ' + JSON.stringify(adapted.adapter.stats));
     } else {
@@ -280,7 +308,7 @@ if (process.argv.includes('--prepare')) {
   const saved = readJson(cachePath, {});
   if (saved.sourceId === sourceId && saved.status) status = saved.status;
   const server = http.createServer((req, res) => handleHttp(req, res).catch(e => {
-    log('HTTP error ' + e.message); if (!res.headersSent) json(res, e.status || 502, { error: { message: e.message } }); else res.destroy();
+    log('HTTP error ' + e.message); if (!res.headersSent) json(res, e.status || 502, { error: protocolError(e).error }); else res.destroy();
   }));
   const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 * 1024 });
   server.on('upgrade', (req, socket, head) => {
@@ -292,17 +320,17 @@ if (process.argv.includes('--prepare')) {
       // HTTP gateways are usually stateless. Preserve WS incremental context only
       // for this connection, with bounded memory; never write conversation copies.
       const gatewayHistory = new Map(); let historyBytes = 0;
-      const officialPending = new Map(), officialBodies = new Map();
+      const officialPending = new Map(), officialBodies = new Map(), officialLanes = new Map();
       const send = value => { if (client.readyState === WebSocket.OPEN) client.send(typeof value === 'string' ? value : JSON.stringify(value)); };
       const failure = (e, lane) => send({ type: 'error', status: e.status || 502, code: e.code || 'upstream_error', message: e.message, ...(lane ? { stream_id: lane } : {}), error: { type: 'server_error', code: e.code || 'upstream_error', message: e.message } });
-      function rememberGateway(id, body, output, which = 'gateway') {
+      function rememberGateway(id, body, output, which = 'gateway', { complete = true, connection = null } = {}) {
         if (!id) return;
         const input = [...body.input, ...(output || [])];
         const defaults = { ...body };
         for (const key of ['input','stream','type','stream_id','previous_response_id','generate']) delete defaults[key];
         const bytes = Buffer.byteLength(JSON.stringify({ defaults, input }));
         if (gatewayHistory.has(id)) { historyBytes -= gatewayHistory.get(id).bytes; gatewayHistory.delete(id); }
-        if (bytes <= 64 * 1024 * 1024) { gatewayHistory.set(id, { input, defaults, bytes }); historyBytes += bytes; }
+        if (bytes <= 64 * 1024 * 1024) { gatewayHistory.set(id, { input, defaults, bytes, complete, connection }); historyBytes += bytes; }
         while (gatewayHistory.size > 8 || historyBytes > 64 * 1024 * 1024) {
           const oldest = gatewayHistory.keys().next().value;
           historyBytes -= gatewayHistory.get(oldest).bytes; gatewayHistory.delete(oldest);
@@ -316,13 +344,20 @@ if (process.argv.includes('--prepare')) {
           const prior = event.previous_response_id ? gatewayHistory.get(event.previous_response_id) : null;
           const incoming = typeof event.input === 'string' ? [{ role: 'user', content: event.input }] : event.input || [];
           const context = { ...prior?.defaults, ...event, input: [...(prior?.input || []), ...incoming] };
-          officialPending.set(event.stream_id || 'default', context);
-          if (event.previous_response_id && responseRoutes.get(event.previous_response_id) === 'gateway') {
-            if (!prior) throw Object.assign(new Error('Previous response is not cached. Retry with the full input history.'), { status: 400, code: 'previous_response_not_found' });
+          const complete = !event.previous_response_id || Boolean(prior && prior.complete);
+          // Previous response state can belong to a different provider or to an
+          // official socket that has since closed. Never send its ID as an
+          // incremental continuation on a replacement upstream connection.
+          const foreign = event.previous_response_id && responseRoutes.get(event.previous_response_id) === 'gateway';
+          const reconnected = prior && (prior.connection !== upstream || !upstream || upstream.readyState >= WebSocket.CLOSING);
+          if (event.previous_response_id && (foreign || reconnected)) {
+            if (!complete) throw Object.assign(new Error('Previous response is not cached. Retry with the full input history.'), { status: 400, code: 'previous_response_not_found' });
             event = { ...context }; delete event.previous_response_id; changed = true;
+            log('official WS full-context recovery reason=' + (foreign ? 'provider-switch' : 'upstream-reconnect'));
           }
           const normalized = historyForTarget(event, 'official');
           if (changed || normalized.changed) text = JSON.stringify(normalized.payload);
+          officialPending.set(event.stream_id || 'default', { body: context, complete, incremental: Boolean(event.previous_response_id) });
         }
         officialQueue.push(text);
         if (upstream?.readyState === WebSocket.OPEN) { while (officialQueue.length) upstream.send(officialQueue.shift()); return; }
@@ -330,31 +365,77 @@ if (process.argv.includes('--prepare')) {
         officialOpening = true;
         const options = { headers: headersFor(req.headers, 'official'), handshakeTimeout: 15000 };
         if (officialProxy) options.agent = new HttpsProxyAgent(officialProxy);
-        upstream = new WebSocket(targetUrl('official', url).replace(/^http/, 'ws'), options);
-        upstream.on('open', () => { officialOpening = false; if (closed) return upstream.close(); while (officialQueue.length) upstream.send(officialQueue.shift()); });
-        upstream.on('message', data => {
+        const connection = new WebSocket(targetUrl('official', url).replace(/^http/, 'ws'), options);
+        upstream = connection;
+        const openedAt = Date.now();
+        connection.on('open', () => {
+          if (connection !== upstream || closed) return connection.close();
+          officialOpening = false;
+          log('official WS connected');
+          while (officialQueue.length) connection.send(officialQueue.shift());
+        });
+        connection.on('message', data => {
+          if (connection !== upstream || closed) return;
           const text = data.toString();
           try {
             const event = JSON.parse(text), id = event.response?.id, lane = event.stream_id || 'default';
+            if (event.type === 'error') {
+              const error = event.error || event, pending = officialPending.get(lane);
+              const invalidPrevious = Number(event.status) === 400 &&
+                (error.code === 'previous_response_not_found' || error.param === 'previous_response_id' || /Invalid\s+[`'"]?previous_response_id[`'"]?/i.test(error.message || ''));
+              if (invalidPrevious && pending?.incremental && pending.complete) {
+                // This validation error precedes response.created. Retry once
+                // using the already assembled context, without the expired ID.
+                // The retry is non-incremental, so it cannot enter this branch again.
+                const replay = { ...pending.body }; delete replay.previous_response_id;
+                log('official WS full-context recovery reason=invalid-previous-response');
+                officialSend(JSON.stringify(replay));
+                return;
+              }
+              officialPending.delete(lane);
+              officialLanes.delete(lane);
+              for (const [responseId, pendingBody] of officialBodies) {
+                if ((pendingBody.body.stream_id || 'default') === lane) officialBodies.delete(responseId);
+              }
+              log('official WS error status=' + (event.status || '') + ' code=' + (error.code || '') + ' invalid_previous=' + invalidPrevious);
+            }
             if (id) responseRoutes.set(id, 'official');
             if (event.type === 'response.created' && id && officialPending.has(lane)) {
-              officialBodies.set(id, officialPending.get(lane)); officialPending.delete(lane);
+              officialBodies.set(id, { ...officialPending.get(lane), output: new ResponseOutput() }); officialPending.delete(lane);
+              officialLanes.set(lane, id);
             }
+            const responseId = id || event.response_id || officialLanes.get(lane);
+            officialBodies.get(responseId)?.output.observe(event);
             if (['response.completed','response.incomplete'].includes(event.type) && officialBodies.has(id)) {
-              rememberGateway(id, officialBodies.get(id), event.response.output, 'official'); officialBodies.delete(id);
+              const pending = officialBodies.get(id);
+              const result = pending.output.finish(event.response.output);
+              rememberGateway(id, pending.body, result.output, 'official', { complete: pending.complete && result.complete, connection }); officialBodies.delete(id);
+              if (officialLanes.get(lane) === id) officialLanes.delete(lane);
             }
-            if (event.type === 'response.failed') officialBodies.delete(id);
+            if (event.type === 'response.failed') {
+              officialBodies.delete(id); if (officialLanes.get(lane) === id) officialLanes.delete(lane);
+            }
           } catch (e) { log('Official context cache: ' + e.message); }
           send(text);
         });
-        upstream.on('error', e => { officialOpening = false; officialQueue.length = 0; failure(e); });
-        upstream.on('close', () => { officialOpening = false; upstream = null; });
+        connection.on('error', e => {
+          if (connection !== upstream || closed) return;
+          officialOpening = false; officialQueue.length = 0; failure(e);
+        });
+        connection.on('close', code => {
+          if (connection !== upstream) return;
+          officialOpening = false; upstream = null;
+          log('official WS closed code=' + code + ' lifetime_ms=' + (Date.now() - openedAt));
+          // If generation was in flight, let the native client handle the broken
+          // transport. Never silently replay possibly accepted work or tool calls.
+          if (!closed && (officialPending.size || officialBodies.size)) client.close(1012, 'Official upstream disconnected during a response');
+        });
       }
       async function gatewayCreate(event) {
         const lane = event.stream_id || 'default';
         if (active.has(lane)) throw Object.assign(new Error('A response is already running on this stream.'), { status: 409 });
         const previous = event.previous_response_id ? gatewayHistory.get(event.previous_response_id) : null;
-        if (event.previous_response_id && !previous) throw Object.assign(new Error('Previous response is not cached on this connection. Retry with the full input history.'), { status: 400, code: 'previous_response_not_found' });
+        if (event.previous_response_id && (!previous || !previous.complete)) throw Object.assign(new Error('Previous response is not cached on this connection. Retry with the full input history.'), { status: 400, code: 'previous_response_not_found' });
         const incoming = typeof event.input === 'string' ? [{ role: 'user', content: event.input }] : event.input || [];
         let body = { ...previous?.defaults, ...event, input: [...(previous?.input || []), ...incoming], stream: true };
         delete body.type; delete body.stream_id; delete body.previous_response_id; delete body.generate;
@@ -374,27 +455,26 @@ if (process.argv.includes('--prepare')) {
         try {
           const headers = { ...headersFor(req.headers, 'gateway'), 'content-type': 'application/json' };
           if (adapted.adapter) delete headers['x-openai-internal-codex-responses-lite'];
-          const up = await request(gatewayBase + '/responses', { method: 'POST', headers, body: JSON.stringify(wireBody), dispatcher: gatewayDispatcher, signal: controller.signal, headersTimeout: 120000, bodyTimeout: 300000 });
+          const up = await request(gatewayBase + (adapted.chat ? '/chat/completions' : '/responses'), { method: 'POST', headers, body: JSON.stringify(wireBody), dispatcher: gatewayDispatcher, signal: controller.signal, headersTimeout: 120000, bodyTimeout: 300000 });
           if (up.statusCode < 200 || up.statusCode >= 300) {
             const text = await up.body.text(); let message = text.slice(0,1800); let code;
             try { const obj = JSON.parse(text); message = obj.error?.message || obj.message || message; code = obj.error?.code; } catch {}
             throw Object.assign(new Error(message), { status: up.statusCode, code });
           }
           if (!String(up.headers['content-type']).includes('text/event-stream')) throw new Error('Gateway did not return an SSE response');
-          const events = adapted.adapter ? new NonGptEvents(adapted.adapter) : null;
-          for await (const packet of ssePackets(decodedStream(up.body, up.headers['content-encoding']))) {
-            if (!packet.data) continue;
-            for (const response of events ? events.convert(packet.data) : [packet.data]) {
+          const output = new ResponseOutput();
+          for await (const response of convertedEvents(decodedStream(up.body, up.headers['content-encoding']), adapted)) {
+              output.observe(response);
               if (response.response?.id) responseRoutes.set(response.response.id, 'gateway');
               if (['response.completed','response.incomplete'].includes(response.type)) {
-                rememberGateway(response.response?.id, body, response.response?.output);
+                const result = output.finish(response.response?.output);
+                rememberGateway(response.response?.id, body, result.output, 'gateway', { complete: result.complete });
                 // Completion can arrive before the HTTP body closes. The client
                 // may immediately start its next turn on this same WS stream.
                 if (active.get(lane) === controller) active.delete(lane);
               }
               if (event.stream_id) response.stream_id = event.stream_id;
               send(response);
-            }
           }
           if (adapted.adapter) log('non-GPT compatibility model=' + event.model + ' ' + JSON.stringify(adapted.adapter.stats));
           log('gateway WS-to-HTTP model=' + event.model + ' status=' + up.statusCode);
