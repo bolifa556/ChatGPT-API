@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { Agent, ProxyAgent, request } from 'undici';
 import WebSocket, { WebSocketServer } from 'ws';
 import { HttpsProxyAgent } from 'https-proxy-agent';
-import { normalizeGptHistory, isGptModel, ResponseOutput } from './history-compat.mjs';
+import { normalizeGptHistory, normalizeOfficialHistory, isGptModel, ResponseOutput } from './history-compat.mjs';
 import { NonGptAdapter, NonGptEvents } from './non-gpt-compat.mjs';
 import { usesChat, chatRequest, chatResponse, ChatEvents } from './chat-compat.mjs';
 import { decodedStream, ssePackets, encodeSse } from './sse.mjs';
@@ -90,8 +90,9 @@ function loadCatalog() {
 function saveCatalog() {
   atomic(cachePath, { ...catalog, sourceId, accountIdentity: accountIdentity(), checkedAt: new Date().toISOString(), status });
 }
-async function fetchJson(url, headers, dispatcher, timeout = 12000) {
-  const r = await request(url, { headers, dispatcher, signal: AbortSignal.timeout(timeout), headersTimeout: timeout, bodyTimeout: timeout });
+async function fetchJson(url, headers, dispatcher, timeout = 12000, signal) {
+  const boundedSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout);
+  const r = await request(url, { headers, dispatcher, signal: boundedSignal, headersTimeout: timeout, bodyTimeout: timeout });
   const text = await r.body.text();
   if (r.statusCode < 200 || r.statusCode >= 300) throw new Error('HTTP ' + r.statusCode);
   return JSON.parse(text);
@@ -167,7 +168,7 @@ function route(model) {
 }
 function historyForTarget(payload, which) {
   if (which !== 'official' && !isGptModel(payload.model)) return { payload, changed: false };
-  const result = normalizeGptHistory(payload);
+  const result = which === 'official' ? normalizeOfficialHistory(payload) : normalizeGptHistory(payload);
   if (result.changed) log('history compatibility model=' + payload.model + ' ' + JSON.stringify(result.stats));
   return result;
 }
@@ -180,6 +181,29 @@ function prepareRequest(payload, which, pathname = '/v1/responses') {
     return { payload: chat ? chatRequest(converted) : converted, changed: true, adapter, chat };
   }
   return historyForTarget(payload, which);
+}
+async function gatewayImageReferences(payload, incoming, signal) {
+  const items = Array.isArray(payload.input) ? payload.input : [];
+  const needsUrl = part => part?.type === 'input_image' && part.file_id && !part.image_url;
+  if (!items.some(item => [...(Array.isArray(item.content) ? item.content : []), ...(Array.isArray(item.output) ? item.output : [])].some(needsUrl))) return payload;
+  const converted = structuredClone(payload), links = new Map();
+  // Match the installed client's read-only file-download-link endpoint. A file
+  // ID owned by ChatGPT is not a file ID at another provider. Resolve only the
+  // outgoing image reference; the canonical history keeps the original ID.
+  const fileBase = officialBase.replace(/\/codex$/, '');
+  for (const item of converted.input) for (const parts of [item.content, item.output]) {
+    if (!Array.isArray(parts)) continue;
+    for (const part of parts) {
+      if (!needsUrl(part)) continue;
+      if (!links.has(part.file_id)) {
+        const result = await fetchJson(fileBase + '/files/download/' + encodeURIComponent(part.file_id), headersFor(incoming, 'official'), officialDispatcher, 12000, signal);
+        if (typeof result.download_url !== 'string' || !/^https?:\/\//.test(result.download_url)) throw Object.assign(new Error('The native file service did not provide a usable image download URL.'), { status: 502, code: 'image_reference_unavailable' });
+        links.set(part.file_id, result.download_url);
+      }
+      part.image_url = links.get(part.file_id); delete part.file_id;
+    }
+  }
+  return converted;
 }
 function headersFor(incoming, target) {
   const headers = {};
@@ -249,18 +273,22 @@ async function handleHttp(req, res) {
     return json(res, url.pathname === '/readyz' && !status.gateway.ready ? 503 : 200, health());
   }
   if (req.method === 'GET' && ['/models','/v1/models'].includes(url.pathname)) return json(res, 200, {
+    // The native official provider requests its rich catalog at this same URL.
+    // Preserve that schema without exposing API models in the official entry.
+    ...(mode === 'mixed' ? { models: catalog.official } : {}),
     object: 'list', data: [...(mode === 'mixed' ? catalog.official.map(m => m.slug) : []), ...catalog.gatewayIds].filter((m,i,a) => a.indexOf(m) === i).map(id => ({ id, object: 'model' })) });
   let body = await readBody(req);
   const parsed = JSON.parse(body.toString('utf8'));
   const which = route(parsed.model);
-  const adapted = prepareRequest(parsed, which, url.pathname);
-  if (adapted.changed) body = Buffer.from(JSON.stringify(adapted.payload));
-  const headers = headersFor(req.headers, which);
-  if (adapted.adapter) delete headers['x-openai-internal-codex-responses-lite'];
   const controller = new AbortController(); controllers.add(controller);
   res.on('close', () => { if (!res.writableEnded) controller.abort(); });
   const started = Date.now();
   try {
+    const resolved = which === 'gateway' ? await gatewayImageReferences(parsed, req.headers, controller.signal) : parsed;
+    const adapted = prepareRequest(resolved, which, url.pathname);
+    if (adapted.changed || resolved !== parsed) body = Buffer.from(JSON.stringify(adapted.payload));
+    const headers = headersFor(req.headers, which);
+    if (adapted.adapter) delete headers['x-openai-internal-codex-responses-lite'];
     const upstream = await request(adapted.chat ? gatewayBase + '/chat/completions' + url.search : targetUrl(which, url), { method: req.method, body, headers, dispatcher: which === 'official' ? officialDispatcher : gatewayDispatcher,
       signal: controller.signal, headersTimeout: 120000, bodyTimeout: 300000 });
     const outgoing = { ...upstream.headers }; for (const name of ['connection','transfer-encoding','keep-alive']) delete outgoing[name];
@@ -299,7 +327,12 @@ loadCatalog();
 if (process.argv.includes('--prepare')) {
   try {
     await refreshCatalog();
-    if (!catalog.gatewayIds.length || Date.now() - Date.parse(catalog.gatewayAt) >= CACHE_MAX_AGE) throw new Error('Gateway unavailable and no current cache for this URL/key. ' + (status.gateway.error || ''));
+    const gatewayAvailable = catalog.gatewayIds.length && Date.now() - Date.parse(catalog.gatewayAt) < CACHE_MAX_AGE;
+    if (!gatewayAvailable) {
+      catalog.gatewayIds = [];
+      if (mode !== 'mixed' || !catalog.official.length) throw new Error('Gateway unavailable and no current cache for this URL/key. ' + (status.gateway.error || ''));
+      saveCatalog();
+    }
     writeDesktopCatalog();
     process.stdout.write(JSON.stringify(health()) + '\n');
   } catch (e) { process.stderr.write(e.message.replaceAll(env.API_KEY, '[redacted]') + '\n'); process.exitCode = 1; }
@@ -440,8 +473,6 @@ if (process.argv.includes('--prepare')) {
         let body = { ...previous?.defaults, ...event, input: [...(previous?.input || []), ...incoming], stream: true };
         delete body.type; delete body.stream_id; delete body.previous_response_id; delete body.generate;
         // Cache the original desktop format; convert only the outgoing copy.
-        const adapted = prepareRequest(body, 'gateway');
-        const wireBody = adapted.payload;
         if (event.generate === false) {
           // Native clients prewarm WS connections without requesting generation.
           const response = { id: 'resp_router_' + crypto.randomUUID().replaceAll('-', ''), object: 'response', created_at: Math.floor(Date.now()/1000), model: body.model, output: [], status: 'completed', error: null };
@@ -453,6 +484,8 @@ if (process.argv.includes('--prepare')) {
         }
         const controller = new AbortController(); active.set(lane, controller); controllers.add(controller);
         try {
+          const adapted = prepareRequest(await gatewayImageReferences(body, req.headers, controller.signal), 'gateway');
+          const wireBody = adapted.payload;
           const headers = { ...headersFor(req.headers, 'gateway'), 'content-type': 'application/json' };
           if (adapted.adapter) delete headers['x-openai-internal-codex-responses-lite'];
           const up = await request(gatewayBase + (adapted.chat ? '/chat/completions' : '/responses'), { method: 'POST', headers, body: JSON.stringify(wireBody), dispatcher: gatewayDispatcher, signal: controller.signal, headersTimeout: 120000, bodyTimeout: 300000 });

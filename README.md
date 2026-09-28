@@ -15,11 +15,13 @@ Windows x64 下的双入口启动器，适用于已安装的 `OpenAI.Codex` 桌�
 
 | 入口 | 行为 |
 | --- | --- |
-| `ChatGPT.vbs` | 恢复启动器临时配置，打开系统当前注册的原版应用。 |
+| `ChatGPT.vbs` | 打开同一个原版应用，使用原生官方模型目录；保留本地兼容通道以恢复混合历史。官方模型请求发往 OpenAI。 |
 | `chatgpt-api.vbs`，有已保存的 ChatGPT 登录 | 显示官方模型和网关模型，按选中的模型分别使用官方账号或 API Key。 |
 | `chatgpt-api.vbs`，没有已保存的 ChatGPT 登录 | 使用自定义 provider，只显示网关模型，无需先登录官方账号。 |
 
 桌面快捷方式指向上述根目录入口。入口用系统包注册信息启动应用，不写死 `WindowsApps` 下的版本目录。移动整个文件夹后，重新运行安装器更新快捷方式；移动前应完全退出客户端。
+
+两个入口均保留兼容通道，官方模型不会转发到 API 网关。原生官方工具列表、增量上下文和加密状态保持原协议；仅遇到第三方历史时转换必要字段。退出后恢复临时配置，不改登录文件、语言设置或已保存的对话。
 
 ## 目录
 
@@ -62,7 +64,7 @@ npm run test:windows
 
 也可使用 `runtime/node.exe` 运行各 `*-test.mjs`，用 Windows PowerShell 5.1 执行 `tests/launcher-test.ps1`。默认测试使用本地模拟服务器和虚拟配置，不调用真实模型，不读真实聊天记录。
 
-`tests/live-models.mjs` 与 `tests/native-client-live.mjs` 是单独运行的真实接口验证，会使用本机配置和账号发起实际请求；后者使用原生客户端的临时对话，不保存会话文件。运行方式和结果见 [验证记录](docs/model-verification-2026-09-27.md)。
+`tests/live-models.mjs`、`tests/native-client-live.mjs`、`tests/official-client-live.mjs`、`tests/media-live.mjs` 是单独运行的真实接口验证，会使用本机配置和账号发起实际请求；原生真实模型测试使用 ephemeral 对话。`tests/native-switch-test.mjs` 则在独立测试目录中运行未修改的原生 app-server、真实本地工具和受控模型端点，验证同一对话的跨模型、跨入口恢复。运行方式、完整功能清单与排除项见 [最新验证记录](docs/model-verification-2026-09-28.md)。
 
 详见 [配置与使用](docs/configuration.md)、[路由与兼容机制](docs/architecture.md)、[消息转换协议](docs/message-protocol.md)、[维护说明](docs/maintenance.md)。
 

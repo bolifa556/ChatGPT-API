@@ -83,8 +83,10 @@ function Restore-LauncherConfig([string]$packageDir, [string]$configPath) {
     if (-not $state -or -not $state.active) { return }
     if ([IO.Path]::GetFullPath($state.configPath) -ne [IO.Path]::GetFullPath($configPath)) { throw '切换记录属于另一个配置目录，已停止自动恢复。' }
     $current = [System.IO.File]::ReadAllText($configPath)
-    $state.lastApiModel = Get-RootString $current 'model'
-    $state.lastApiEffort = Get-RootString $current 'model_reasoning_effort'
+    if ($state.entryMode -ne 'official') {
+        $state.lastApiModel = Get-RootString $current 'model'
+        $state.lastApiEffort = Get-RootString $current 'model_reasoning_effort'
+    }
     if ($current -ceq $state.applied) { $restored = [string]$state.original } else {
         $restored = $current
         foreach ($key in $script:LauncherRootKeys) { $restored = Set-RootLine $restored $key (Get-RootLine $state.original $key) }
@@ -96,7 +98,7 @@ function Restore-LauncherConfig([string]$packageDir, [string]$configPath) {
     $state.original = $null; $state.applied = $null
     Write-Utf8File (Get-LauncherDataPath $packageDir 'launcher-state.json') ($state | ConvertTo-Json -Depth 8)
 }
-function Apply-LauncherConfig([string]$packageDir, [string]$configPath, [string]$mode, [string]$shimBase, [string]$gatewayBase) {
+function Apply-LauncherConfig([string]$packageDir, [string]$configPath, [string]$mode, [string]$shimBase, [string]$gatewayBase, [ValidateSet('api','official')][string]$entryMode = 'api') {
     $original = if (Test-Path -LiteralPath $configPath) { [IO.File]::ReadAllText($configPath) } else { '' }
     # Retain stable provider IDs for old conversations. Their auth helper lazily
     # starts the local adapter; they must never bypass it by dialing Bifrost.
@@ -105,22 +107,28 @@ function Apply-LauncherConfig([string]$packageDir, [string]$configPath, [string]
     Write-Utf8File $configPath $original
     $previous = Read-LauncherState $packageDir
     $content = Set-RootString $original 'openai_base_url' $shimBase
-    $content = Set-RootString $content 'model_catalog_json' (Get-LauncherDataPath $packageDir 'models-smr.json')
-    if ($mode -eq 'gateway') { $content = Set-RootString $content 'model_provider' 'chatgpt_api_launcher' }
+    if ($entryMode -eq 'official') { $content = Set-RootLine $content 'model_catalog_json' $null }
+    else { $content = Set-RootString $content 'model_catalog_json' (Get-LauncherDataPath $packageDir 'models-smr.json') }
+    if ($mode -eq 'gateway' -and $entryMode -ne 'official') { $content = Set-RootString $content 'model_provider' 'chatgpt_api_launcher' }
     elseif ((Get-RootString $content 'model_provider') -and (Get-RootString $content 'model_provider') -ne 'openai') { $content = Set-RootString $content 'model_provider' 'openai' }
     foreach ($id in @('chatgpt_api_launcher','smr')) {
         if (Get-TableText $content ('model_providers.' + $id)) { $content = Set-LauncherProvider $content $id $shimBase $packageDir ($mode -eq 'mixed') }
     }
-    $catalog = [IO.File]::ReadAllText((Get-LauncherDataPath $packageDir 'models-smr.json')) | ConvertFrom-Json
-    $ids = @($catalog.models | ForEach-Object { [string]$_.slug })
+    if ($entryMode -eq 'official') {
+        $catalog = [IO.File]::ReadAllText((Get-LauncherDataPath $packageDir 'catalog-state.json')) | ConvertFrom-Json
+        $ids = @($catalog.official | ForEach-Object { [string]$_.slug })
+    } else {
+        $catalog = [IO.File]::ReadAllText((Get-LauncherDataPath $packageDir 'models-smr.json')) | ConvertFrom-Json
+        $ids = @($catalog.models | ForEach-Object { [string]$_.slug })
+    }
     $selected = Get-RootString $original 'model'
-    if ($ids -cnotcontains $selected) {
-        if ($previous.lastApiModel -and $ids -ccontains $previous.lastApiModel) { $selected = $previous.lastApiModel }
+    if ($ids.Count -and $ids -cnotcontains $selected) {
+        if ($entryMode -eq 'api' -and $previous.lastApiModel -and $ids -ccontains $previous.lastApiModel) { $selected = $previous.lastApiModel }
         elseif ($ids -ccontains 'GPT/gpt-6-sol') { $selected = 'GPT/gpt-6-sol' }
         else { $selected = $ids[0] }
         $content = Set-RootString $content 'model' $selected
     }
-    $state = [ordered]@{ version = 2; active = $true; mode = $mode; configPath = $configPath; original = $original; applied = $content; startedAt = [DateTime]::UtcNow.ToString('o'); lastApiModel = $selected; lastApiEffort = (Get-RootString $original 'model_reasoning_effort') }
+    $state = [ordered]@{ version = 2; active = $true; mode = $mode; entryMode = $entryMode; configPath = $configPath; original = $original; applied = $content; startedAt = [DateTime]::UtcNow.ToString('o'); lastApiModel = $(if ($entryMode -eq 'official') { $previous.lastApiModel } else { $selected }); lastApiEffort = $(if ($entryMode -eq 'official') { $previous.lastApiEffort } else { Get-RootString $original 'model_reasoning_effort' }) }
     # Journal first, so a crash while switching can be recovered by either entry.
     Write-Utf8File (Get-LauncherDataPath $packageDir 'launcher-state.json') ($state | ConvertTo-Json -Depth 8)
     Write-Utf8File $configPath $content

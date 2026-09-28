@@ -1,12 +1,12 @@
 # 原生客户端消息转换协议
 
-适用对象：本机 OpenAI.Codex 桌面客户端与 14 个已配置的网关模型。2026-09-27 核对。
+适用对象：本机 OpenAI.Codex 桌面客户端、官方模型与 14 个已配置的网关模型。2026-09-28 核对。
 
 ## 目标与边界
 
 客户端决定对话、工具执行、历史、模型切换和压缩。适配层只转换请求副本和响应协议，不生成用户/助手正文，不添加新的任务提示词，不替模型纠正代码，不改写客户端保存的历史，不另建聊天库。测试使用临时目录和原生 ephemeral 对话。
 
-现有模型目录中的基础指令、自定义工具说明和跨厂商思考标注是原有兼容行为，本次保留；“没有新增提示词”不代表原有兼容层完全没有说明文字。另一个任务的重连修复保持有效。
+现有模型目录中的基础指令与自定义工具说明保留；本次没有增加提示词，并移除原先转换思考时添加的说明前缀。测试夹具中的提示词仅供验证，未加入实际请求处理。另一个任务的重连修复保持有效。
 
 网络、限流、上游繁忙、思考强度、模型缺少的能力（例如识图、联网搜索），以及模型自己生成错误参数、代码、答案或摘要，不属于本次转换修复。不会靠虚构能力、降低用户要求或注入额外指令掩盖失败。
 
@@ -29,7 +29,7 @@
 | 词元计划/glm-5.3-flash | Chat Completions | Chat Completions | reasoning_content |
 | vllm/qwen3.8-flash-next | Responses | Responses | 原始 reasoning content |
 
-官方直连 GPT 也保持原生 Responses。网关 GPT 不进入非 GPT/Chat 转换，仅在混合历史需要时做 GPT 历史格式规范化。
+官方 GPT 经保留的本地兼容通道发往 OpenAI，不经过 211 网关，也不经过非 GPT/Chat 转换。合法的原生请求保留协议；存在第三方历史时才规范必要字段。网关 GPT 同样不进入非 GPT/Chat 转换，但面向其无状态请求展开完整工具目录。
 
 采用一套共用转换器，不为每个模型复制实现。词元现有 Responses 入口无法完整承载其思考历史，Chat 入口能传递 reasoning_content；阿里云常规 Responses 能承载原生 reasoning，但实测部分模型忽略 Responses 的结构化输出字段，因此仅结构化请求走标准 Chat response_format。
 
@@ -41,13 +41,14 @@
 | instructions、system、developer、user、assistant | Responses 原样保留；Chat 把 instructions 放入 system。词元保留 developer；阿里云 Chat 要求一个开头的 system，按原顺序合并现有 system/developer 文本，仅以空行分隔 |
 | 客户端 model_switch 更新 | 保留原文和相应角色；经过 Chat 时按上述角色规则转换 |
 | input_text、output_text | Chat 转为 text，字符串内容不改；原生 Responses 保持原格式 |
-| input_image | Chat 转为 image_url，保留 URL/数据和 detail；是否识图由模型决定 |
+| input_image | 保留 URL/数据和 detail；Chat 改为 image_url 外层。只有 ChatGPT file_id 时，API 路径先从原生 `/backend-api/files/download/{file_id}` 获取原下载 URL，失败明确报错；官方路径保持 file_id。缓存和保存的历史不替换为临时 URL |
 | input_file | Chat 映射 file_id/file_data/filename；无法表示的 file_url 明确报错，不伪造文件内容 |
-| input_audio、已有 image_url/file/refusal | 在支持对应 Chat 格式时保留原字段；不补做识别或转写 |
+| input_audio | 原生 data:audio/wav、x-wav、mpeg、mp3 内联数据转为 Chat input_audio.data/format；已是 Chat 格式则保留。不能表示的私有引用明确报错，不静默丢弃，不补做转写 |
+| 已有 image_url/file/refusal | 对应字段保持原内容；文件内容不做额外解析或生成 |
 | function 工具 | 名称、描述、参数 Schema、strict 保留；Chat 放入 tools[].function |
 | namespace 工具 | 展开为函数，并用命名空间与原名生成确定性的别名；返回时恢复原名和 namespace，避免重名冲突 |
 | custom 工具 | 用 function 的单个字符串参数 input 承载原始输入；返回时解包，工具由客户端执行 |
-| additional_tools 历史项目 | 把定义移入 tools；保留命名空间，当前定义覆盖旧定义；不将定义当作对话文字发送 |
+| additional_tools 历史项目 | 官方原生路径保留在 input 中，包括 ID、角色与引用；旧载体缺 role 时只补 developer。网关完整请求才把定义移入 tools，保留命名空间，当前定义覆盖旧定义；不将工具定义变成对话文字 |
 | function_call / custom_tool_call 历史 | 保留 call_id、实际参数和顺序；自定义工具仅包一层 JSON 字符串参数。合法空字符串保留，缺失输入明确报错 |
 | function_call_output / custom_tool_call_output | 保留 call_id 和原始结果。Chat 转为 role=tool、tool_call_id；内容只改外层格式 |
 | auto/none/required、指定工具、allowed_tools | 依目标协议转换工具选择，别名与定义一致；不替用户选择另一种工具 |
@@ -76,9 +77,9 @@
 
 非 GPT 思考 ID 带有来源模型的确定性标记。相同模型续聊时，保留它返回的思考文本、顺序、空白及字段；Chat 仅将原文放入 reasoning_content。不会去重、总结或重新生成思考。vLLM 返回 content 而缺少协议必需的 summary 时，只补空数组，不生成摘要。
 
-换模型时沿用已有规则：可读思考作为既有助手上下文转换；官方加密思考留在客户端原始历史中，只向能接受它的 GPT 目标保留。不能解密的字节不会伪装成另一厂商的思考。原有跨厂商“先前思考/摘要”标注没有新增或扩展。
+切回官方或网关 GPT 时，第三方或客户端临时分配的思考 ID 不能当作官方服务端状态：将既有文本块逐块映射为 `reasoning.summary[].summary_text`，不携带第三方 ID，不增加助手消息，保留空白、重复块和顺序。官方加密思考对象保持原样。跨非 GPT 模型时沿用既有可读上下文转换，但不再添加“先前思考/摘要”说明前缀。不能解密的字节不伪装成另一厂商的思考。
 
-官方 → 网关时，从 response.output_item.done 收集真实完成项目，解决 Responses Lite 的 response.completed.output=[] 导致丢失上一轮文本或工具调用的问题。网关 → 官方时恢复原生命名空间/自定义工具历史，并将 additional_tools 定义移回 tools。两种方向都保留工具调用与结果的 call_id 配对，保留已有客户端更新和可用的 phase 信息。
+官方 → 网关时，从 response.output_item.done 收集真实完成项目，解决 Responses Lite 的 response.completed.output=[] 导致丢失上一轮文本或工具调用的问题。网关 → 官方时使用缓存或客户端提交的原生命名空间/自定义工具历史，additional_tools 保持原生载体。两种方向都保留工具调用与结果的 call_id 配对，保留已有客户端更新和可用的 phase 信息。
 
 连接内缓存只保存原生格式，转换后的 Chat messages 不回写客户端历史。缓存缺失或不完整时报错；不猜测缺失内容。重连机制继续使用另一个任务已经实现的有界恢复策略，不重复执行已被上游接受的工具工作。
 
@@ -109,7 +110,7 @@ GLM、Qwen、DeepSeek、vLLM 可以使用客户端已有的文本压缩流程：
 
 ## 验证与参考
 
-逐模型实测、排除项和复现命令见 [验证记录](model-verification-2026-09-27.md)。工具、插件、技能、文件操作等由客户端通过同一工具协议执行；验证共用协议链路，不等于逐个第三方工具业务逻辑或所有模态都具备能力。
+逐模型实测、完整功能清单、验证层级、排除项和复现命令见 [最新验证记录](model-verification-2026-09-28.md)。工具、插件、技能、文件操作等由客户端通过同一工具协议执行；验证共用协议链路，不等于逐个第三方工具业务逻辑或所有模态都具备能力。
 
 官方参考与接口探测共同决定转换，不用文档中未列出的字段假定能力：
 

@@ -71,19 +71,15 @@ try {
     $appId = $package.PackageFamilyName + '!App'
     $running = @(Get-MainApp)
     $state = Read-LauncherState $packageDir
-    $activeApi = [bool]($state -and $state.active)
+    $activeEntry = if ($state -and $state.active) { if ($state.entryMode) { $state.entryMode } else { 'api' } } else { 'official' }
     if ($running.Count -gt 0) {
-        if (($Mode -eq 'api') -ne $activeApi) { throw '请先从托盘完全退出 ChatGPT，再点击另一个入口切换。' }
+        if ($Mode -ne $activeEntry) { throw '请先从托盘完全退出 ChatGPT，再点击另一个入口切换。' }
         & (Join-Path $env:WINDIR 'explorer.exe') "shell:AppsFolder\$appId"
         exit 0
     }
     Restore-LauncherConfig $packageDir $configPath
     Recover-OldOverrides
     Stop-Helpers
-    if ($Mode -eq 'official') {
-        & (Join-Path $env:WINDIR 'explorer.exe') "shell:AppsFolder\$appId"
-        exit 0
-    }
     $settings = Get-EnvValues (Get-LauncherDataPath $packageDir '.env')
     $apiKey = [string]$settings['API_KEY']
     if (-not $apiKey) { throw '.env 中缺少 API_KEY。请运行安装脚本填写。' }
@@ -93,11 +89,11 @@ try {
     $shimPath = Join-Path $packageDir 'src\shim.mjs'
     $shimPort = if ($settings['SHIM_PORT']) { [int]$settings['SHIM_PORT'] } else { 8102 }
     $shimBase = 'http://127.0.0.1:' + $shimPort + '/v1'
-    $authMode = if (Get-SavedChatGPTLogin (Get-CodexHome)) { 'mixed' } else { 'gateway' }
-    $prepared = Ensure-LocalRouter $packageDir
-    Apply-LauncherConfig $packageDir $configPath $authMode $shimBase $baseUrl
+    $authMode = if ($Mode -eq 'official' -or (Get-SavedChatGPTLogin (Get-CodexHome))) { 'mixed' } else { 'gateway' }
+    $prepared = Ensure-LocalRouter $packageDir $authMode
+    Apply-LauncherConfig $packageDir $configPath $authMode $shimBase $baseUrl $Mode
     $sessionStartedAt = (Read-LauncherState $packageDir).startedAt
-    if(-not $prepared.gateway.ready){Show-Message '网关目前不可用，已加载同一地址与密钥的最近模型缓存。请求可能暂时失败。'}
+    if($Mode -eq 'api' -and -not $prepared.gateway.ready){Show-Message '网关目前不可用。有效缓存中的网关模型请求可能失败；已登录的官方模型仍使用官方通道。'}
     & (Join-Path $env:WINDIR 'explorer.exe') "shell:AppsFolder\$appId"
     $main=$null
     for($n=0;$n -lt 100;$n++){ $apps=@(Get-MainApp);if($apps.Count){$main=$apps[0];break};Start-Sleep -Milliseconds 200 }
@@ -123,7 +119,7 @@ try {
 } catch {
     $message=$_.Exception.Message
     if($apiKey){$message=$message.Replace($apiKey,'[redacted]')}
-    if($Mode -eq 'api' -and -not $apiLaunched -and @(Get-MainApp).Count -eq 0){
+    if(-not $apiLaunched -and @(Get-MainApp).Count -eq 0){
         try{Restore-LauncherConfig $packageDir $configPath;Stop-Helpers}catch{}
     }
     Show-Message ('启动 ChatGPT 失败：'+$message)

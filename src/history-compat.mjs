@@ -22,38 +22,57 @@ export function mergeTools(values) {
 export function readableReasoning(item) {
   const texts = [];
   for (const value of [...(Array.isArray(item.summary) ? item.summary : []), ...(Array.isArray(item.content) ? item.content : [])]) {
-    if (typeof value?.text === 'string' && value.text.trim()) texts.push(value.text);
+    if (typeof value?.text === 'string') texts.push(value.text);
   }
-  for (const key of ['text', 'reasoning']) if (typeof item[key] === 'string' && item[key].trim()) texts.push(item[key]);
-  return [...new Set(texts)].join('\n\n');
+  for (const key of ['text', 'reasoning']) if (typeof item[key] === 'string') texts.push(item[key]);
+  return texts.join('');
 }
 export function reasoningAsContext(item) {
   const text = readableReasoning(item);
-  return text ? { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '[Earlier assistant reasoning / summary, retained as conversation context]\n' + text, annotations: [] }] } : null;
+  return text ? { type: 'message', role: 'assistant', content: [{ type: 'output_text', text, annotations: [] }] } : null;
 }
 
-// Apply only when sending to a GPT endpoint. Other providers keep their own
-// history format. This never mutates the saved conversation or the input object.
-export function normalizeGptHistory(payload) {
+// Native tool carriers are part of incremental Responses history. Moving them
+// to top-level tools would lose their inheritance on the next official turn.
+export function normalizeOfficialHistory(payload) {
+  return normalizeGptHistory(payload, { preserveToolCarriers: true });
+}
+
+// Only the outgoing copy changes. Official requests retain native tool carriers;
+// stateless API gateways receive a complete top-level catalog on every request.
+export function normalizeGptHistory(payload, { preserveToolCarriers = false } = {}) {
   const stats = { foreignReasoningSkipped: 0, foreignReasoningConverted: 0, itemIdsCorrected: 0, referencesCorrected: 0, toolCarriersExtracted: 0 };
   if (!Array.isArray(payload?.input)) return { payload, changed: false, stats };
   const renames = new Map(), removed = new Set(), carriers = [];
   let changed = false;
   let input = payload.input.flatMap(item => {
     if (!item || typeof item !== 'object') return [item];
-    if (item.type === 'additional_tools') {
+    if (item.type === 'additional_tools' && preserveToolCarriers && item.role == null) {
+      // Some older/dynamic carriers omit the required native control role.
+      // This is a protocol field, not a new developer message or instruction.
+      changed = true; return [{ ...item, role: 'developer' }];
+    }
+    if (item.type === 'additional_tools' && !preserveToolCarriers) {
       carriers.push(...(item.tools || [])); if (item.id) removed.add(item.id);
       stats.toolCarriersExtracted++; changed = true; return [];
     }
     const prefix = prefixes[item.type], id = item.id;
     const validId = typeof id === 'string' && id.startsWith(prefix || '\0');
-    if (item.type === 'reasoning' && (id?.startsWith('rs_gateway_') || (!validId && !item.encrypted_content))) {
-      // A third-party summary cannot be turned into an OpenAI reasoning item by
-      // renaming its ID: the official service then returns "item not found".
+    if (item.type === 'reasoning' && item.encrypted_content) return [item];
+    const localReasoningId = typeof id === 'string' && /^rs_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+    if (item.type === 'reasoning' && !item.encrypted_content &&
+        (id?.startsWith('rs_gateway_') || localReasoningId || (id && !validId) || (!id && item.content?.length))) {
+      // Local/vendor IDs are not references to official server items. Keep the
+      // exact existing text as a portable summary, without adding a chat message.
       if (id) removed.add(id);
       changed = true;
-      const context = reasoningAsContext(item);
-      if (context) { stats.foreignReasoningConverted++; return [context]; }
+      const summary = [];
+      for (const block of [...(item.summary || []), ...(item.content || [])]) {
+        if (typeof block?.text !== 'string') throw Object.assign(new Error('Foreign reasoning contains a non-text block that cannot be converted losslessly.'), { status: 400, code: 'unsupported_reasoning_history' });
+        summary.push({ type: 'summary_text', text: block.text });
+      }
+      for (const key of ['text', 'reasoning']) if (typeof item[key] === 'string') summary.push({ type: 'summary_text', text: item[key] });
+      if (summary.length) { stats.foreignReasoningConverted++; return [{ type: 'reasoning', summary }]; }
       stats.foreignReasoningSkipped++; return [];
     }
     if (prefix && typeof id === 'string' && !validId) {
@@ -69,6 +88,12 @@ export function normalizeGptHistory(payload) {
     if (renames.has(item.id)) { changed = true; stats.referencesCorrected++; return [{ ...item, id: renames.get(item.id) }]; }
     return [item];
   });
+  // A reference without its original foreign item cannot be reconstructed.
+  // Leave native references alone; never fabricate or silently drop context.
+  if (input.some(item => item?.type === 'item_reference' &&
+      (item.id?.startsWith('rs_gateway_') || /^rs_[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(item.id || '')))) {
+    throw Object.assign(new Error('Foreign reasoning reference requires its complete original item.'), { status: 400, code: 'incomplete_foreign_history' });
+  }
   return { payload: changed ? { ...payload, input, ...(carriers.length ? { tools: mergeTools([...carriers, ...(payload.tools || [])]) } : {}) } : payload, changed, stats };
 }
 

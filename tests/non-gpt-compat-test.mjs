@@ -30,7 +30,8 @@ const readable={type:'reasoning',id:'rs_native',encrypted_content:'opaque',summa
 const readableWire=new NonGptAdapter({input:[readable]}).request();assert(readableWire.input[0].content[0].text.includes('7395'));
 assert(!JSON.stringify(readableWire).includes('opaque'));assert.equal(readable.encrypted_content,'opaque');
 const foreignReadable=adapter.item({...readable,encrypted_content:undefined});
-assert(normalizeGptHistory({input:[foreignReadable]}).payload.input[0].content[0].text.includes('7395'));
+assert.equal(normalizeGptHistory({input:[foreignReadable]}).payload.input[0].summary[0].text,'Keep test number 7395');
+assert.equal(readableWire.input[0].content[0].text,'Keep test number 7395');
 assert.throws(()=>adapter.raw('{"input":123}'),e=>e.code==='invalid_upstream_tool_arguments');
 assert.throws(()=>new NonGptAdapter({input:[{type:'compaction',encrypted_content:'opaque'}]}).request(),/Restore readable context/);
 const text='data: '+JSON.stringify({type:'response.output_text.delta',delta:'中文'})+'\r\n\r\ndata: [DONE]';

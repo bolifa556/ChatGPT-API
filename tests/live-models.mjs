@@ -10,6 +10,7 @@ const tools = [{ type: 'namespace', name: 'audit', description: 'Protocol verifi
 const functionSchema = { type: 'object', properties: { n: { type: 'integer' }, ok: { type: 'boolean' } }, required: ['n','ok'], additionalProperties: false };
 const dynamicTools = ['audit_a','audit_b'].map(name => ({ type: 'namespace', name, description: 'Dynamically supplied tool namespace', tools: [{ type: 'function', name: 'lookup', description: 'Look up the supplied integer and boolean.', parameters: functionSchema }] }));
 const instructions = 'Synthetic protocol verification. Follow the requested tool calls and report only actual supplied values. Do not use unrequested tools.';
+const officialModel = process.env.PROTOCOL_OFFICIAL_MODEL || 'gpt-6-sol';
 function fail(row, phase, error) { row[phase] = { status: classify(error), code: error.code, error: error.message.slice(0, 500) }; console.log(JSON.stringify({ model: row.model, phase, ...row[phase] })); }
 try {
   for (const model of live.models.filter(model => !selected.length || selected.some(value => model.includes(value)))) {
@@ -19,7 +20,7 @@ try {
     const raw = 'text("中文\\nprotocol");';
     let previous, officialToken;
     try {
-      const seed = await turn(ws, { model: 'gpt-6-sol', instructions: 'Answer briefly.', tools: [], reasoning: { effort: 'low' }, input: [{ role: 'user', content: 'Invent a random token of 14 uppercase letters. Reply only the token.' }] }, 45000);
+      const seed = await turn(ws, { model: officialModel, instructions: 'Answer briefly.', tools: [], reasoning: { effort: 'low' }, input: [{ role: 'user', content: 'Invent a random token of 14 uppercase letters. Reply only the token.' }] }, 45000);
       previous = seed.response.id; officialToken = seed.text.trim();
     } catch (error) { fail(row, 'official_to_gateway', error); ws.terminate(); ws = await connect(live.base); }
     try {
@@ -49,7 +50,7 @@ try {
         input: [...functions.map(call => ({ type: 'function_call_output', call_id: call.call_id, output: 'Lookup complete.' })), { role: 'user', content: 'Invent a different token of 14 uppercase letters. Reply only with that new token.' }] });
       row.multi_turn_tools = { status: final.response.status === 'completed' ? 'passed' : 'excluded_model_output' };
       try {
-        const back = await turn(ws, { model: 'gpt-6-sol', instructions: 'Answer briefly.', tools: [], reasoning: { effort: 'low' }, previous_response_id: final.response.id,
+        const back = await turn(ws, { model: officialModel, instructions: 'Answer briefly.', tools: [], reasoning: { effort: 'low' }, previous_response_id: final.response.id,
           input: [{ role: 'user', content: 'Repeat exactly the immediately preceding assistant answer.' }] }, 45000);
         row.gateway_to_official = { status: back.text.trim() === final.text.trim() ? 'passed' : 'needs_review' };
       } catch (error) { fail(row, 'gateway_to_official', error); }

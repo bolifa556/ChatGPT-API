@@ -35,6 +35,9 @@ function responseEvents(body){
 }
 function peer(name){
  const server=http.createServer(async(req,res)=>{
+  if(name==='official'&&req.url.startsWith('/backend-api/files/download/')){
+   res.setHeader('content-type','application/json');res.end(JSON.stringify({download_url:'https://native-files.example.invalid/original-image.png'}));return;
+  }
   if(req.url.startsWith('/models')||req.url.startsWith('/v1/models')||req.url.startsWith('/backend-api/codex/models')){
    if(name==='gateway'&&!gatewayOnline){res.writeHead(503);res.end('{}');return}
    res.setHeader('content-type','application/json');res.end(JSON.stringify(name==='official'?{models:[officialModel]}:{data:[{id:'GPT/gpt-6-sol'},{id:'Other/test-model'}]}));return;
@@ -73,6 +76,11 @@ try{
  r=await request(base,'Other/test-model');assert.equal(r.body.peer,'gateway');assert.equal(records.at(-1).headers.authorization,'Bearer mock-gateway');assert.equal(records.at(-1).headers['chatgpt-account-id'],undefined);results.push('Gateway HTTP uses configured URL/key and removes account headers');
  r=await request(base,'Other/test-model',{test_tool_output:true,tools:[{type:'custom',name:'exec',format:{type:'text'}}]});assert.equal(r.body.output[0].type,'custom_tool_call');assert.equal(r.body.output[0].name,'exec');assert.equal(r.body.output[0].input,'text("中文");');assert.equal(r.body.output[0].id,'ctc_jsoncall');results.push('Non-stream JSON tool responses restored to native desktop format');
  const count=records.length;r=await request(base,'gpt-unknown');assert.equal(r.status,400);assert.equal(records.length,count);results.push('Unknown models are rejected without forwarding');
+ for(const model of ['GPT/gpt-6-sol','Other/test-model']){
+  await request(base,model,{input:[{role:'user',content:[{type:'input_image',file_id:'file_native_fixture',detail:'high'}]}]});
+  assert.deepEqual(records.at(-1).body.input[0].content[0],{type:'input_image',image_url:'https://native-files.example.invalid/original-image.png',detail:'high'});
+ }
+ results.push('Native image file IDs resolve through the native read-only file service before API forwarding; original detail is preserved');
  const oldConnects=connects;await websocket(base,'gpt-6-sol',{authorization:'Bearer mock-gateway'});assert(connects>oldConnects);const wsRecord=records.find(x=>x.transport==='ws');assert.equal(wsRecord.event.model,'gpt-6-sol');assert.equal(wsRecord.headers.authorization,'Bearer mock-official');results.push('First WebSocket frame retained; official uses proxy; legacy provider uses local OAuth');
  const events=await websocket(base,'Other/test-model',{authorization:'Bearer mock-client-token','chatgpt-account-id':'client-account'});assert(events.some(e=>e.delta==='测试通过'));assert.equal(records.at(-1).headers['chatgpt-account-id'],undefined);results.push('Gateway WebSocket bridged to HTTP SSE, including Unicode and stream IDs');
  const foreignHistory=[{type:'reasoning',id:'msg_thinking',summary:[]},{type:'custom_tool_call',id:'msg_tool',call_id:'call_original',name:'probe',input:'hello'},{type:'custom_tool_call_output',id:'ctco_original',call_id:'call_original',output:'ok'},{type:'web_search_call',id:'msg_search',status:'completed',action:{type:'search',query:'fixture'}},{role:'user',content:'Continue'}];
@@ -98,7 +106,9 @@ try{
  gatewayOnline=false;const h=await fetch(base+'/readyz');assert.equal(h.status,503);assert.equal((await h.json()).gateway.ready,false);results.push('Readiness detects gateway failure');
  const fallback=JSON.parse(await run(['--prepare']));assert.equal(fallback.status,'degraded');results.push('Temporary outage reuses a recent cache with a degraded status');
  const stale=JSON.parse(fs.readFileSync(path.join(fixture,'data/cache/catalog-state.json'),'utf8'));stale.gatewayAt='2000-01-01T00:00:00Z';fs.writeFileSync(path.join(fixture,'data/cache/catalog-state.json'),JSON.stringify(stale));
- await assert.rejects(run(['--prepare']),/no current cache/);results.push('Stale gateway cache is rejected');
+ const officialOnly=JSON.parse(await run(['--prepare']));assert.equal(officialOnly.gatewayModels,0);assert.equal(officialOnly.officialModels,1);
+ const fallbackMenu=JSON.parse(fs.readFileSync(path.join(fixture,'data/cache/models-smr.json'),'utf8')).models;assert.deepEqual(fallbackMenu.map(m=>m.slug),['gpt-6-sol']);
+ results.push('Unavailable gateway with stale cache cannot block the official channel or advertise stale API models');
  gatewayOnline=true;fs.writeFileSync(path.join(fixture,'data/state/route-state.json'),JSON.stringify({mode:'gateway',gatewayTransport:'direct',officialProxy:''}));fs.unlinkSync(path.join(fixture,'home/auth.json'));fs.unlinkSync(path.join(fixture,'home/models_cache.json'));
  const apiOnly=JSON.parse(await run(['--prepare']));assert.equal(apiOnly.official.enabled,false);
  const onlyModels=JSON.parse(fs.readFileSync(path.join(fixture,'data/cache/models-smr.json'),'utf8')).models;assert.deepEqual(onlyModels.map(m=>m.slug),['GPT/gpt-6-sol','Other/test-model']);assert.equal(onlyModels[1].use_responses_lite,false);assert(onlyModels[1].supported_reasoning_levels.some(x=>x.effort==='ultra'));results.push('Fresh no-login catalog uses packaged templates including Ultra, contains only gateway models and disables non-GPT lite');

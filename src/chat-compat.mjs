@@ -16,7 +16,15 @@ function content(value) {
   if (!Array.isArray(value)) throw unsupported('Unsupported message content for Chat.');
   return value.map(part => {
     if (['input_text','output_text','text'].includes(part.type)) return { type: 'text', text: part.text };
-    if (part.type === 'input_image') return { type: 'image_url', image_url: { url: part.image_url, ...(part.detail ? { detail: part.detail } : {}) } };
+    if (part.type === 'input_image') {
+      if (!part.image_url) throw unsupported('A provider-private image file_id cannot be sent to this Chat endpoint without its original image data.');
+      return { type: 'image_url', image_url: { url: part.image_url, ...(part.detail ? { detail: part.detail } : {}) } };
+    }
+    if (part.type === 'input_audio' && part.audio_url) {
+      const data = /^data:audio\/(wav|x-wav|mpeg|mp3);base64,([\s\S]+)$/.exec(part.audio_url);
+      if (!data) throw unsupported('This Chat endpoint needs WAV/MP3 audio data; a native audio URL cannot be silently discarded.');
+      return { type: 'input_audio', input_audio: { data: data[2], format: ['wav','x-wav'].includes(data[1]) ? 'wav' : 'mp3' } };
+    }
     if (part.type === 'input_file') {
       if (part.file_url) throw unsupported('This Chat endpoint cannot represent a Responses file_url input.');
       const file = {}; for (const key of ['file_id','file_data','filename']) if (part[key] !== undefined) file[key] = part[key];

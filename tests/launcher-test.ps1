@@ -21,6 +21,7 @@ $baseline=Set-LauncherProvider $baseline 'chatgpt_api_launcher' 'http://127.0.0.
 $models=@{models=@(@{slug='gpt-6-sol'},@{slug='Example/model'})}
 $catalog=Get-LauncherDataPath $fixture 'models-smr.json'
 Write-Utf8File $catalog ($models|ConvertTo-Json -Depth 5)
+Write-Utf8File (Get-LauncherDataPath $fixture 'catalog-state.json') (@{official=@(@{slug='gpt-6-sol'})}|ConvertTo-Json -Depth 5)
 foreach($mode in @('mixed','gateway')) {
     $catalogModels=if($mode -eq 'mixed'){$models}else{@{models=@(@{slug='Example/model'})}}
     Write-Utf8File $catalog ($catalogModels|ConvertTo-Json -Depth 5)
@@ -38,6 +39,17 @@ foreach($mode in @('mixed','gateway')) {
     Restore-LauncherConfig $fixture $config
     Assert ([IO.File]::ReadAllText($config) -ceq $baseline.Replace('zh-CN','en-US')) 'User preferences were overwritten.'
 }
+$legacyBaseline=Set-LauncherProvider $baseline 'smr' 'http://old.invalid/v1' $fixture $false
+Write-Utf8File $config $legacyBaseline
+Apply-LauncherConfig $fixture $config 'mixed' 'http://127.0.0.1:8102/v1' 'https://example.invalid/v1' 'official'
+$officialApplied=[IO.File]::ReadAllText($config)
+Assert ((Get-RootString $officialApplied 'openai_base_url') -eq 'http://127.0.0.1:8102/v1') 'Official entry bypassed mixed-history compatibility.'
+Assert (-not (Get-RootString $officialApplied 'model_catalog_json')) 'Official entry should use the native rich model catalog.'
+Assert ($officialApplied.Contains('localeOverride = "zh-CN"')) 'Official entry changed language preference.'
+Assert ((Get-TableText $officialApplied 'model_providers.smr').Contains('http://127.0.0.1:8102/v1')) 'Legacy provider bypassed compatibility.'
+Assert ((Read-LauncherState $fixture).entryMode -eq 'official') 'Entry mode was not journaled.'
+Restore-LauncherConfig $fixture $config
+Assert (-not (Get-RootString ([IO.File]::ReadAllText($config)) 'openai_base_url')) 'Official entry did not restore its root override.'
 $before=@(Get-ChildItem -LiteralPath $fixture -Recurse -File).Count
 for($i=0;$i -lt 8;$i++) {
     Write-Utf8File $config $baseline

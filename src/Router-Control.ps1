@@ -22,13 +22,13 @@ function Add-RouterHelper([string]$packageDir, $process, [string]$marker) {
     $items+=@{pid=$p.ProcessId;exe=$p.ExecutablePath;createdAt=$p.CreationDate.ToUniversalTime().ToString('o');marker=$marker}
     Write-Utf8File $file (@{version=2;helpers=$items}|ConvertTo-Json -Depth 5)
 }
-function Ensure-LocalRouter([string]$packageDir) {
+function Ensure-LocalRouter([string]$packageDir, [string]$routeMode = '') {
     $settings=Get-EnvValues (Get-LauncherDataPath $packageDir '.env')
     $baseUrl=Normalize-BaseUrl ([string]$settings['BASE_URL'])
     $key=[string]$settings['API_KEY'];if(-not $key){throw 'API_KEY is missing.'}
     $port=if($settings['SHIM_PORT']){[int]$settings['SHIM_PORT']}else{8102}
     $url='http://127.0.0.1:'+ $port +'/healthz'
-    $mode=if(Get-SavedChatGPTLogin (Get-CodexHome)){'mixed'}else{'gateway'}
+    $mode=if($routeMode){$routeMode}elseif(Get-SavedChatGPTLogin (Get-CodexHome)){'mixed'}else{'gateway'}
     $sha=[Security.Cryptography.SHA256]::Create()
     try{$sourceId=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($baseUrl+"`n"+$key)))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
     $buildId=Get-RouterBuildId $packageDir
