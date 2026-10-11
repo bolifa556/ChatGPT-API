@@ -30,8 +30,8 @@ function child(args) {
   const p=spawn(process.execPath,[path.join(root,'src/shim.mjs'),...args],{env:{...process.env,CHATGPT_API_ROOT:fixture,CODEX_HOME:path.join(fixture,'home')},windowsHide:true,stdio:['ignore','ignore','pipe']});
   children.push(p);p.errorText='';p.stderr.on('data',b=>p.errorText+=b);return p;
 }
-async function wsClient(base) {
-  const ws=new WebSocket(base.replace('http:','ws:')+'/v1/responses',{headers:{authorization:'Bearer native-fixture'}});
+async function wsClient(base, token='native-fixture') {
+  const ws=new WebSocket(base.replace('http:','ws:')+'/v1/responses',{headers:{authorization:'Bearer '+token}});
   const queue=[];ws.on('message',b=>queue.push(JSON.parse(b)));ws.on('error',()=>{});await once(ws,'open');
   return {ws,queue,send:body=>ws.send(JSON.stringify(body)),async next(type){await until(()=>queue.some(e=>e.type===type));return queue.splice(queue.findIndex(e=>e.type===type),1)[0];}};
 }
@@ -67,11 +67,11 @@ try {
   }));
   const reserve=http.createServer();const base=await listen(reserve);await new Promise(resolve=>reserve.close(resolve));
   fs.writeFileSync(path.join(fixture,'data/.env'),['BASE_URL='+gatewayBase+'/v1','API_KEY=gateway-fixture','SHIM_PORT='+new URL(base).port,'OFFICIAL_BASE='+officialBase+'/backend-api/codex'].join('\n'));
-  fs.writeFileSync(path.join(fixture,'data/state/route-state.json'),JSON.stringify({mode:'mixed',gatewayTransport:'direct',officialProxy:''}));
+  fs.writeFileSync(path.join(fixture,'data/state/route-state.json'),JSON.stringify({mode:'mixed',gatewayTransport:'direct',officialProxy:'',clientVersion:'0.159.0'}));
   const prepare=child(['--prepare']);assert.equal((await once(prepare,'exit'))[0],0,prepare.errorText);
   const router=child([]);await until(async()=>{if(router.exitCode!==null)throw Error(router.errorText);try{return (await fetch(base+'/healthz')).ok;}catch{return false;}});
-  async function post(model,input,signal) {
-    const response=await fetch(base+'/v1/responses',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer native-fixture'},body:JSON.stringify({model,input}),signal:signal||AbortSignal.timeout(5000)});
+  async function post(model,input,signal,token='native-fixture') {
+    const response=await fetch(base+'/v1/responses',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+token},body:JSON.stringify({model,input}),signal:signal||AbortSignal.timeout(5000)});
     return {status:response.status,body:await response.json()};
   }
   const original=imageInput('file_native');
@@ -112,6 +112,37 @@ try {
   assert.equal(records.length,wsCount);
   c.send({type:'response.create',model:models[2],stream_id:'lane',input:original});await c.next('response.completed');c.ws.close();
   checks.push('WS reserves the stream during resolution, cancels the file request, and releases the stream for continuation');
+  // API-only mode must not start official file requests, even if an unrelated
+  // saved login remains in CODEX_HOME or an incoming client sends a legacy token.
+  // A file ID from the selected Responses API is valid protocol, not evidence
+  // of ChatGPT ownership; leave acceptance to that API.
+  router.kill();await once(router,'exit');
+  fs.writeFileSync(path.join(fixture,'data/state/route-state.json'),JSON.stringify({mode:'gateway',gatewayTransport:'direct',officialProxy:'',clientVersion:'0.159.0'}));
+  for(const savedLogin of [true,false]){
+    if(!savedLogin)fs.unlinkSync(path.join(fixture,'home/auth.json'));
+    const apiRouter=child([]);
+    await until(async()=>{if(apiRouter.exitCode!==null)throw Error(apiRouter.errorText);try{return (await fetch(base+'/healthz')).ok;}catch{return false;}});
+    const officialCount=downloads.length;
+    for(const model of models){
+      for(const token of ['gateway-fixture','native-fixture']){
+        const dispatched=records.length;
+        const result=await post(model,original,undefined,token);
+        const chat=model.startsWith('词元计划/');
+        if(chat){assert.equal(result.status,400);assert.equal(result.body.error.code,'unsupported_chat_format');assert.equal(records.length,dispatched);}
+        else{assert.equal(result.status,200);assert.deepEqual(records.at(-1).body.input,original);assert.equal(records.at(-1).target,'gateway');}
+        const apiClient=await wsClient(base,token);apiClient.send({type:'response.create',model,input:original});
+        if(chat){const error=await apiClient.next('error');assert.equal(error.status,400);assert.equal(error.error.code,'unsupported_chat_format');assert.equal(records.length,dispatched);}
+        else{await apiClient.next('response.completed');assert.deepEqual(records.at(-1).body.input,original);assert.equal(records.length,dispatched+2);assert.equal(records.at(-1).target,'gateway');}
+        apiClient.ws.close();assert.equal(downloads.length,officialCount);
+      }
+      const local=[{role:'user',content:[{type:'input_image',image_url:'data:image/png;base64,aW5lcnQ=',detail:'high'},{type:'input_image',image_url:link,detail:'low'}]}];
+      assert.equal((await post(model,local,undefined,'gateway-fixture')).status,200);
+      const encoded=JSON.stringify(records.at(-1).body);assert(encoded.includes('data:image/png;base64,aW5lcnQ='));assert(encoded.includes(link));
+      assert.equal(downloads.length,officialCount);assert.equal(JSON.stringify(original),before);
+    }
+    checks.push('API-only '+(savedLogin?'with saved login':'without login')+': Responses file IDs pass unchanged over HTTP/WS; Chat rejects unrepresentable image IDs; no official file request; local images and URLs still dispatch');
+    apiRouter.kill();await once(apiRouter,'exit');
+  }
   const report={at:new Date().toISOString(),passed:true,checks};
   fs.writeFileSync(path.join(root,'data/diagnostics/image-reference-result.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
 } finally {

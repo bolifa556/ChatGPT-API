@@ -28,14 +28,14 @@
 function Set-DesktopEntries([string]$packageDir, [string]$desktopDir) {
     [void][IO.Directory]::CreateDirectory($desktopDir)
     $shell = New-Object -ComObject WScript.Shell
-    foreach ($name in @('ChatGPT','chatgpt-api')) {
+    foreach ($name in @('ChatGPT','chatgpt-api','chatgpt-apionly')) {
         $shortcut = $shell.CreateShortcut((Join-Path $desktopDir ($name + '.lnk')))
         $shortcut.TargetPath = Join-Path $env:WINDIR 'System32\wscript.exe'
         $shortcut.Arguments = '//B //Nologo "' + (Join-Path $packageDir ($name + '.vbs')) + '"'
         $shortcut.WorkingDirectory = $packageDir
         $shortcut.IconLocation = (Join-Path $packageDir 'assets\ChatGPT.ico') + ',0'
         $shortcut.WindowStyle = 7
-        $shortcut.Description = if ($name -eq 'ChatGPT') { '启动系统当前注册的原版客户端' } else { '使用自定义 API 配置启动当前客户端' }
+        $shortcut.Description = if ($name -eq 'ChatGPT') { '官方模型与原生登录，保留混合历史兼容' } elseif ($name -eq 'chatgpt-apionly') { '仅使用自定义 API 网关模型，不切换官方登录' } else { '根据官方登录状态使用官方与网关模型' }
         $shortcut.Save()
     }
 }

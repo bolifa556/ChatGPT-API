@@ -121,10 +121,14 @@ function usage(value) {
 export class ChatEvents {
   constructor(model) { this.model = model; this.items = []; this.calls = new Map(); this.finished = false; }
   start(chunk) {
-    if (this.response) return [];
+    if (this.response) {
+      if (chunk.service_tier !== undefined) this.response.service_tier = copy(chunk.service_tier);
+      return [];
+    }
     if (!chunk.id) throw Object.assign(new Error('Chat response is missing its id.'), { status: 502, code: 'invalid_upstream_response' });
     this.response = { id: 'resp_gateway_' + id(chunk.id), object: 'response', model: this.model,
-      created_at: chunk.created ?? Math.floor(Date.now() / 1000), status: 'in_progress', output: [], error: null };
+      created_at: chunk.created ?? Math.floor(Date.now() / 1000), status: 'in_progress', output: [], error: null,
+      ...(chunk.service_tier !== undefined ? { service_tier: copy(chunk.service_tier) } : {}) };
     return [{ type: 'response.created', response: copy(this.response) }, { type: 'response.in_progress', response: copy(this.response) }];
   }
   text(kind, delta) {

@@ -8,15 +8,17 @@ import { startLive, delay, classify, saveReport } from './live-support.mjs';
 
 const live = await startLive('native-client-live');
 const cli = process.env.CODEX_CLI_PATH || path.join(process.env.LOCALAPPDATA, 'OpenAI/Codex/bin/faa963e871dd422c/codex.exe');
+const provider = process.env.PROTOCOL_NATIVE_PROVIDER || 'protocol_probe';
+const nativeAccount = process.env.PROTOCOL_NATIVE_OPENAI_AUTH === 'true';
 const quote = value => "'" + value.replaceAll("'", "''") + "'";
 const clientConfig = [
-  'model_provider = "protocol_probe"', 'model_reasoning_effort = "low"', 'approval_policy = "never"', 'sandbox_mode = "read-only"',
+  'model_provider = ' + quote(provider), 'model_reasoning_effort = "low"', 'approval_policy = "never"', 'sandbox_mode = "read-only"',
   'model_catalog_json = ' + quote(path.join(live.fixture, 'data/cache/models-smr.json')),
-  '[model_providers.protocol_probe]', 'name = "Isolated protocol verification"', 'base_url = ' + quote(live.base + '/v1'),
-  'wire_api = "responses"', 'env_key = "PROTOCOL_TEST_API_KEY"', 'requires_openai_auth = false', 'supports_websockets = false',
+  '[model_providers.' + provider + ']', 'name = "Isolated protocol verification"', 'base_url = ' + quote(live.base + '/v1'),
+  'wire_api = "responses"', ...(nativeAccount ? ['requires_openai_auth = true', 'supports_websockets = true'] : ['env_key = "PROTOCOL_TEST_API_KEY"', 'requires_openai_auth = false', 'supports_websockets = false']),
   'request_max_retries = 0', 'stream_max_retries = 0', '[analytics]', 'enabled = false', '[history]', 'persistence = "none"', ''
 ].join('\n');
-const report = { at: new Date().toISOString(), nativeVersion: '0.158.0-alpha.2.1', ephemeral: true, models: [] };
+const report = { at: new Date().toISOString(), nativeVersion: '0.158.0-alpha.2.1', provider, nativeAccount, ephemeral: true, models: [] };
 const selected = process.argv.slice(2);
 const reportName = process.env.PROTOCOL_REPORT_NAME || (selected.length ? 'protocol-native-client-selected' : 'protocol-native-client');
 const homes = [];
@@ -26,6 +28,9 @@ try {
     const home = path.join(live.fixture, 'home', tag), cwd = path.join(live.fixture, 'workspace', tag);
     for (const directory of [home, cwd]) fs.mkdirSync(directory, { recursive: true });
     homes.push(home); fs.writeFileSync(path.join(home, 'config.toml'), clientConfig);
+    // Native account mode can make background OpenAI requests independently of
+    // the router. Never put an external API key in its OAuth token slot.
+    if (nativeAccount) fs.writeFileSync(path.join(home, 'auth.json'), JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'inert-isolated-native-account', account_id: 'isolated-protocol-account' } }));
     console.log(JSON.stringify({ model, phase: 'native_client_begin' }));
     const row = { model, toolCalls: [] }; report.models.push(row);
     const marker = 'NATIVE_' + crypto.randomBytes(6).toString('hex');
@@ -78,7 +83,7 @@ try {
     }
     try {
       await rpc('initialize', { clientInfo: { name: 'protocol-verification', version: '1' }, capabilities: { experimentalApi: true } }); send({ method: 'initialized', params: {} });
-      const started = await rpc('thread/start', { model, modelProvider: 'protocol_probe', cwd, ephemeral: true, approvalPolicy: 'never', sandbox: 'read-only',
+      const started = await rpc('thread/start', { model, modelProvider: provider, cwd, ephemeral: true, approvalPolicy: 'never', sandbox: 'read-only',
         dynamicTools: [{ type: 'namespace', name: 'audit', description: 'Local read-only protocol verification.', tools: [{ type: 'function', name: 'read_fixture',
           description: 'Read the test fixture. Pass n=19 and enabled=true.', inputSchema: { type: 'object', properties: { n: { type: 'integer' }, enabled: { type: 'boolean' } }, required: ['n','enabled'], additionalProperties: false } }] }] });
       threadId = started.thread.id;
@@ -91,6 +96,12 @@ try {
         saveReport('protocol-native-tool-diagnostics', { model, upstream, notifications });
       }
       console.log(JSON.stringify({ model, phase: 'native_tool', ...row.native_tool, toolCalls: row.toolCalls.length }));
+      if (!first.includes(marker)) {
+        // Keep compression verification independent of a model refusing or
+        // failing the earlier tool check. This input exists only in the fixture.
+        await nativeTurn('For this isolated compaction check, remember this exact marker: ' + marker + '. Reply only with the marker and do not call tools.');
+        row.compactionMarkerSeededByFixture = true;
+      }
       const offset = notifications.length, before = live.records.length;
       await rpc('thread/compact/start', { threadId });
       const compacted = await waitAfter(offset, value => value.method === 'turn/completed' && value.params?.threadId === threadId);

@@ -1,5 +1,9 @@
 # User data: credentials, client configuration snapshots, history, logs and cache.
 /data/
+/dist/
+/release/*
+!/release/README.md
+!/release/*.sha256
 /.env
 /.env.*
 !/.env.example

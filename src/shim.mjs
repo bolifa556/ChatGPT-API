@@ -10,9 +10,10 @@ import { Agent, ProxyAgent, request } from 'undici';
 import WebSocket, { WebSocketServer } from 'ws';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { normalizeGptHistory, normalizeOfficialHistory, isGptModel, ResponseOutput } from './history-compat.mjs';
-import { NonGptAdapter, NonGptEvents } from './non-gpt-compat.mjs';
+import { NonGptAdapter, NonGptEvents, validateNonGptCompaction } from './non-gpt-compat.mjs';
 import { usesChat, chatRequest, chatResponse, ChatEvents } from './chat-compat.mjs';
 import { decodedStream, ssePackets, encodeSse } from './sse.mjs';
+import { forwardImages, imageOnlyModel, imageCapabilities } from './image-compat.mjs';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const root = process.env.CHATGPT_API_ROOT || path.dirname(dir);
@@ -34,7 +35,9 @@ function readEnv() {
 }
 const env = readEnv();
 const runtime = readJson(path.join(dataDir, 'state', 'route-state.json'), {});
-const mode = runtime.mode || 'mixed';
+const entryMode = runtime.entryMode || 'api';
+const mode = entryMode === 'apionly' ? 'gateway' : runtime.mode || 'mixed';
+const gatewayEnabled = entryMode !== 'official';
 const gatewayBase = (process.env.CHATGPT_GATEWAY_BASE || env.BASE_URL || '').replace(/\/+$/, '');
 const officialBase = (env.OFFICIAL_BASE || 'https://chatgpt.com/backend-api/codex').replace(/\/+$/, '');
 if (!/^https?:\/\//.test(gatewayBase) || !env.API_KEY) throw new Error('BASE_URL or API_KEY is missing.');
@@ -46,14 +49,15 @@ const gatewayDispatcher = new Agent(transport === 'ssh' ? { connect: { hostname:
 const officialDispatcher = officialProxy ? new ProxyAgent({ uri: officialProxy, connect: { timeout: 10000 } }) : new Agent({ connect: { timeout: 10000 } });
 const sourceId = crypto.createHash('sha256').update(gatewayBase + '\n' + env.API_KEY).digest('hex');
 const buildHash = crypto.createHash('sha256');
-for (const name of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs']) buildHash.update(fs.readFileSync(path.join(dir, name)));
+for (const name of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs']) buildHash.update(fs.readFileSync(path.join(dir, name)));
 const buildId = buildHash.digest('hex');
 const cachePath = path.join(cacheDir, 'catalog-state.json');
 const logFile = path.join(dataDir, 'logs', 'shim.log');
 const CACHE_MAX_AGE = 24 * 60 * 60 * 1000;
-let catalog = { official: [], gatewayIds: [], gatewayAt: null, officialAt: null, sourceId };
+let catalog = { official: [], gatewayIds: [], gatewayModels: [], gatewayAt: null, officialAt: null, sourceId };
 let status = { gateway: { ready: false }, official: { ready: false } };
 let refreshInFlight;
+let observedClientVersion, configuredVersionAtObservation;
 const controllers = new Set();
 
 function log(text) {
@@ -71,10 +75,17 @@ function auth() {
   return { token: saved.tokens?.access_token || '', accountId: saved.tokens?.account_id || '' };
 }
 function accountIdentity() { return crypto.createHash('sha256').update(auth().accountId || '').digest('hex'); }
+const validClientVersion = version => typeof version === 'string' && /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version);
+function currentClientVersion() {
+  const configured = readJson(path.join(dataDir, 'state', 'route-state.json'), runtime).clientVersion;
+  if (configured === configuredVersionAtObservation && validClientVersion(observedClientVersion)) return observedClientVersion;
+  return validClientVersion(configured) ? configured : null;
+}
 function loadCatalog() {
   const saved = readJson(cachePath, {});
   if (saved.sourceId === sourceId && Date.now() - Date.parse(saved.gatewayAt) < CACHE_MAX_AGE) {
     catalog.gatewayIds = Array.isArray(saved.gatewayIds) ? saved.gatewayIds : [];
+    catalog.gatewayModels = Array.isArray(saved.gatewayModels) ? saved.gatewayModels : catalog.gatewayIds.map(id => ({ id }));
     catalog.gatewayAt = saved.gatewayAt;
   }
   const native = readJson(path.join(codexHome, 'models_cache.json'), {});
@@ -90,6 +101,13 @@ function loadCatalog() {
 function saveCatalog() {
   atomic(cachePath, { ...catalog, sourceId, accountIdentity: accountIdentity(), checkedAt: new Date().toISOString(), status });
 }
+function acceptOfficialCatalog(data, clientVersion) {
+  if (!Array.isArray(data.models) || !data.models.length) throw new Error('Official model response has no catalog');
+  catalog.official = data.models;
+  catalog.officialAt = new Date().toISOString();
+  catalog.officialClientVersion = clientVersion;
+  status.official = { ready: true, checkedAt: catalog.officialAt, models: data.models.length, clientVersion };
+}
 async function fetchJson(url, headers, dispatcher, timeout = 12000, signal) {
   const boundedSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout);
   const r = await request(url, { headers, dispatcher, signal: boundedSignal, headersTimeout: timeout, bodyTimeout: timeout });
@@ -102,11 +120,15 @@ async function refreshCatalog() {
   refreshInFlight = (async () => {
     await Promise.all([
       (async () => {
+        if (!gatewayEnabled) { status.gateway = { ready: false, enabled: false }; return; }
         try {
           const data = await fetchJson(gatewayBase + '/models', { authorization: 'Bearer ' + env.API_KEY }, gatewayDispatcher);
           const ids = [...new Set((data.data || []).map(m => m.id).filter(id => typeof id === 'string' && id))];
           if (!ids.length) throw new Error('Gateway returned no models');
           catalog.gatewayIds = ids; catalog.gatewayAt = new Date().toISOString();
+          catalog.gatewayModels = (data.data || []).filter(m => ids.includes(m.id)).map(m => Object.fromEntries(
+            ['id','type','capabilities','supported_endpoints','output_modalities','architecture',
+              'service_tiers','additional_speed_tiers','default_service_tier'].filter(key => m[key] !== undefined).map(key => [key,m[key]])));
           status.gateway = { ready: true, checkedAt: catalog.gatewayAt, models: ids.length };
         } catch (e) { status.gateway = { ready: false, error: e.message, checkedAt: new Date().toISOString(), cachedAt: catalog.gatewayAt }; }
       })(),
@@ -115,17 +137,16 @@ async function refreshCatalog() {
         const a = auth();
         if (!a.token) { status.official = { ready: false, error: 'No saved ChatGPT sign-in' }; return; }
         try {
-          const native = readJson(path.join(codexHome, 'models_cache.json'), {});
-          const version = native.client_version || '0.158.0';
+          const version = currentClientVersion();
+          if (!version) throw new Error('Native client version is unavailable; reopen the launcher after native client initialization.');
           const headers = { authorization: 'Bearer ' + a.token, ...(a.accountId ? { 'chatgpt-account-id': a.accountId } : {}) };
           const data = await fetchJson(officialBase + '/models?client_version=' + encodeURIComponent(version), headers, officialDispatcher);
-          if (!Array.isArray(data.models) || !data.models.length) throw new Error('Official model response has no catalog');
-          catalog.official = data.models; catalog.officialAt = new Date().toISOString();
-          status.official = { ready: true, checkedAt: catalog.officialAt, models: data.models.length };
+          acceptOfficialCatalog(data, version);
         } catch (e) { status.official = { ready: false, error: e.message, cached: catalog.official.length > 0 }; }
       })(),
     ]);
     saveCatalog();
+    writeDesktopCatalog();
     log('catalog refresh gateway=' + status.gateway.ready + ' official=' + status.official.ready);
   })().finally(() => { refreshInFlight = null; });
   return refreshInFlight;
@@ -145,25 +166,34 @@ function writeDesktopCatalog() {
   const officialIds = new Set(catalog.official.map(m => m.slug));
   const compareNames = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' }).compare;
   const gatewayPriority = mode === 'mixed' ? Math.max(0, ...catalog.official.map(m => Number(m.priority) || 0)) + 1 : 1;
-  const gateway = catalog.gatewayIds.filter(id => mode === 'gateway' || !officialIds.has(id)).sort(compareNames).map((id, index) => {
+  const imageOnlyIds = new Set(catalog.gatewayModels.filter(imageOnlyModel).map(m => m.id));
+  const gateway = catalog.gatewayIds.filter(id => !imageOnlyIds.has(id) && (mode === 'gateway' || !officialIds.has(id))).sort(compareNames).map((id, index) => {
     const leaf = id.split('/').at(-1);
     const gpt = /^gpt\//i.test(id) || /^gpt(?:-|\d)/i.test(leaf);
     const native = gpt ? catalog.official.find(m => m.slug === leaf) : null;
     const model = structuredClone(native || template);
     Object.assign(model, { slug: id, display_name: id, description: 'Gateway model', priority: gatewayPriority + index,
       visibility: 'list', supported_in_api: true, supported_reasoning_levels: levels.supported_reasoning_levels,
-      default_reasoning_level: levels.default_reasoning_level, comp_hash: null, model_messages: null });
-    if (!gpt) Object.assign(model, { use_responses_lite: false, tool_mode: 'code_mode_only', shell_type: 'unified_exec', apply_patch_tool_type: 'freeform',
+      default_reasoning_level: levels.default_reasoning_level, comp_hash: null });
+    // An official model's speed options do not describe the gateway's service.
+    // Keep only speed metadata explicitly advertised by that upstream.
+    const upstream = catalog.gatewayModels.find(m => m.id === id);
+    model.default_service_tier = upstream?.default_service_tier ?? null;
+    model.service_tiers = structuredClone(upstream?.service_tiers ?? []);
+    model.additional_speed_tiers = structuredClone(upstream?.additional_speed_tiers ?? []);
+    // Native GPT catalogs can carry instructions in model_messages instead of
+    // base_instructions. Preserve that entire object, including its variables.
+    if (!gpt) Object.assign(model, { model_messages: null, use_responses_lite: false, tool_mode: 'code_mode_only', shell_type: 'unified_exec', apply_patch_tool_type: 'freeform',
       base_instructions: 'You are a helpful coding assistant. Follow application and user instructions. Follow each tool schema exactly. Source-code and patch inputs must contain raw source text, not an extra JSON-encoded wrapper. Keep numeric arguments as numbers. In JavaScript REPL tools, use documented output helpers and do not use a top-level return. Treat tool errors as failures and correct the call before claiming success.' });
     return model;
   });
   atomic(path.join(cacheDir, 'models-gateway.json'), { models: gateway });
-  atomic(path.join(cacheDir, 'models-smr.json'), { models: [...(mode === 'mixed' ? catalog.official : []), ...gateway] });
+  atomic(path.join(cacheDir, 'models-smr.json'), { models: [...(mode === 'mixed' ? catalog.official : []), ...(gatewayEnabled ? gateway : [])] });
 }
 function route(model) {
   if (!model) throw Object.assign(new Error('The request does not identify a model.'), { status: 400 });
   if (mode === 'mixed' && catalog.official.some(m => m.slug === model)) return 'official';
-  if (catalog.gatewayIds.includes(model)) return 'gateway';
+  if (gatewayEnabled && catalog.gatewayIds.includes(model)) return 'gateway';
   throw Object.assign(new Error('Unknown model: ' + model + '. Refresh the model list; this request was not forwarded.'), { status: 400 });
 }
 function historyForTarget(payload, which) {
@@ -183,9 +213,14 @@ function prepareRequest(payload, which, pathname = '/v1/responses') {
   return historyForTarget(payload, which);
 }
 async function gatewayImageReferences(payload, incoming, signal) {
+  if (!isGptModel(payload.model)) validateNonGptCompaction(payload);
   const items = Array.isArray(payload.input) ? payload.input : [];
   const needsUrl = part => part?.type === 'input_image' && part.file_id && !part.image_url;
   if (!items.some(item => [...(Array.isArray(item.content) ? item.content : []), ...(Array.isArray(item.output) ? item.output : [])].some(needsUrl))) return payload;
+  // API-only file IDs belong to that API. Responses can carry them unchanged;
+  // a Chat route without image data reports its existing format error instead.
+  // Never use a saved ChatGPT login to resolve them in this mode.
+  if (mode !== 'mixed') return payload;
   const converted = structuredClone(payload), links = new Map();
   // Match the installed client's read-only file-download-link endpoint. A file
   // ID owned by ChatGPT is not a file ID at another provider. Resolve only the
@@ -265,19 +300,75 @@ async function* convertedEvents(stream, adapted) {
   if (events) events.finish();
   else if (!terminal) throw Object.assign(new Error('Upstream stream ended before a terminal response event.'), { status: 502, code: 'incomplete_upstream_response' });
 }
-function health() { return { status: status.gateway.ready ? 'ok' : 'degraded', service: 'chatgpt-api-router', version: 2, compatibilityVersion: 2, buildId, mode, sourceId, gatewayBase, ...status, officialModels: catalog.official.length, gatewayModels: catalog.gatewayIds.length }; }
+function health() { return { status: (gatewayEnabled ? status.gateway.ready : status.official.ready) ? 'ok' : 'degraded', service: 'chatgpt-api-router', version: 2, compatibilityVersion: 2, buildId, mode, entryMode, sourceId, gatewayBase, clientVersion: currentClientVersion(), ...status, officialModels: mode === 'mixed' ? catalog.official.length : 0, gatewayModels: gatewayEnabled ? catalog.gatewayIds.length : 0,
+  gatewayImageModels: gatewayEnabled ? catalog.gatewayModels.filter(m => imageCapabilities(m).known || [env.IMAGE_MODEL,env.IMAGE_EDIT_MODEL].includes(m.id)).map(m => m.id) : [] }; }
+async function forwardOfficialCatalog(req, res, url) {
+  // A native model-list request carries its own version, account, and query.
+  // Forward its response, including metadata/ETag/304, rather than substituting
+  // the launcher's cached catalog. Gateway models remain in the API entry file.
+  const controller = new AbortController(); controllers.add(controller);
+  res.on('close', () => { if (!res.writableEnded) controller.abort(); });
+  try {
+    const upstream = await request(targetUrl('official', url), {
+      method: 'GET', headers: headersFor(req.headers, 'official'), dispatcher: officialDispatcher,
+      signal: AbortSignal.any([controller.signal, AbortSignal.timeout(12000)]), headersTimeout: 12000, bodyTimeout: 12000,
+    });
+    const body = Buffer.from(await upstream.body.arrayBuffer());
+    const clientVersion = url.searchParams.get('client_version');
+    if (upstream.statusCode === 200) {
+      try {
+        // An in-flight periodic refresh must finish before this newer native
+        // result becomes the canonical routing/menu catalog.
+        if (refreshInFlight) await refreshInFlight.catch(e => log('catalog refresh ' + e.message));
+        const data = JSON.parse(decodeBody(body, upstream.headers['content-encoding'] || '').toString('utf8'));
+        acceptOfficialCatalog(data, clientVersion);
+        observedClientVersion = clientVersion;
+        configuredVersionAtObservation = readJson(path.join(dataDir, 'state', 'route-state.json'), runtime).clientVersion;
+        saveCatalog(); writeDesktopCatalog();
+      } catch (e) {
+        // Updating the launcher's files must not replace the native response.
+        log('native catalog cache update ' + e.message);
+      }
+    }
+    const outgoing = { ...upstream.headers };
+    for (const name of ['connection','transfer-encoding','keep-alive']) delete outgoing[name];
+    res.writeHead(upstream.statusCode, outgoing); res.end(body);
+  } finally { controllers.delete(controller); }
+}
 async function handleHttp(req, res) {
   const url = new URL(req.url, 'http://localhost');
   if (['/healthz','/v1/healthz','/readyz'].includes(url.pathname)) {
     if (url.pathname === '/readyz') await refreshCatalog();
-    return json(res, url.pathname === '/readyz' && !status.gateway.ready ? 503 : 200, health());
+    return json(res, url.pathname === '/readyz' && !(gatewayEnabled ? status.gateway.ready : status.official.ready) ? 503 : 200, health());
+  }
+  if (req.method === 'GET' && ['/models','/v1/models'].includes(url.pathname) && mode === 'mixed' && url.searchParams.has('client_version')) {
+    if (!validClientVersion(url.searchParams.get('client_version'))) throw Object.assign(new Error('Invalid native client version.'), { status: 400 });
+    return forwardOfficialCatalog(req, res, url);
   }
   if (req.method === 'GET' && ['/models','/v1/models'].includes(url.pathname)) return json(res, 200, {
     // The native official provider requests its rich catalog at this same URL.
     // Preserve that schema without exposing API models in the official entry.
     ...(mode === 'mixed' ? { models: catalog.official } : {}),
-    object: 'list', data: [...(mode === 'mixed' ? catalog.official.map(m => m.slug) : []), ...catalog.gatewayIds].filter((m,i,a) => a.indexOf(m) === i).map(id => ({ id, object: 'model' })) });
+    object: 'list', data: [...(mode === 'mixed' ? catalog.official.map(m => m.slug) : []), ...(gatewayEnabled ? catalog.gatewayIds : [])].filter((m,i,a) => a.indexOf(m) === i).map(id => ({ id, object: 'model' })) });
   let body = await readBody(req);
+  const imageRoute = /^\/(?:v1\/)?images\/(generations|edits)$/.exec(url.pathname);
+  if (imageRoute) {
+    if (req.method !== 'POST') throw Object.assign(new Error('Images endpoints require POST.'), { status: 405, code: 'invalid_image_request' });
+    const controller = new AbortController(); controllers.add(controller);
+    res.on('close', () => { if (!res.writableEnded) controller.abort(); });
+    try {
+      return await forwardImages({ req,res,url,body,operation: imageRoute[1],env,
+        hasLogin: mode === 'mixed' && !!auth().token, allowGateway: gatewayEnabled,
+        getModels: async () => catalog.gatewayModels,
+        headersFor,targetUrl,officialDispatcher,gatewayDispatcher,imageDispatcher: officialDispatcher,decodeBody,signal: controller.signal,log,
+        resolveFile: async id => {
+          if (mode !== 'mixed' || !auth().token) throw Object.assign(new Error('A native file ID requires its owning ChatGPT sign-in; use a URL or local reference image.'), { status: 400, code: 'image_reference_unavailable' });
+          const result = await fetchJson(officialBase.replace(/\/codex$/, '') + '/files/download/' + encodeURIComponent(id), headersFor(req.headers, 'official'), officialDispatcher, 12000, controller.signal);
+          if (typeof result.download_url !== 'string' || !/^https?:\/\//.test(result.download_url)) throw Object.assign(new Error('The native file service did not provide an image URL.'), { status: 502, code: 'image_reference_unavailable' });
+          return result.download_url;
+        } });
+    } finally { controllers.delete(controller); }
+  }
   const parsed = JSON.parse(body.toString('utf8'));
   const which = route(parsed.model);
   const controller = new AbortController(); controllers.add(controller);
@@ -328,8 +419,9 @@ if (process.argv.includes('--prepare')) {
   try {
     await refreshCatalog();
     const gatewayAvailable = catalog.gatewayIds.length && Date.now() - Date.parse(catalog.gatewayAt) < CACHE_MAX_AGE;
-    if (!gatewayAvailable) {
+    if (gatewayEnabled && !gatewayAvailable) {
       catalog.gatewayIds = [];
+      catalog.gatewayModels = [];
       if (mode !== 'mixed' || !catalog.official.length) throw new Error('Gateway unavailable and no current cache for this URL/key. ' + (status.gateway.error || ''));
       saveCatalog();
     }
@@ -533,7 +625,6 @@ if (process.argv.includes('--prepare')) {
   const host = env.SHIM_HOST || '127.0.0.1';
   if (!['127.0.0.1','::1'].includes(host)) throw new Error('The local router must bind to loopback.');
   server.listen(Number(process.env.CHATGPT_SHIM_PORT || env.SHIM_PORT || 8102), host, () => log('router v2 listening mode=' + mode + ' transport=' + transport));
-  const interval = setInterval(() => refreshCatalog().catch(e => log(e.message)), 60000); interval.unref();
-  function shutdown() { clearInterval(interval); for (const c of controllers) c.abort(); for (const ws of wss.clients) ws.terminate(); server.close(); gatewayDispatcher.destroy(); officialDispatcher.destroy(); setTimeout(() => process.exit(), 500).unref(); }
+  function shutdown() { for (const c of controllers) c.abort(); for (const ws of wss.clients) ws.terminate(); server.close(); gatewayDispatcher.destroy(); officialDispatcher.destroy(); setTimeout(() => process.exit(), 500).unref(); }
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
 }

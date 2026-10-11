@@ -1,6 +1,6 @@
 # 原生客户端消息转换协议
 
-适用对象：本机 OpenAI.Codex 桌面客户端、官方模型与 14 个已配置的网关模型。2026-09-28 核对。
+适用对象：本机 OpenAI.Codex 桌面客户端、官方模型与已配置网关模型。下表记录最初 14 个模型；本轮目录新增的 `GPT/gemini-3.8-flash-high` 走现有 Responses 透传路径，但真实服务要求账号验证，未完成真实验证。2026-09-28 核对。
 
 ## 目标与边界
 
@@ -41,7 +41,7 @@
 | instructions、system、developer、user、assistant | Responses 原样保留；Chat 把 instructions 放入 system。词元保留 developer；阿里云 Chat 要求一个开头的 system，按原顺序合并现有 system/developer 文本，仅以空行分隔 |
 | 客户端 model_switch 更新 | 保留原文和相应角色；经过 Chat 时按上述角色规则转换 |
 | input_text、output_text | Chat 转为 text，字符串内容不改；原生 Responses 保持原格式 |
-| input_image | 保留 URL/数据和 detail；Chat 改为 image_url 外层。只有 ChatGPT file_id 时，API 路径先从原生 `/backend-api/files/download/{file_id}` 获取原下载 URL，失败明确报错；官方路径保持 file_id。缓存和保存的历史不替换为临时 URL |
+| input_image | 保留 URL/数据和 detail；Chat 改为 image_url 外层。已登录混合模式的 ChatGPT file_id 从原生 `/backend-api/files/download/{file_id}` 获取原下载 URL，失败明确报错；官方路径保持 file_id。纯 API 模式不访问官方文件服务：Responses 原样转发该 API 的 file_id，是否有效由上游判断；Chat 无法表示只有 ID 的图片时明确报错。缓存和保存的历史不替换为临时 URL |
 | input_file | Chat 映射 file_id/file_data/filename；无法表示的 file_url 明确报错，不伪造文件内容 |
 | input_audio | 原生 data:audio/wav、x-wav、mpeg、mp3 内联数据转为 Chat input_audio.data/format；已是 Chat 格式则保留。不能表示的私有引用明确报错，不静默丢弃，不补做转写 |
 | 已有 image_url/file/refusal | 对应字段保持原内容；文件内容不做额外解析或生成 |
@@ -56,6 +56,7 @@
 | text.format | Chat 映射为 response_format；json_schema 的 name/description/schema/strict 原样保留；不添加“请输出 JSON”提示词 |
 | reasoning.effort | 按原值传递；Chat 使用 reasoning_effort。不自动降档，不新增重试档位 |
 | max_output_tokens | Chat 映射 max_tokens |
+| service_tier | 请求原值传递，包括 Chat 路径；不因菜单未声明速度档位而删除用户已有设置 |
 | temperature、top_p、parallel_tool_calls 等对应选项 | 按目标接口的同义字段传递；非 GPT 路线原有 reasoning.context 清理保留 |
 | previous_response_id | 只交给拥有该状态的服务；跨服务续聊用已有完整输入替换外部 response ID，不插入“继续”消息 |
 
@@ -99,14 +100,21 @@
 | 上游错误、没有结束事件 | 明确返回 error/failed；不补一条模型回答，不悄悄重试已生成的内容 |
 | prompt/completion/total tokens | 映射为 input/output/total tokens；有实际缓存/思考计数时映射明细，缺失值不编造 0 |
 | Chat refusal | 还原 refusal 内容和事件，不改成普通回答 |
+| service_tier | 保留上游实际返回档位；最后一块才提供也会进入最终响应。缺失不编造，显式 null 保留，不用请求的 priority 覆盖上游 default |
 
 HTTP JSON 与 HTTP SSE/WebSocket 使用相同的项目转换规则。SSE 保留 Unicode、跨字节分片和 CRLF 语义。最终 output 项目按完整对象处理，不把不同项目的字段拼成上游从未生成过的消息。
+
+Fast 的目录声明与请求转发分别处理。官方目录保持原生元数据；网关仅采用自身 `/models` 的 `service_tiers`、`additional_speed_tiers`、`default_service_tier`，不继承官方模板的倍速说明。服务是否实际支持优先档位由上游决定。浏览器工具按同一工具协议转换，其运行时的官方身份等网络请求独立于模型通道，详见 [3.0.6 验证记录](browser-fast-network-fix-2026-10-10.md)。
 
 ## 压缩
 
 GLM、Qwen、DeepSeek、vLLM 可以使用客户端已有的文本压缩流程：客户端自己发压缩请求，模型返回摘要，客户端更新上下文。适配层按普通消息协议转换该请求，没有自建压缩任务、独立摘要提示词或第二份聊天记录。实际验证使用原生 thread/compact/start，并检查压缩事件与后续续聊。
 
-官方 /responses/compact 返回的不可读加密 compaction 状态是另一种情况。当前不能无损转换为非 GPT 可读文本，遇到这种跨厂商历史明确报错；不能据此得出“GLM 不能压缩”，也不能悄悄删除压缩块声称已经兼容。
+安装版本通过 provider 身份选择压缩流程。启动时官方模型使用 `openai`；网关模型使用保留原生认证的 `chatgpt_api_mixed`，无登录时使用 `chatgpt_api_launcher`，后两者均采用原生文本压缩。启动器在客户端退出后通过原生 `thread/resume` 双向更正对话提供方：网关模型离开错误的 `openai` 绑定，选回官方模型的对话恢复 `openai`。不复制对话、不改原始消息。已加载的对话不能靠更改默认配置立即修复。
+
+远程压缩 v2 也会在普通 `/responses` 中发送 `compaction_trigger`，并非只使用 `/responses/compact`。非 GPT 适配层在附件下载和上游调用之前拒绝这种不支持的控制项目，返回 `incompatible_compaction_provider`，提示退出重开修复绑定。官方通道保持原样；不把普通回复伪装成 compaction 项目。
+
+官方返回的不可读加密 compaction 状态不能无损转换为非 GPT 可读文本，遇到这种跨厂商历史明确报错，不删除压缩块。在同一对话切换官方与网关模型后，目前需要退出重开，才能保证提供方及压缩方式同步切换。原生 `thread/unsubscribe` 后 `thread/resume` 可在同一控制连接完成切换，但补测发现这会丢失代码执行器状态、重建测试 MCP 并使后台终端会话不再列出，因此不作为静默热切换方案；桌面模型菜单的自动联动尚未接入。HTTP 适配层不能代替客户端选择压缩协议。详见 [修复记录](compaction-incident-2026-09-28.md) 和 [自动切换方案](automatic-provider-switch-design.md)。
 
 ## 验证与参考
 

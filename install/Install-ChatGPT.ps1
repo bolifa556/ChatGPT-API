@@ -12,7 +12,7 @@ Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = 'ChatGPT 双入口安装'
+$form.Text = 'ChatGPT 三入口安装'
 $form.StartPosition = 'CenterScreen'
 $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox = $false
@@ -123,7 +123,7 @@ $installButton.Add_Click({
 
         $statusLabel.Text = '安装完成'
         [void][System.Windows.Forms.MessageBox]::Show(
-            '已在桌面生成 ChatGPT 和 chatgpt-api 两个快捷方式。' +
+            '已在桌面生成 ChatGPT、chatgpt-api 和 chatgpt-apionly 三个快捷方式。' +
             "`r`n切换入口前，请先完全退出 ChatGPT。" + $catalogNotice,
             '安装完成', 'OK', 'Information')
         $form.Close()

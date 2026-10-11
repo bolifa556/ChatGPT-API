@@ -99,7 +99,7 @@ try {
   await new Promise(resolve => reserved.close(resolve));
   const base = 'http://127.0.0.1:' + routerPort;
   fs.writeFileSync(path.join(fixture, 'data/.env'), `BASE_URL=http://127.0.0.1:${gatewayPort}/v1\nAPI_KEY=mock-gateway\nSHIM_PORT=${routerPort}\nOFFICIAL_BASE=http://127.0.0.1:${officialPort}/backend-api/codex\n`);
-  fs.writeFileSync(path.join(fixture, 'data/state/route-state.json'), JSON.stringify({ mode: 'mixed', officialProxy: '' }));
+  fs.writeFileSync(path.join(fixture, 'data/state/route-state.json'), JSON.stringify({ mode: 'mixed', officialProxy: '', clientVersion: '0.159.0' }));
   const options = { env: { ...process.env, CODEX_HOME: path.join(fixture, 'home'), CHATGPT_API_ROOT: fixture }, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] };
   const prepare = spawn(process.execPath, [path.join(root, 'src/shim.mjs'), '--prepare'], options); children.push(prepare);
   assert.equal((await once(prepare, 'exit'))[0], 0);

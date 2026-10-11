@@ -62,7 +62,7 @@ try{
  const proxy=http.createServer();proxy.on('connect',(req,client,head)=>{assert.equal(req.url,'127.0.0.1:'+officialPort);connects++;const upstream=net.connect(officialPort,'127.0.0.1',()=>{client.write('HTTP/1.1 200 Connection Established\r\n\r\n');if(head.length)upstream.write(head);client.pipe(upstream);upstream.pipe(client)});sockets.add(upstream);upstream.on('close',()=>sockets.delete(upstream));upstream.on('error',()=>client.destroy());client.on('error',()=>upstream.destroy())});
  const proxyPort=await listen(proxy);const reserve=http.createServer(),port=await listen(reserve);await new Promise(r=>reserve.close(r));const base='http://127.0.0.1:'+port;
  fs.writeFileSync(path.join(fixture,'data/.env'),['BASE_URL=http://127.0.0.1:'+gatewayPort+'/v1','API_KEY=mock-gateway','SHIM_PORT='+port,'GATEWAY_TRANSPORT=direct','OFFICIAL_BASE=http://127.0.0.1:'+officialPort+'/backend-api/codex'].join('\n'));
- fs.writeFileSync(path.join(fixture,'data/state/route-state.json'),JSON.stringify({mode:'mixed',gatewayTransport:'direct',officialProxy:'http://127.0.0.1:'+proxyPort}));
+ fs.writeFileSync(path.join(fixture,'data/state/route-state.json'),JSON.stringify({mode:'mixed',gatewayTransport:'direct',officialProxy:'http://127.0.0.1:'+proxyPort,clientVersion:'0.159.0'}));
  const prepared=JSON.parse(await run(['--prepare']));assert.equal(prepared.gateway.ready,true);assert.equal(prepared.official.ready,true);
  const menu=JSON.parse(fs.readFileSync(path.join(fixture,'data/cache/models-smr.json'),'utf8')).models;
  assert.deepEqual(menu.map(m=>m.slug),['gpt-6-sol','GPT/gpt-6-sol','Other/test-model']);
@@ -76,6 +76,12 @@ try{
  r=await request(base,'Other/test-model');assert.equal(r.body.peer,'gateway');assert.equal(records.at(-1).headers.authorization,'Bearer mock-gateway');assert.equal(records.at(-1).headers['chatgpt-account-id'],undefined);results.push('Gateway HTTP uses configured URL/key and removes account headers');
  r=await request(base,'Other/test-model',{test_tool_output:true,tools:[{type:'custom',name:'exec',format:{type:'text'}}]});assert.equal(r.body.output[0].type,'custom_tool_call');assert.equal(r.body.output[0].name,'exec');assert.equal(r.body.output[0].input,'text("中文");');assert.equal(r.body.output[0].id,'ctc_jsoncall');results.push('Non-stream JSON tool responses restored to native desktop format');
  const count=records.length;r=await request(base,'gpt-unknown');assert.equal(r.status,400);assert.equal(records.length,count);results.push('Unknown models are rejected without forwarding');
+ const compactCount=records.length;
+ r=await request(base,'Other/test-model',{input:[{type:'compaction_trigger'}]});assert.equal(r.status,400);assert.equal(r.body.error.code,'incompatible_compaction_provider');
+ await assert.rejects(websocket(base,'Other/test-model',{},[{type:'compaction_trigger'}]),/native text-compaction provider repair/);
+ assert.equal(records.length,compactCount);
+ await request(base,'gpt-6-sol',{input:[{type:'compaction_trigger'}]});assert.deepEqual(records.at(-1).body.input,[{type:'compaction_trigger'}]);
+ results.push('Non-GPT remote compaction controls fail before upstream forwarding over HTTP and WS; official controls pass unchanged');
  for(const model of ['GPT/gpt-6-sol','Other/test-model']){
   await request(base,model,{input:[{role:'user',content:[{type:'input_image',file_id:'file_native_fixture',detail:'high'}]}]});
   assert.deepEqual(records.at(-1).body.input[0].content[0],{type:'input_image',image_url:'https://native-files.example.invalid/original-image.png',detail:'high'});

@@ -118,6 +118,28 @@ assert.equal(limited.finish().at(-1).type, 'response.incomplete');
 assert.throws(() => new ChatEvents(model).finish(), error => error.code === 'incomplete_upstream_response');
 checks.push('Chat JSON and SSE produce identical native output, reasoning, calls and usage; length limits remain incomplete');
 
+assert.equal(chatRequest({ model, service_tier: 'priority', input: [] }).service_tier, 'priority');
+for (const tier of ['priority', 'default', null, undefined]) {
+  const value = { id: 'chat_tier', created: 10,
+    ...(tier !== undefined ? { service_tier: tier } : {}),
+    choices: [{ index: 0, finish_reason: 'stop', message: { content: 'OK' } }] };
+  const json = adapter.response(chatResponse(value, model));
+  const stream = new ChatEvents(model), native = new NonGptEvents(adapter);
+  const created = stream.convert({ ...value, choices: [{ delta: { content: 'OK' }, finish_reason: 'stop' }] });
+  assert.equal(Object.hasOwn(created[0].response, 'service_tier'), tier !== undefined);
+  for (const event of created) native.convert(event);
+  const result = stream.finish().flatMap(event => native.convert(event)).at(-1).response;
+  assert.deepEqual(result, json);
+  assert.equal(Object.hasOwn(result, 'service_tier'), tier !== undefined);
+  assert.equal(result.service_tier, tier);
+}
+const lateTier = new ChatEvents(model);
+const initialTier = lateTier.convert({ id: 'late_tier', service_tier: 'priority', choices: [{ delta: { content: 'OK' }, finish_reason: 'stop' }] });
+lateTier.convert({ id: 'late_tier', service_tier: 'default', choices: [], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } });
+assert.equal(lateTier.finish().at(-1).response.service_tier, 'default');
+assert.equal(initialTier[0].response.service_tier, 'priority');
+checks.push('Fast requests and actual upstream service tiers survive JSON, SSE and native restoration, including late fallback metadata; absent tiers are never invented');
+
 const output = new ResponseOutput();
 const first = { type: 'reasoning', id: 'rs_native', summary: [], encrypted_content: 'opaque' };
 const second = { type: 'message', id: 'msg_native', role: 'assistant', phase: 'commentary', content: [{ type: 'output_text', text: 'Native output' }] };

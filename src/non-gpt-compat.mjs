@@ -4,6 +4,12 @@ import { reasoningAsContext, mergeTools } from './history-compat.mjs';
 
 export const MAX_EVENT_BYTES = 16 * 1024 * 1024;
 const hash = value => createHash('sha256').update(value).digest('hex');
+export function validateNonGptCompaction(payload) {
+  // A remote compaction control item must not become a generation request.
+  if (Array.isArray(payload?.input) && payload.input.some(item => item?.type === 'compaction_trigger')) {
+    throw Object.assign(new Error('This conversation is still using the OpenAI remote-compaction provider with a non-GPT model. Fully exit ChatGPT and reopen chatgpt-api to apply the native text-compaction provider repair. No compaction request was sent to the model.'), { status: 400, code: 'incompatible_compaction_provider' });
+  }
+}
 export function alias(name, namespace) {
   const value = (namespace || '') + '/' + name;
   return 'cx_' + value.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 36) + '_' + hash(value).slice(0, 12);
@@ -67,6 +73,7 @@ export class NonGptAdapter {
     return value;
   }
   request() {
+    validateNonGptCompaction(this.original);
     const data = structuredClone(this.original), carriers = [], removedIds = new Set();
     if (Array.isArray(data.input)) {
       data.input = data.input.flatMap(item => {

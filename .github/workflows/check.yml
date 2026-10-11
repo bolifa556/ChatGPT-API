@@ -12,3 +12,23 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm test
       - run: npm run test:windows
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: python3 scripts/build-linux-release.py --arch x64
+      - name: Verify Linux provider release
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          bundle="ChatGPT-API-Provider-$version-linux-x64"
+          python3 tests/linux-package-test.py "release/$bundle.tar.gz"
+          mkdir -p "$RUNNER_TEMP/linux-release"
+          tar -xzf "release/$bundle.tar.gz" -C "$RUNNER_TEMP/linux-release"
+          "$RUNNER_TEMP/linux-release/$bundle/payload/runtime/node" tests/linux-provider-test.mjs "$RUNNER_TEMP/linux-release/$bundle"

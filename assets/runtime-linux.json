@@ -1,0 +1,11 @@
+{
+  "version": "25.8.2",
+  "x64": {
+    "url": "https://nodejs.org/dist/v25.8.2/node-v25.8.2-linux-x64.tar.xz",
+    "sha256": "13a4c88c391aade2b7afba799ff27d09773b04e8a6c27f52908f79ff0e3787f5"
+  },
+  "arm64": {
+    "url": "https://nodejs.org/dist/v25.8.2/node-v25.8.2-linux-arm64.tar.xz",
+    "sha256": "b7e8e0c9d48b6d9a43cf6e8d3960127473db001d60e964cb5e955e95603666eb"
+  }
+}

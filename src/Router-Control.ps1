@@ -1,6 +1,6 @@
 ﻿function Get-RouterBuildId([string]$packageDir) {
     $bytes = New-Object 'System.Collections.Generic.List[byte]'
-    foreach($name in @('shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs')) {
+    foreach($name in @('shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs')) {
         $bytes.AddRange([IO.File]::ReadAllBytes((Join-Path $packageDir ('src\'+$name))))
     }
     $hash = [Security.Cryptography.SHA256]::Create()
@@ -22,13 +22,26 @@ function Add-RouterHelper([string]$packageDir, $process, [string]$marker) {
     $items+=@{pid=$p.ProcessId;exe=$p.ExecutablePath;createdAt=$p.CreationDate.ToUniversalTime().ToString('o');marker=$marker}
     Write-Utf8File $file (@{version=2;helpers=$items}|ConvertTo-Json -Depth 5)
 }
-function Ensure-LocalRouter([string]$packageDir, [string]$routeMode = '') {
+function Get-LauncherRouterSelection([string]$packageDir, [string]$routeMode = '', [string]$entryMode = '') {
+    $state = Read-LauncherState $packageDir
+    if (-not $entryMode) { $entryMode = if ($state -and $state.active -and $state.entryMode) { [string]$state.entryMode } else { 'api' } }
+    if ($entryMode -notin @('official','api','apionly')) { throw 'Unknown launcher entry mode.' }
+    if ($entryMode -eq 'apionly') { $routeMode = 'gateway' }
+    elseif ($entryMode -eq 'official') { $routeMode = 'mixed' }
+    elseif (-not $routeMode) {
+        $routeMode = if ($state -and $state.active -and $state.mode) { [string]$state.mode } else { Get-LauncherRouteMode $entryMode (Get-CodexHome) }
+    }
+    return [pscustomobject]@{ mode = $routeMode; entryMode = $entryMode }
+}
+function Ensure-LocalRouter([string]$packageDir, [string]$routeMode = '', [string]$entryMode = '') {
     $settings=Get-EnvValues (Get-LauncherDataPath $packageDir '.env')
     $baseUrl=Normalize-BaseUrl ([string]$settings['BASE_URL'])
     $key=[string]$settings['API_KEY'];if(-not $key){throw 'API_KEY is missing.'}
     $port=if($settings['SHIM_PORT']){[int]$settings['SHIM_PORT']}else{8102}
     $url='http://127.0.0.1:'+ $port +'/healthz'
-    $mode=if($routeMode){$routeMode}elseif(Get-SavedChatGPTLogin (Get-CodexHome)){'mixed'}else{'gateway'}
+    $selection = Get-LauncherRouterSelection $packageDir $routeMode $entryMode
+    $mode = $selection.mode
+    $entryMode = $selection.entryMode
     $sha=[Security.Cryptography.SHA256]::Create()
     try{$sourceId=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($baseUrl+"`n"+$key)))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
     $buildId=Get-RouterBuildId $packageDir
@@ -41,13 +54,15 @@ function Ensure-LocalRouter([string]$packageDir, [string]$routeMode = '') {
         $health=$null
         try{$health=Invoke-RestMethod -Uri $url -TimeoutSec 1}catch{}
         if($health){
-            if($health.service -eq 'chatgpt-api-router' -and $health.sourceId -eq $sourceId -and ($health.buildId -eq $buildId -or (Test-LegacyRouter $packageDir $health)) -and $health.mode -eq $mode){return $health}
+            $healthEntry = if ($health.entryMode) { $health.entryMode } else { 'api' }
+            if($health.service -eq 'chatgpt-api-router' -and $health.sourceId -eq $sourceId -and ($health.buildId -eq $buildId -or (Test-LegacyRouter $packageDir $health)) -and $health.mode -eq $mode -and $healthEntry -eq $entryMode){return $health}
             throw 'The router on this port uses a different version or configuration. Fully exit ChatGPT and reopen chatgpt-api.'
         }
+        $clientVersion = if ($mode -eq 'mixed') { Get-NativeClientVersion } else { '' }
         $logDir=Join-Path $packageDir 'data\logs';[void](New-Item -ItemType Directory -Path $logDir -Force)
         $transport=if($settings['GATEWAY_TRANSPORT']){[string]$settings['GATEWAY_TRANSPORT']}else{'direct'}
         if($transport -notin @('direct','ssh')){throw 'GATEWAY_TRANSPORT must be direct or ssh.'}
-        if($transport -eq 'ssh'){
+        if($transport -eq 'ssh' -and $entryMode -ne 'official'){
             $uri=[Uri]$baseUrl
             $hostName=if($settings['SSH_HOST']){[string]$settings['SSH_HOST']}else{$uri.Host}
             $remoteHost=if($settings['SSH_REMOTE_HOST']){[string]$settings['SSH_REMOTE_HOST']}elseif($hostName -eq $uri.Host){'127.0.0.1'}else{$uri.Host}
@@ -66,7 +81,7 @@ function Ensure-LocalRouter([string]$packageDir, [string]$routeMode = '') {
             }
             if(-not $connected){throw 'SSH tunnel was not ready.'}
         }
-        Write-Utf8File (Get-LauncherDataPath $packageDir 'route-state.json') (@{version=2;mode=$mode;gatewayTransport=$transport;officialProxy=(Get-ExistingOfficialProxy)}|ConvertTo-Json -Compress)
+        Write-Utf8File (Get-LauncherDataPath $packageDir 'route-state.json') (@{version=2;mode=$mode;entryMode=$entryMode;gatewayTransport=$transport;officialProxy=(Get-ExistingOfficialProxy);clientVersion=$clientVersion}|ConvertTo-Json -Compress)
         $node=Join-Path $packageDir 'runtime\node.exe';$script=Join-Path $packageDir 'src\shim.mjs'
         $text=& $node $script --prepare 2> (Join-Path $logDir 'prepare-stderr.log')
         if($LASTEXITCODE -ne 0){throw ('Model refresh failed: '+[IO.File]::ReadAllText((Join-Path $logDir 'prepare-stderr.log')))}

@@ -34,6 +34,10 @@ assert.equal(normalizeGptHistory({input:[foreignReadable]}).payload.input[0].sum
 assert.equal(readableWire.input[0].content[0].text,'Keep test number 7395');
 assert.throws(()=>adapter.raw('{"input":123}'),e=>e.code==='invalid_upstream_tool_arguments');
 assert.throws(()=>new NonGptAdapter({input:[{type:'compaction',encrypted_content:'opaque'}]}).request(),/Restore readable context/);
+const trigger={input:[{type:'compaction_trigger'}]}, triggerBefore=JSON.stringify(trigger);
+assert.throws(()=>new NonGptAdapter(trigger).request(),e=>e.status===400&&e.code==='incompatible_compaction_provider');
+assert.equal(JSON.stringify(trigger),triggerBefore);
+assert.equal(normalizeGptHistory(trigger).payload,trigger);
 const text='data: '+JSON.stringify({type:'response.output_text.delta',delta:'中文'})+'\r\n\r\ndata: [DONE]';
 const packets=[];for await(const p of ssePackets(Readable.from([...Buffer.from(text)].map(x=>Buffer.from([x])))))packets.push(p);
 assert.equal(packets[0].data.delta,'中文');assert(packets[1].done);
