@@ -6,6 +6,8 @@
 
 `scripts/Build-Release.ps1` 与 `scripts/build-linux-release.py` 默认把发布包写入仓库内的 `release/`；历史版本也保存在这里。可通过 `-OutputDirectory` 或 `--output` 指定其他位置。包内只有安装入口、使用说明、安装程序、程序载荷及校验清单；Node.js 许可证和锁定依赖的许可证一起携带。版本号来自 `package.json`，构建不会覆盖同名的已有归档。`tests/release-test.ps1` 默认验证当前版本的 ZIP，也可传入 `-Archive <ZIP>`；测试在隔离目录验证新装、保留配置的更新和损坏包拒绝，不改真实桌面快捷方式、登录或配置。
 
+macOS 3.0.9 的 Apple Silicon 包由 `scripts/build-macos-release.py` 生成到同一 `release/`，只提供 `chatgpt-apionly`。它保留现有 Windows/Linux 发布包与适配核心；平台安装、进程和入口代码在 `macos/`。校验与实机验证边界见 [macOS 使用说明](macos-readme.md)。
+
 旧版根目录数据会归入 `data`，旧版运行进程退出前保留它仍在使用的文件。判断进程同时核对 PID、程序路径和创建时间，避免 PID 被复用后误判。路径迁移不会重写客户端的聊天记录或登录文件。
 
 移动安装目录或覆盖源文件前，建议先完全退出客户端。若临时路由尚未恢复，保持原目录位置，从原入口正常退出后再移动。

@@ -4,6 +4,8 @@ Windows x64 下的三入口启动器，适用于已安装的 `OpenAI.Codex` 桌�
 
 另提供 **Linux provider 独立版**（x64 / ARM64）：模型目录来自网关，使用 API Key，提供单一 `ChatGPT API` 入口，不处理官方登录。安装及功能边界见 [Linux 使用说明](docs/linux-readme.md)。
 
+另提供 **macOS 3.0.9 API-only 独立版**（Apple Silicon / ARM64）：只提供 `chatgpt-apionly` 入口，模型与生图只走网关。见 [macOS 使用说明](docs/macos-readme.md)。
+
 ## 安装与更新
 
 1. 使用独立发布包 `ChatGPT-API-Launcher-<版本>-win-x64.zip`，完整解压后双击包内 **安装.cmd**。
@@ -58,7 +60,7 @@ docs/                        使用与架构说明
 tests/                       默认离线回归测试及显式运行的真实接口测试
 .github/workflows/           Windows 自动检查定义
 scripts/                     生成独立发布包的构建脚本
-release/                     Windows/Linux 发布包、使用说明与 SHA-256
+release/                     Windows/Linux/macOS 发布包、使用说明与 SHA-256
 ```
 
 **客户端自己的登录、聊天记录、插件和界面缓存不在 `data/`。** 它们仍由客户端保存在 `CODEX_HOME`（默认 `%USERPROFILE%\.codex`）及 AppData 中。三个入口共用这些数据，不复制登录，不创建平行聊天库。
@@ -84,6 +86,8 @@ npm run test:windows
 Linux provider 使用 `python scripts/build-linux-release.py --arch all` 构建 `release/` 下的两个 `.tar.gz` 包，也可用 `--output <发布目录>` 指定其他位置（构建机需要 Python 3.11+，安装端不需要 Python）。Node 下载使用 `assets/runtime-linux.json` 中的官方 SHA-256；可将对应归档预置于 `data/cache/` 后离线构建。将包解压到 Linux 文件系统后，用包内 Node 执行 `tests/linux-provider-test.mjs <解压后的发布根目录>`，验证实际安装入口、权限、配置、并发取钥匙、路由、更新和恢复。测试仅使用隔离目录与模拟接口。
 
 `python tests/linux-package-test.py <x64归档> <ARM64归档>` 可在构建机核对两个归档的完整清单、当前源文件、SHA-256、执行权限、换行格式及 ELF 架构，不执行异架构二进制。
+
+macOS ARM64 包使用 `python scripts/build-macos-release.py` 构建，版本同样来自 `package.json`，下载使用 `assets/runtime-macos.json` 的固定官方 SHA-256。运行 `python tests/macos-package-test.py release/ChatGPT-API-Provider-3.0.9-macos-arm64.tar.gz` 检查归档与 Mach-O 架构；macOS 主机可用包内 Node 运行 `tests/macos-install-test.mjs <解压后的发布根目录>` 完成隔离安装验证。
 
 `tests/live-models.mjs`、`tests/native-client-live.mjs`、`tests/official-client-live.mjs`、`tests/media-live.mjs` 是单独运行的真实接口验证，会使用本机配置和账号发起实际请求；原生真实模型测试使用 ephemeral 对话。`tests/native-switch-test.mjs` 则在独立测试目录中运行未修改的原生 app-server、真实本地工具和受控模型端点，验证同一对话的跨模型、跨入口恢复。运行方式、完整功能清单与排除项见 [最新验证记录](docs/model-verification-2026-09-28.md)。
 
