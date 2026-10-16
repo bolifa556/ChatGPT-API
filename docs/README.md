@@ -5,7 +5,8 @@
 - [安装与三个入口](../README.md)
 - [配置、认证与功能边界](configuration.md)
 - [Linux provider 使用说明](linux-readme.md)
-- [macOS API-only 使用说明](macos-readme.md)
+- [macOS 单文件 DMG 使用说明](macos-dmg-readme.md)
+- [macOS 原 tar.gz 脚本包说明](macos-readme.md)
 - [发布包及校验](../release/README.md)
 
 维护与实现：

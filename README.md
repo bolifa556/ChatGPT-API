@@ -4,7 +4,7 @@ Windows x64 下的三入口启动器，适用于已安装的 `OpenAI.Codex` 桌�
 
 另提供 **Linux provider 独立版**（x64 / ARM64）：模型目录来自网关，使用 API Key，提供单一 `ChatGPT API` 入口，不处理官方登录。安装及功能边界见 [Linux 使用说明](docs/linux-readme.md)。
 
-另提供 **macOS 3.0.9 API-only 独立版**（Apple Silicon / ARM64）：只提供 `chatgpt-apionly` 入口，模型与生图只走网关。见 [macOS 使用说明](docs/macos-readme.md)。
+另提供 **macOS 3.0.9 API-only 独立版**（Apple Silicon / ARM64）：推荐单文件 DMG，内含 `chatgpt-apionly.app`，首次使用图形窗口配置，模型与生图只走网关。未做 Apple Developer ID 签名和公证，首次需在系统设置中正常允许。见 [DMG 使用说明](docs/macos-dmg-readme.md)；原 [tar.gz 脚本包](docs/macos-readme.md) 保留为历史格式。
 
 ## 安装与更新
 
@@ -88,6 +88,8 @@ Linux provider 使用 `python scripts/build-linux-release.py --arch all` 构建 
 `python tests/linux-package-test.py <x64归档> <ARM64归档>` 可在构建机核对两个归档的完整清单、当前源文件、SHA-256、执行权限、换行格式及 ELF 架构，不执行异架构二进制。
 
 macOS ARM64 包使用 `python scripts/build-macos-release.py` 构建，版本同样来自 `package.json`，下载使用 `assets/runtime-macos.json` 的固定官方 SHA-256。运行 `python tests/macos-package-test.py release/ChatGPT-API-Provider-3.0.9-macos-arm64.tar.gz` 检查归档与 Mach-O 架构；macOS 主机可用包内 Node 运行 `tests/macos-install-test.mjs <解压后的发布根目录>` 完成隔离安装验证。
+
+在 Mac 构建 DMG 时，先准备上述 provider 归档，再运行 `python3 scripts/build-macos-dmg.py`，使用系统的 Clang、codesign 和 hdiutil 生成单文件映像。`python3 tests/macos-dmg-test.py <DMG>` 验证映像与 App 的文件、权限及代码/资源哈希；`node tests/macos-dmg-gui-test.mjs` 检查图形配置控制逻辑。Windows 构建机可通过 WSL 使用 Zig、rcodesign、HFS+ 和 UDIF 工具交叉构建，工具来源固定在 `assets/macos-dmg-build-tools.json`，构建脚本的对应参数用于传入这些工具路径。DMG 直接复用已经发布的 provider，不改写原 tar.gz；本地 ad-hoc 签名不能替代 Developer ID 或 Apple 公证。
 
 `tests/live-models.mjs`、`tests/native-client-live.mjs`、`tests/official-client-live.mjs`、`tests/media-live.mjs` 是单独运行的真实接口验证，会使用本机配置和账号发起实际请求；原生真实模型测试使用 ephemeral 对话。`tests/native-switch-test.mjs` 则在独立测试目录中运行未修改的原生 app-server、真实本地工具和受控模型端点，验证同一对话的跨模型、跨入口恢复。运行方式、完整功能清单与排除项见 [最新验证记录](docs/model-verification-2026-09-28.md)。
 

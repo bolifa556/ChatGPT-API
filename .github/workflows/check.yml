@@ -43,6 +43,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: node tests/macos-platform-test.mjs
       - run: node tests/macos-provider-test.mjs
+      - run: node tests/macos-dmg-gui-test.mjs
       - run: python3 scripts/build-macos-release.py
       - name: Verify macOS API-only release
         shell: bash
@@ -57,3 +58,9 @@ jobs:
           else
             echo "The native installer test requires an ARM64 runner; archive and POSIX provider checks completed."
           fi
+      - name: Build and verify single-file DMG
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          python3 scripts/build-macos-dmg.py
+          python3 tests/macos-dmg-test.py "release/ChatGPT-API-Provider-$version-macos-arm64.dmg"

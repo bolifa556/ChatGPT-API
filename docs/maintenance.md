@@ -8,6 +8,8 @@
 
 macOS 3.0.9 的 Apple Silicon 包由 `scripts/build-macos-release.py` 生成到同一 `release/`，只提供 `chatgpt-apionly`。它保留现有 Windows/Linux 发布包与适配核心；平台安装、进程和入口代码在 `macos/`。校验与实机验证边界见 [macOS 使用说明](macos-readme.md)。
 
+推荐的 macOS 分发格式现为单文件 DMG，由 `scripts/build-macos-dmg.py` 基于原 3.0.9 归档构建，App 入口和图形配置代码在 `macos/dmg/`。原 provider 的 278 个文件保持不变；运行数据仍在 Application Support，App 本体保持完整性封装。包只有 ad-hoc 完整性签名，没有 Developer ID 和 Apple 公证，首次使用采用系统正常手动允许流程。原脚本包与其他平台归档不覆盖，详见 [DMG 使用说明](macos-dmg-readme.md)。
+
 旧版根目录数据会归入 `data`，旧版运行进程退出前保留它仍在使用的文件。判断进程同时核对 PID、程序路径和创建时间，避免 PID 被复用后误判。路径迁移不会重写客户端的聊天记录或登录文件。
 
 移动安装目录或覆盖源文件前，建议先完全退出客户端。若临时路由尚未恢复，保持原目录位置，从原入口正常退出后再移动。
