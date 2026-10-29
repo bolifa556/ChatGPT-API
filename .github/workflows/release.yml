@@ -37,6 +37,7 @@ jobs:
       - name: Prepare bundled Windows runtime
         shell: powershell
         run: |
+          Copy-Item -LiteralPath (Get-Command node.exe).Source -Destination .\runtime\node.exe
           . .\install\Bootstrap-Runtime.ps1
           Ensure-LauncherRuntime (Get-Location).Path
       - run: npm test

@@ -68,7 +68,8 @@ try {
     $shell = New-Object -ComObject WScript.Shell
     foreach ($entry in @('ChatGPT','chatgpt-api','chatgpt-apionly')) {
         $link = $shell.CreateShortcut((Join-Path $fakeDesktop ($entry + '.lnk')))
-        Assert ($link.Arguments.Contains((Join-Path $installed ($entry + '.vbs')))) 'Shortcut points back to the extracted release.'
+        $expectedEntry = Join-Path $installed ($entry + '.vbs')
+        Assert ($link.Arguments.IndexOf($expectedEntry, [StringComparison]::OrdinalIgnoreCase) -ge 0) ('Shortcut does not target the installed entry. Expected: ' + $expectedEntry + '; actual arguments: ' + $link.Arguments)
     }
     $null = Copy-ReleasePayload $release $destination
     Assert ([IO.File]::ReadAllText($envFile) -ceq $originalSettings) 'Update changed existing settings.'
