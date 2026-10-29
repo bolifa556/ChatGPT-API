@@ -89,9 +89,9 @@ const args=process.argv.slice(2), home=process.env.CODEX_HOME;
 assert(args.includes('-W')); assert(!args.includes('-n')); assert(!args.includes('-F'));
 assert.equal(args[args.indexOf('--env')+1], 'CODEX_HOME='+home);
 const bundle=args[args.indexOf('-a')+1];
-fs.appendFileSync(path.join(home,'open-calls.jsonl'), JSON.stringify({args,home})+'\\n');
 const native=spawn(path.join(bundle,'Contents/MacOS/ChatGPT'), args.includes('--args')?args.slice(args.indexOf('--args')+1):[], {stdio:'ignore',env:process.env});
 process.on('SIGTERM',()=>native.kill());
+native.once('spawn',()=>fs.appendFileSync(path.join(home,'open-calls.jsonl'), JSON.stringify({args,home})+'\\n'));
 native.once('error',()=>process.exit(1));
 native.once('exit',(code)=>process.exit(code||0));
 `);
@@ -127,6 +127,11 @@ native.once('exit',(code)=>process.exit(code||0));
     }
     await launchEntry(ctx, scenario.entry, [], { client, launchClient, officialProxy: '', runningClients: () => [], waitForClient: async child => {
       try {
+        // spawn() confirms the opener process exists; wait for its fixture to
+        // start the app before testing/terminating that application lifetime.
+        const openCount = () => { try { return fs.readFileSync(path.join(ctx.home, 'open-calls.jsonl'), 'utf8').trim().split('\n').filter(Boolean).length; } catch { return 0; } };
+        for (let attempt = 0; attempt < 100 && openCount() < checks.length + 1 && child.exitCode === null; attempt++) await new Promise(resolve => setTimeout(resolve, 20));
+        assert.equal(openCount(), checks.length + 1, 'The opener did not start the isolated application');
         const state = await health(ctx), config = fs.readFileSync(ctx.config, 'utf8');
         assert.equal(state.entryMode, scenario.entry); assert.equal(state.mode, scenario.expectedMode); assert(!config.includes(key));
         assert.equal(state.clientVersion, scenario.expectedMode === 'mixed' ? '0.162.0' : null);
