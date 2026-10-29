@@ -29,17 +29,62 @@
     }
 }
 
+function Initialize-UnicodeShortcuts {
+    if ('ChatGPTApi.NativeShortcuts' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+using System.Text;
+namespace ChatGPTApi {
+    public static class NativeShortcuts {
+        [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
+        private class ShellLink { }
+        [ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("000214F9-0000-0000-C000-000000000046")]
+        private interface IShellLinkW {
+            void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder path, int count, IntPtr data, uint flags);
+            void GetIDList(out IntPtr idList);
+            void SetIDList(IntPtr idList);
+            void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder description, int count);
+            void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string description);
+            void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder directory, int count);
+            void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string directory);
+            void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder arguments, int count);
+            void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string arguments);
+            void GetHotkey(out ushort hotkey);
+            void SetHotkey(ushort hotkey);
+            void GetShowCmd(out int showCommand);
+            void SetShowCmd(int showCommand);
+            void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder icon, int count, out int index);
+            void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string icon, int index);
+            void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string path, uint reserved);
+            void Resolve(IntPtr window, uint flags);
+            void SetPath([MarshalAs(UnmanagedType.LPWStr)] string path);
+        }
+        public static void Save(string file, string target, string arguments, string directory, string icon, string description) {
+            object instance = new ShellLink();
+            try {
+                IShellLinkW link = (IShellLinkW)instance;
+                link.SetPath(target);
+                link.SetArguments(arguments);
+                link.SetWorkingDirectory(directory);
+                link.SetIconLocation(icon, 0);
+                link.SetShowCmd(7);
+                link.SetDescription(description);
+                ((IPersistFile)instance).Save(file, true);
+            } finally { Marshal.FinalReleaseComObject(instance); }
+        }
+    }
+}
+'@
+}
+
 function Set-DesktopEntries([string]$packageDir, [string]$desktopDir) {
     [void][IO.Directory]::CreateDirectory($desktopDir)
-    $shell = New-Object -ComObject WScript.Shell
+    Initialize-UnicodeShortcuts
     foreach ($name in @('ChatGPT','chatgpt-api','chatgpt-apionly')) {
-        $shortcut = $shell.CreateShortcut((Join-Path $desktopDir ($name + '.lnk')))
-        $shortcut.TargetPath = Join-Path $env:WINDIR 'System32\wscript.exe'
-        $shortcut.Arguments = '//B //Nologo "' + (Join-Path $packageDir ($name + '.vbs')) + '"'
-        $shortcut.WorkingDirectory = $packageDir
-        $shortcut.IconLocation = (Join-Path $packageDir 'assets\ChatGPT.ico') + ',0'
-        $shortcut.WindowStyle = 7
-        $shortcut.Description = if ($name -eq 'ChatGPT') { '官方模型与原生登录，保留混合历史兼容' } elseif ($name -eq 'chatgpt-apionly') { '仅使用自定义 API 网关模型，不切换官方登录' } else { '根据官方登录状态使用官方与网关模型' }
-        $shortcut.Save()
+        $arguments = '//B //Nologo "' + (Join-Path $packageDir ($name + '.vbs')) + '"'
+        $description = if ($name -eq 'ChatGPT') { '官方模型与原生登录，保留混合历史兼容' } elseif ($name -eq 'chatgpt-apionly') { '仅使用自定义 API 网关模型，不切换官方登录' } else { '根据官方登录状态使用官方与网关模型' }
+        [ChatGPTApi.NativeShortcuts]::Save((Join-Path $desktopDir ($name + '.lnk')), (Join-Path $env:WINDIR 'System32\wscript.exe'), $arguments, $packageDir, (Join-Path $packageDir 'assets\ChatGPT.ico'), $description)
     }
 }
