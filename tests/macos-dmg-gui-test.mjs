@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { requestSettings, configureProvider, prepareInstallation, Cancelled, entryArguments, dialogScript } from '../macos/dmg/gui.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'chatgpt-dmg-gui-test-'));
+const fixture = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'chatgpt-dmg-gui-test-'));
 const oldHome = process.env.CODEX_HOME;
 try {
   for (const entryMode of ['official', 'api', 'apionly', 'console']) assert.deepEqual(entryArguments(['--entry', entryMode, '--configure']), { entryMode, args: ['--configure'] });
@@ -95,6 +95,6 @@ try {
   console.log(JSON.stringify({ passed: true, checks: ['chat and console entry argument routing', 'paste menu and user-triggered clipboard flow with a Cocoa mock', 'password never included in dialog arguments', 'cancel and environment restoration', 'program install and console entry with preserved credentials/data', 'repeat launch avoids program rewrites', 'damaged update rejected before replacing files'], scope: 'Isolated controller and simulated Cocoa tests; no macOS dialogs, Gatekeeper or native GUI executed.' }, null, 2));
 } finally {
   if (oldHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = oldHome;
-  assert(fixture.startsWith(path.join(os.tmpdir(), 'chatgpt-dmg-gui-test-')));
+  assert(fixture.startsWith(path.join(fs.realpathSync(os.tmpdir()), 'chatgpt-dmg-gui-test-')));
   fs.rmSync(fixture, { recursive: true, force: true });
 }

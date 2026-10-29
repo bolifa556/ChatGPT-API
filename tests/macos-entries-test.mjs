@@ -14,7 +14,7 @@ import { shellQuote, startNativeClient } from '../macos/platform.mjs';
 
 assert(['linux', 'darwin'].includes(process.platform));
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'chatgpt-macos-entries-'));
+const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'chatgpt-macos-entries-'));
 const savedCli = process.env.CHATGPT_API_CLI;
 delete process.env.CHATGPT_API_CLI;
 const records = [], servers = [], sockets = [], checks = [];
@@ -189,6 +189,6 @@ native.once('exit',(code)=>process.exit(code||0));
   if (ctx) { try { await stopRouter(ctx); } catch {} }
   for (const wss of sockets) for (const ws of wss.clients) ws.terminate();
   for (const server of servers) { server.close(); server.closeAllConnections?.(); }
-  assert(temporary.startsWith(path.join(os.tmpdir(), 'chatgpt-macos-entries-')));
+  assert(temporary.startsWith(path.join(fs.realpathSync(os.tmpdir()), 'chatgpt-macos-entries-')));
   fs.rmSync(temporary, { recursive: true, force: true });
 }

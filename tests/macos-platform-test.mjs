@@ -8,7 +8,7 @@ import { parseProcessIdentity, sameProcess, parseClientProcesses, clientExecutab
 import { context, atomic, applyConfig, restoreConfig, settingsChecked } from '../macos/provider.mjs';
 import { canonicalPath, verifyRelease } from '../macos/install.mjs';
 
-const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'chatgpt-macos-platform-test-'));
+const fixture = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'chatgpt-macos-platform-test-'));
 const savedHome = process.env.CODEX_HOME, savedClient = process.env.CHATGPT_API_CLIENT, savedCli = process.env.CHATGPT_API_CLI;
 try {
   const identity = parseProcessIdentity('Wed Oct 14 12:34:56 2026  501 Ss /a b/runtime/node /a b/src/shim.mjs\n', 123);
@@ -114,6 +114,6 @@ try {
   if (savedHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = savedHome;
   if (savedClient === undefined) delete process.env.CHATGPT_API_CLIENT; else process.env.CHATGPT_API_CLIENT = savedClient;
   if (savedCli === undefined) delete process.env.CHATGPT_API_CLI; else process.env.CHATGPT_API_CLI = savedCli;
-  assert(fixture.startsWith(path.join(os.tmpdir(), 'chatgpt-macos-platform-test-')));
+  assert(fixture.startsWith(path.join(fs.realpathSync(os.tmpdir()), 'chatgpt-macos-platform-test-')));
   fs.rmSync(fixture, { recursive: true, force: true });
 }

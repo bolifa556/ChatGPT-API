@@ -13,7 +13,7 @@ import { processIdentity, alive, launcherText } from '../macos/platform.mjs';
 
 assert(['linux', 'darwin'].includes(process.platform), 'Run on a POSIX host (macOS or WSL/Linux).');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'chatgpt-macos-provider-test-'));
+const fixture = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'chatgpt-macos-provider-test-'));
 const saved = Object.fromEntries(['CODEX_HOME','CHATGPT_API_BASE_URL','CHATGPT_API_KEY','CHATGPT_API_PORT'].map(name => [name, process.env[name]]));
 const key = 'inert-macos-provider-key=$literal', requests = [];
 let models = ['Vendor/model', 'GPT/model'], ctx;
@@ -86,6 +86,6 @@ try {
   if (ctx) { try { await stopRouter(ctx); } catch {} }
   for (const [name, value] of Object.entries(saved)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
   server.close(); server.closeAllConnections?.();
-  assert(fixture.startsWith(path.join(os.tmpdir(), 'chatgpt-macos-provider-test-')));
+  assert(fixture.startsWith(path.join(fs.realpathSync(os.tmpdir()), 'chatgpt-macos-provider-test-')));
   fs.rmSync(fixture, { recursive: true, force: true });
 }
