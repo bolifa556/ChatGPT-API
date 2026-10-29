@@ -7,3 +7,5 @@
 *.md text eol=lf
 *.yml text eol=lf
 *.ico binary
+*.icns binary
+*.car binary

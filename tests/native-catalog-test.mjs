@@ -97,6 +97,11 @@ checks.push({ name: 'Previous missing-instructions failure reproduced by the nat
 for (const [name, menu] of [['mixed', merged], ['gateway', JSON.parse(fs.readFileSync(path.join(root, 'data/cache/models-gateway.json')))]]) {
   checks.push({ name: 'Corrected ' + name + ' catalog accepted by the native parser and model/list', ...await parseMenu(menu) });
 }
+const multipleSources = structuredClone(merged);
+for (const model of JSON.parse(fs.readFileSync(path.join(root, 'data/cache/models-gateway.json'))).models) {
+  multipleSources.models.push({ ...structuredClone(model), slug: '@p_catalog01/' + model.slug, display_name: model.display_name + ' · Catalog fixture' });
+}
+checks.push({ name: 'Stable source-qualified model IDs coexist with the original models in the native menu', ...await parseMenu(multipleSources) });
 const messagesOnly = structuredClone(merged);
 for (const model of messagesOnly.models) if (model.model_messages?.instructions_template) delete model.base_instructions;
 checks.push({ name: 'Native instructions-only schema works for official entries and GPT aliases without adding base instructions',

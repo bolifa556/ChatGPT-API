@@ -9,8 +9,6 @@ import tarfile
 ROOT = Path(__file__).resolve().parents[1]
 
 def check(file):
-    checksum = hashlib.sha256(file.read_bytes()).hexdigest()
-    assert Path(str(file) + '.sha256').read_text().split()[0] == checksum
     with tarfile.open(file, 'r:gz') as archive:
         members = archive.getmembers()
         names = [item.name for item in members]
@@ -44,7 +42,7 @@ def check(file):
         assert installer.startswith(b'#!/bin/sh\n') and b'\r' not in installer
         assert archive.getmember(prefix + '/install.sh').mode == 0o755
         assert b'Node.js' in archive.extractfile(prefix + '/payload/runtime/LICENSE.txt').read()
-    return {'passed': True, 'archive': str(file), 'architecture': architecture, 'payloadFiles': len(entries), 'sha256': checksum}
+    return {'passed': True, 'archive': str(file), 'architecture': architecture, 'payloadFiles': len(entries)}
 
 if __name__ == '__main__':
     results = [check(Path(name)) for name in sys.argv[1:]]

@@ -7,10 +7,13 @@ import { Writable } from 'node:stream';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { prepareWithRecovery, updateEnv, restoreRootLine } from '../src/gateway-recovery.mjs';
+import { requestSettings } from './settings.mjs';
+import { syncLegacySettings, userApiSettings } from '../src/settings.mjs';
 
 const run = promisify(execFile), delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 export const providerId = 'chatgpt_api_launcher';
-export const rootKeys = ['model_provider', 'model_catalog_json', 'model'];
+export const rootKeys = ['model_provider', 'model_catalog_json', 'model', 'model_context_window', 'model_auto_compact_token_limit'];
 export function context(root = process.env.CHATGPT_API_ROOT || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')) {
   const home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
   return { root, home, data: path.join(root, 'data'), config: path.join(home, 'config.toml'), node: path.join(root, 'runtime/node') };
@@ -84,7 +87,10 @@ async function locked(ctx, action) {
 }
 function buildId(ctx) {
   const hash = crypto.createHash('sha256');
-  for (const file of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs']) hash.update(fs.readFileSync(path.join(ctx.root, 'src', file)));
+  for (const file of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs','model-context.mjs','transport.mjs','response-state.mjs','settings.mjs','gateway-sources.mjs']) hash.update(fs.readFileSync(path.join(ctx.root, 'src', file)));
+  for (const name of ['model-contexts.json', 'model-template.json']) {
+    if (fs.existsSync(path.join(ctx.root, 'assets', name))) hash.update(fs.readFileSync(path.join(ctx.root, 'assets', name)));
+  }
   return hash.digest('hex');
 }
 export async function health(ctx, settings = settingsChecked(readSettings(ctx))) {
@@ -118,7 +124,8 @@ export async function ensureRouter(ctx, refresh = false) {
       if (refresh) {
         const refreshed = await (await fetch('http://127.0.0.1:' + settings.SHIM_PORT + '/readyz', { signal: AbortSignal.timeout(30000) })).json();
         const cached = readJson(path.join(ctx.data, 'cache/catalog-state.json'));
-        if (!refreshed.gateway?.ready && !(cached?.gatewayIds?.length && Date.now() - Date.parse(cached.gatewayAt) < 86400000)) throw new Error('Gateway is unavailable and no recent model catalog is cached.');
+        if (!refreshed.gateway?.ready && !(cached?.sourceId === expectedSource && cached?.gatewayIds?.length && Date.now() - Date.parse(cached.gatewayAt) < 86400000)) throw Object.assign(new Error('Gateway is unavailable and no recent model catalog is cached.'), { code: 'gateway_unavailable' });
+        return refreshed;
       }
       return existing;
     }
@@ -165,11 +172,13 @@ export function applyConfig(ctx) {
   const body = `[${table}]\nname = "ChatGPT API Provider"\nbase_url = "http://127.0.0.1:${settings.SHIM_PORT}/v1"\nwire_api = "responses"\nrequires_openai_auth = false\nsupports_websockets = false\n\n`;
   const auth = `[${table}.auth]\ncommand = ${JSON.stringify(ctx.node)}\nargs = ${JSON.stringify([path.join(ctx.root, 'linux/provider.mjs'), 'auth'])}\ntimeout_ms = 45000\nrefresh_interval_ms = 0\n\n`;
   text = setTable(setTable(text, table + '.auth', auth), table, body);
-  const values = { model_provider: providerId, model_catalog_json: path.join(ctx.data, 'cache/models-gateway.json'), model: selected };
-  for (const key of rootKeys) text = setRoot(text, key, key + ' = ' + JSON.stringify(values[key]) + '\n');
+  const values = { model_provider: providerId, model_catalog_json: path.join(ctx.data, 'cache/models-gateway.json'), model: selected, model_context_window: null, model_auto_compact_token_limit: null };
+  for (const key of rootKeys) text = setRoot(text, key, values[key] === null ? '' : key + ' = ' + JSON.stringify(values[key]) + '\n');
   const file = statePath(ctx, 'config'), prior = readJson(file);
   if (prior && prior.configPath !== ctx.config) throw new Error('This installation is bound to another CODEX_HOME.');
-  const saved = prior || { configPath: ctx.config, roots: Object.fromEntries(rootKeys.map(key => [key, getRoot(original, key)])), tables: Object.fromEntries([table, table + '.auth'].map(name => [name, getTable(original, name)])) };
+  const saved = { configPath: ctx.config, original: prior?.original ?? original,
+    roots: { ...Object.fromEntries(rootKeys.map(key => [key, getRoot(original, key)])), ...prior?.roots },
+    tables: { ...Object.fromEntries([table, table + '.auth'].map(name => [name, getTable(original, name)])), ...prior?.tables } };
   atomic(file, { ...saved, applied: text }); atomic(ctx.config, text);
   return { models: ids.length, model: selected };
 }
@@ -178,7 +187,7 @@ export function restoreConfig(ctx) {
   if (saved.configPath !== ctx.config) throw new Error('Saved configuration belongs to another CODEX_HOME.');
   let text = fs.readFileSync(ctx.config, 'utf8');
   const ownsProvider = rootString(text, 'model_provider') === providerId;
-  for (const key of rootKeys) if (getRoot(text, key) === getRoot(saved.applied, key) || key === 'model' && ownsProvider) text = setRoot(text, key, saved.roots[key]);
+  for (const key of rootKeys) if (Object.hasOwn(saved.roots, key) && (getRoot(text, key) === getRoot(saved.applied, key) || key === 'model' && ownsProvider)) text = restoreRootLine(text, key, saved.roots[key], saved.original) ?? setRoot(text, key, saved.roots[key]);
   for (const [name, value] of Object.entries(saved.tables)) if (getTable(text, name) === getTable(saved.applied, name)) text = setTable(text, name, value);
   atomic(ctx.config, text); fs.unlinkSync(file);
 }
@@ -191,16 +200,19 @@ async function prompt(label, hidden = false) {
   try { return await new Promise((resolve, reject) => { reader.once('SIGINT', () => reject(new Error('Configuration cancelled.'))); reader.question(hidden ? '' : label, resolve); }); }
   finally { reader.close(); if (hidden) process.stderr.write('\n'); }
 }
-export async function configure(ctx, askExisting = false) {
+export async function configure(ctx, askExisting = false, apply = true) {
   requireClosedClient();
-  const current = readSettings(ctx);
+  const current = userApiSettings(ctx.root, readSettings(ctx));
   let base = process.env.CHATGPT_API_BASE_URL || current.BASE_URL, key = process.env.CHATGPT_API_KEY || current.API_KEY;
   if (!base || askExisting && !process.env.CHATGPT_API_BASE_URL && process.stdin.isTTY) base = (await prompt('API base URL' + (base ? ' [' + base + ']' : '') + ': ')).trim() || base;
   if (!key || askExisting && !process.env.CHATGPT_API_KEY && process.stdin.isTTY) key = (await prompt('API Key' + (key ? ' [Enter to keep existing]' : '') + ': ', true)).trim() || key;
   const settings = settingsChecked({ BASE_URL: base, API_KEY: key, SHIM_PORT: process.env.CHATGPT_API_PORT || current.SHIM_PORT });
   await locked(ctx, () => stopRouter(ctx));
-  const imageSettings = Object.fromEntries(['IMAGE_MODEL','IMAGE_EDIT_MODEL','IMAGE_EDIT_FORMAT'].filter(name => current[name]).map(name => [name,current[name]]));
-  atomic(path.join(ctx.data, '.env'), Object.entries({ ...settings, ...imageSettings, SHIM_HOST: '127.0.0.1', GATEWAY_TRANSPORT: 'direct' }).map(([name, value]) => name + '=' + value).join('\n') + '\n');
+  const envFile = path.join(ctx.data, '.env');
+  let original = ''; try { original = fs.readFileSync(envFile, 'utf8'); } catch {}
+  atomic(envFile, updateEnv(original, { ...settings, SHIM_HOST: current.SHIM_HOST || '127.0.0.1', GATEWAY_TRANSPORT: current.GATEWAY_TRANSPORT || 'direct' }));
+  if (base !== current.BASE_URL || key !== current.API_KEY) syncLegacySettings(ctx.root, settings.BASE_URL, settings.API_KEY);
+  if (!apply) return { configured: true };
   await ensureRouter(ctx, true); return applyConfig(ctx);
 }
 function clientExecutable() {
@@ -211,6 +223,7 @@ function clientExecutable() {
 export async function main(args = process.argv.slice(2)) {
   if (process.platform !== 'linux') throw new Error('This provider launcher requires Linux.');
   const ctx = context(), command = args[0] || 'launch';
+  if (command === 'console') { const { startConsole } = await import('../src/console.mjs'); await startConsole({ root: ctx.root }); return; }
   if (command === 'auth') { await ensureRouter(ctx); process.stdout.write(settingsChecked(readSettings(ctx)).API_KEY + '\n'); return; }
   if (command === 'configure') { const result = await configure(ctx, true); console.log('Provider configured; gateway models: ' + result.models); return; }
   if (command === 'stop' || command === 'restore') { requireClosedClient(); await locked(ctx, () => stopRouter(ctx)); if (command === 'restore') restoreConfig(ctx); console.log('Provider ' + (command === 'restore' ? 'configuration restored.' : 'router stopped.')); return; }
@@ -218,7 +231,18 @@ export async function main(args = process.argv.slice(2)) {
   if (command !== 'launch') throw new Error('Usage: chatgpt-api [launch | configure | status | stop | restore]');
   const client = clientExecutable(), running = runningClients().length > 0;
   if (running && rootString(fs.readFileSync(ctx.config, 'utf8'), 'model_provider') !== providerId) throw new Error('Fully quit the current ChatGPT instance before opening the API provider.');
-  await ensureRouter(ctx, !running); if (!running) applyConfig(ctx);
+  await prepareWithRecovery(() => ensureRouter(ctx, !running), running ? null : async () => {
+    const values = await requestSettings(userApiSettings(ctx.root, readSettings(ctx)));
+    if (!values) return false;
+    const names = ['CHATGPT_API_BASE_URL','CHATGPT_API_KEY'];
+    const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
+    try {
+      process.env.CHATGPT_API_BASE_URL = values.base; process.env.CHATGPT_API_KEY = values.key;
+      await configure(ctx, false, false);
+    } finally { for (const [name, value] of Object.entries(previous)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; } }
+    return true;
+  });
+  if (!running) applyConfig(ctx);
   const child = spawn(client, args.slice(1), { detached: true, stdio: 'ignore' });
   await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); }); child.unref();
 }

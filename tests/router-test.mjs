@@ -1,3 +1,4 @@
+import { readRequestJson } from './http-fixture.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
@@ -42,7 +43,7 @@ function peer(name){
    if(name==='gateway'&&!gatewayOnline){res.writeHead(503);res.end('{}');return}
    res.setHeader('content-type','application/json');res.end(JSON.stringify(name==='official'?{models:[officialModel]}:{data:[{id:'GPT/gpt-6-sol'},{id:'Other/test-model'}]}));return;
   }
-  let text='';for await(const b of req)text+=b;const body=JSON.parse(text);
+  const body=await readRequestJson(req);
   records.push({name,transport:'http',body,headers:req.headers});
   if(name==='gateway'&&('generate' in body||body.previous_response_id)){
    res.writeHead(400,{'content-type':'application/json'});res.end(JSON.stringify({error:{message:'Stateless HTTP upstream rejects WS warmup/previous_response_id'}}));return;
@@ -112,6 +113,7 @@ try{
  gatewayOnline=false;const h=await fetch(base+'/readyz');assert.equal(h.status,503);assert.equal((await h.json()).gateway.ready,false);results.push('Readiness detects gateway failure');
  const fallback=JSON.parse(await run(['--prepare']));assert.equal(fallback.status,'degraded');results.push('Temporary outage reuses a recent cache with a degraded status');
  const stale=JSON.parse(fs.readFileSync(path.join(fixture,'data/cache/catalog-state.json'),'utf8'));stale.gatewayAt='2000-01-01T00:00:00Z';fs.writeFileSync(path.join(fixture,'data/cache/catalog-state.json'),JSON.stringify(stale));
+ const sourceCache=JSON.parse(fs.readFileSync(path.join(fixture,'data/cache/gateway-sources.json'),'utf8'));for(const source of sourceCache.sources)source.checkedAt='2000-01-01T00:00:00Z';fs.writeFileSync(path.join(fixture,'data/cache/gateway-sources.json'),JSON.stringify(sourceCache));
  const officialOnly=JSON.parse(await run(['--prepare']));assert.equal(officialOnly.gatewayModels,0);assert.equal(officialOnly.officialModels,1);
  const fallbackMenu=JSON.parse(fs.readFileSync(path.join(fixture,'data/cache/models-smr.json'),'utf8')).models;assert.deepEqual(fallbackMenu.map(m=>m.slug),['gpt-6-sol']);
  results.push('Unavailable gateway with stale cache cannot block the official channel or advertise stale API models');

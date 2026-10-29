@@ -20,7 +20,7 @@ const home = path.join(fixture, 'home'), native = path.join(home, '.codex'), des
 fs.mkdirSync(native, { recursive: true });
 const key = 'inert-provider-key=$literal';
 const authFile = path.join(native, 'auth.json'), configFile = path.join(native, 'config.toml');
-const baseline = 'model = "old-official"\nmodel_reasoning_effort = "low"\n# user preference\n[app]\nlocaleOverride = "zh-CN"\n[model_providers.unrelated]\nname = "Keep"\nbase_url = "http://example.invalid/v1"\n';
+const baseline = 'model = "old-official"\nmodel_reasoning_effort = "low"\nmodel_context_window = 500000\nmodel_auto_compact_token_limit = 400000\n# user preference\n[app]\nlocaleOverride = "zh-CN"\n[model_providers.unrelated]\nname = "Keep"\nbase_url = "http://example.invalid/v1"\n';
 fs.writeFileSync(configFile, baseline);
 fs.writeFileSync(authFile, '{"inert_official_login_must_not_be_used":true}\n');
 fs.writeFileSync(path.join(native, 'models_cache.json'), '{"models":[{"slug":"must-not-appear"}]}');
@@ -61,6 +61,7 @@ try {
   const config = fs.readFileSync(configFile, 'utf8');
   assert(config.includes('requires_openai_auth = false')); assert(config.includes('model_provider = "chatgpt_api_launcher"'));
   assert(config.includes('localeOverride = "zh-CN"')); assert(config.includes('[model_providers.unrelated]'));
+  assert(!/^model_context_window\s*=/m.test(config)); assert(!/^model_auto_compact_token_limit\s*=/m.test(config));
   assert(!config.includes('powershell')); assert(!config.includes('openai_base_url'));
   assert.equal(fs.statSync(path.join(installed, 'data/.env')).mode & 0o777, 0o600);
   assert.equal(fs.statSync(path.join(installed, 'data')).mode & 0o777, 0o700);
@@ -89,6 +90,15 @@ try {
   for (const value of ['IMAGE_MODEL=Vendor/qwen-image','IMAGE_EDIT_MODEL=Vendor/qwen-image-edit','IMAGE_EDIT_FORMAT=multipart']) assert(imageSettings.includes(value));
   assert(!menu().some(model => /qwen-image/.test(model.slug)));
   checks.push('Configure preserves image model aliases and edit format; image-only models stay out of the chat menu');
+
+  const journalFile = path.join(installed, 'data/state/config.json');
+  const legacy = JSON.parse(fs.readFileSync(journalFile));
+  delete legacy.roots.model_context_window; delete legacy.roots.model_auto_compact_token_limit; delete legacy.original;
+  fs.writeFileSync(journalFile, JSON.stringify(legacy));
+  fs.writeFileSync(configFile, 'model_context_window = 500000\nmodel_auto_compact_token_limit = 400000\n' + fs.readFileSync(configFile, 'utf8'));
+  await cli('configure');
+  assert(!/^model_context_window\s*=/m.test(fs.readFileSync(configFile, 'utf8')));
+  checks.push('An older provider journal adopts newly managed context settings without losing their original values');
 
   const clientDir = path.join(fixture, 'mockbin'); fs.mkdirSync(clientDir);
   const client = path.join(clientDir, 'chatgpt');
@@ -134,6 +144,7 @@ try {
   const restored = fs.readFileSync(configFile, 'utf8');
   assert(!restored.includes('model_catalog_json')); assert(!restored.includes('[model_providers.chatgpt_api_launcher]'));
   assert(restored.includes('model = "old-official"')); assert(restored.includes('localeOverride = "en-US"')); assert(restored.includes('[model_providers.unrelated]'));
+  assert(restored.includes('model_context_window = 500000')); assert(restored.includes('model_auto_compact_token_limit = 400000'));
   checks.push('Updates preserve settings and user files; restore returns managed keys while retaining later preference edits');
 
   const report = { passed: true, platform: process.platform, architecture: process.arch, node: process.version, checks,

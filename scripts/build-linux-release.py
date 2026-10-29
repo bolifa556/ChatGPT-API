@@ -14,7 +14,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def digest(file):
     with file.open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+        checksum = hashlib.sha256()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            checksum.update(chunk)
+        return checksum.hexdigest()
 
 def build(arch, output):
     package = json.loads((ROOT / 'package.json').read_text(encoding='utf-8'))
@@ -38,9 +41,9 @@ def build(arch, output):
         bundle = Path(temporary) / name
         payload = bundle / 'payload'
         payload.mkdir(parents=True)
-        files = ['package.json', 'package-lock.json', 'linux/provider.mjs', 'linux/chatgpt-api',
-                 'assets/model-template.json', 'assets/reasoning-levels.json',
-                 'src/shim.mjs', 'src/chat-compat.mjs', 'src/history-compat.mjs', 'src/non-gpt-compat.mjs', 'src/sse.mjs', 'src/image-compat.mjs']
+        files = ['package.json', 'package-lock.json', 'linux/provider.mjs', 'linux/settings.mjs', 'linux/chatgpt-api','linux/console',
+                 'assets/model-template.json', 'assets/reasoning-levels.json', 'assets/model-contexts.json','assets/console/index.html','assets/console/console.css','assets/console/console.js','assets/console/icon.svg',
+                 'src/shim.mjs','src/transport.mjs','src/response-state.mjs','src/settings.mjs','src/gateway-sources.mjs','src/console.mjs', 'src/chat-compat.mjs', 'src/history-compat.mjs', 'src/non-gpt-compat.mjs', 'src/sse.mjs', 'src/image-compat.mjs', 'src/model-context.mjs', 'src/gateway-recovery.mjs']
         locked = json.loads((ROOT / 'package-lock.json').read_text(encoding='utf-8'))['packages']
         for relative, metadata in locked.items():
             if not relative:
@@ -80,13 +83,13 @@ def build(arch, output):
         for file in sorted(payload.rglob('*')):
             if file.is_file():
                 relative = file.relative_to(payload).as_posix()
-                mode = 0o755 if relative in ('runtime/node', 'linux/chatgpt-api') else 0o644
+                mode = 0o755 if relative in ('runtime/node', 'linux/chatgpt-api', 'linux/console') else 0o644
                 manifest['files'].append({'path': relative, 'bytes': file.stat().st_size, 'sha256': digest(file), 'mode': mode})
         (bundle / 'release.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8', newline='\n')
         def metadata(info):
             info.uid = info.gid = 0
             info.uname = info.gname = ''
-            info.mode = 0o755 if info.isdir() or info.name.endswith(('/install.sh', '/linux/chatgpt-api', '/runtime/node')) else 0o644
+            info.mode = 0o755 if info.isdir() or info.name.endswith(('/install.sh', '/linux/chatgpt-api', '/linux/console', '/runtime/node')) else 0o644
             return info
         try:
             with tarfile.open(archive, 'w:gz', format=tarfile.PAX_FORMAT) as target:
@@ -94,14 +97,12 @@ def build(arch, output):
         except BaseException:
             archive.unlink(missing_ok=True)
             raise
-    checksum = digest(archive)
-    Path(str(archive) + '.sha256').write_text(checksum + '  ' + archive.name + '\n', encoding='ascii', newline='\n')
-    print(json.dumps({'archive': str(archive), 'bytes': archive.stat().st_size, 'programFiles': len(manifest['files']), 'sha256': checksum}))
+    print(json.dumps({'archive': str(archive), 'bytes': archive.stat().st_size, 'programFiles': len(manifest['files'])}))
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--arch', choices=['x64', 'arm64', 'all'], default='all')
-    parser.add_argument('--output', type=Path, default=ROOT / 'release')
+    parser.add_argument('--output', type=Path, default=ROOT / 'release' / json.loads((ROOT / 'package.json').read_text())['version'])
     args = parser.parse_args()
     for architecture in ['x64', 'arm64'] if args.arch == 'all' else [args.arch]:
         build(architecture, args.output.resolve())

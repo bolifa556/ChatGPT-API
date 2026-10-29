@@ -12,6 +12,7 @@ if (-not (Test-LauncherDependencies $root)) { throw 'Prepare the locked runtime 
 
 $name = 'ChatGPT-API-Launcher-' + $package.version + '-win-x64'
 $output = [IO.Path]::GetFullPath($OutputDirectory)
+if ($output.TrimEnd('\') -eq (Join-Path $root 'release')) { $output = Join-Path $output $package.version }
 [void][IO.Directory]::CreateDirectory($output)
 $zip = Join-Path $output ($name + '.zip')
 if (Test-Path -LiteralPath $zip) { throw ('Release already exists; choose a new output directory or version: ' + $zip) }
@@ -31,13 +32,13 @@ function Copy-ProgramFile([string]$relative) {
 try {
     # Explicit application allowlist: never copy the repository or data wholesale.
     foreach ($file in @(
-        '安装.cmd','ChatGPT.vbs','chatgpt-api.vbs','chatgpt-apionly.vbs','Launch-ChatGPT.ps1','Read-ApiKey.ps1',
+        '安装.cmd','控制台.vbs','ChatGPT.vbs','chatgpt-api.vbs','chatgpt-apionly.vbs','Launch-ChatGPT.ps1','Read-ApiKey.ps1',
         'package.json','package-lock.json','runtime/node.exe',
-        'assets/ChatGPT.ico','assets/model-template.json','assets/reasoning-levels.json','assets/runtime.json',
+        'assets/ChatGPT.ico','assets/model-template.json','assets/reasoning-levels.json','assets/model-contexts.json','assets/console/index.html','assets/console/console.css','assets/console/console.js','assets/console/icon.svg','assets/runtime.json',
         'install/Install-ChatGPT.ps1','install/Install-Core.ps1','install/Bootstrap-Runtime.ps1',
-        'src/Common.ps1','src/Package-Paths.ps1','src/Launcher-State.ps1','src/Router-Control.ps1',
-        'src/shim.mjs','src/chat-compat.mjs','src/history-compat.mjs','src/non-gpt-compat.mjs','src/sse.mjs','src/image-compat.mjs',
-        'src/repair-thread-providers.mjs'
+        'src/Common.ps1','src/Package-Paths.ps1','src/Launcher-State.ps1','src/Router-Control.ps1','src/Api-Settings.ps1',
+        'src/shim.mjs','src/transport.mjs','src/response-state.mjs','src/settings.mjs','src/gateway-sources.mjs','src/console.mjs','src/chat-compat.mjs','src/history-compat.mjs','src/non-gpt-compat.mjs','src/sse.mjs','src/image-compat.mjs',
+        'src/repair-thread-providers.mjs','src/model-context.mjs','src/gateway-recovery.mjs'
     )) { Copy-ProgramFile $file }
     foreach ($entry in @(Get-LockedPackages $root)) {
         $directory = Join-Path $root $entry.Name
@@ -69,9 +70,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $bundle 'release.json'), ($manifest | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [IO.Compression.ZipFile]::CreateFromDirectory($build, $zip, [IO.Compression.CompressionLevel]::Optimal, $false)
-    $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-    [IO.File]::WriteAllText(($zip + '.sha256'), ($hash + '  ' + [IO.Path]::GetFileName($zip) + "`r`n"), (New-Object Text.UTF8Encoding($false)))
-    [pscustomobject]@{archive=$zip;bytes=(Get-Item -LiteralPath $zip).Length;programFiles=$files.Count;sha256=$hash} | ConvertTo-Json
+    [pscustomobject]@{archive=$zip;bytes=(Get-Item -LiteralPath $zip).Length;programFiles=$files.Count} | ConvertTo-Json
 } finally {
     # This GUID staging directory is created by this build only.
     $resolvedBuild = [IO.Path]::GetFullPath($build)

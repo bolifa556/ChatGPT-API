@@ -5,6 +5,8 @@ $packageDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $packageDir 'src\Package-Paths.ps1')
 . (Join-Path $packageDir 'src\Launcher-State.ps1')
 . (Join-Path $packageDir 'src\Router-Control.ps1')
+. (Join-Path $packageDir 'src\Api-Settings.ps1')
+. (Join-Path $packageDir 'install\Install-Core.ps1')
 $null = Initialize-PackageLayout $packageDir
 $configPath = Join-Path (Get-CodexHome) 'config.toml'
 $runtimePath = Get-LauncherDataPath $packageDir 'runtime-state.json'
@@ -80,17 +82,23 @@ try {
     Restore-LauncherConfig $packageDir $configPath
     Recover-OldOverrides
     Stop-Helpers
-    $settings = Get-EnvValues (Get-LauncherDataPath $packageDir '.env')
-    $apiKey = [string]$settings['API_KEY']
-    if (-not $apiKey) { throw '.env 中缺少 API_KEY。请运行安装脚本填写。' }
-    $baseUrl = Normalize-BaseUrl ([string]$settings['BASE_URL'])
     $nodePath = Join-Path $packageDir 'runtime\node.exe'
     if (-not (Test-Path -LiteralPath $nodePath)) { throw '缺少 runtime\node.exe，请使用完整安装包。' }
     $shimPath = Join-Path $packageDir 'src\shim.mjs'
+    $authMode = Get-LauncherRouteMode $Mode (Get-CodexHome)
+    if ($Mode -eq 'official') { $prepared = Ensure-LocalRouter $packageDir $authMode $Mode }
+    else {
+        $prepared = Invoke-GatewayPreparation { Ensure-LocalRouter $packageDir $authMode $Mode } { Show-ApiSettings $packageDir } {
+            param($values)
+            Stop-Helpers
+            Set-LauncherSettings $packageDir $values.base $values.key
+        }
+    }
+    $settings = Get-EnvValues (Get-LauncherDataPath $packageDir '.env')
+    $apiKey = [string]$settings['API_KEY']
+    $baseUrl = Normalize-BaseUrl ([string]$settings['BASE_URL'])
     $shimPort = if ($settings['SHIM_PORT']) { [int]$settings['SHIM_PORT'] } else { 8102 }
     $shimBase = 'http://127.0.0.1:' + $shimPort + '/v1'
-    $authMode = Get-LauncherRouteMode $Mode (Get-CodexHome)
-    $prepared = Ensure-LocalRouter $packageDir $authMode $Mode
     Apply-LauncherConfig $packageDir $configPath $authMode $shimBase $baseUrl $Mode
     # No desktop process is running here. Match each managed conversation's
     # provider to its saved model through the native API, retaining its history/ID.

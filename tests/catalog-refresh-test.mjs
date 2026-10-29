@@ -12,9 +12,10 @@ const home = path.join(fixture, 'home'), children = [], sockets = new Set(), rec
 for (const sub of ['assets','data/state','data/cache','home']) fs.mkdirSync(path.join(fixture, sub), { recursive: true });
 for (const name of ['model-template.json','reasoning-levels.json']) fs.copyFileSync(path.join(root, 'assets', name), path.join(fixture, 'assets', name));
 const template = JSON.parse(fs.readFileSync(path.join(root, 'assets/model-template.json'), 'utf8')).models[0];
-const old = { ...template, slug: 'gpt-6-sol' };
+const nativeInstructions = template.model_messages?.instructions_template || template.base_instructions;
+const old = { ...template, slug: 'gpt-6-sol', base_instructions: nativeInstructions, model_messages: null };
 const nativeMessages = {
-  instructions_template: template.base_instructions,
+  instructions_template: nativeInstructions,
   persistent_instructions: 'native fixture instructions',
   instructions_variables: { fixture: { original: true } },
   approvals: { fixture: true },
@@ -80,12 +81,14 @@ try {
   assert(menu().every(model => model.base_instructions || model.model_messages?.instructions_template));
   checks.push('Modern GPT aliases retain the complete native instructions object; legacy aliases retain base instructions in both menu files');
   for (const gatewayModel of gatewayMenu) {
-    assert.deepEqual(gatewayModel.service_tiers, []);
-    assert.deepEqual(gatewayModel.additional_speed_tiers, []);
+    const gpt = gatewayModel.slug.startsWith('GPT/');
+    assert.deepEqual(gatewayModel.service_tiers.map(tier => tier.id), gpt ? ['priority'] : []);
+    assert.deepEqual(gatewayModel.additional_speed_tiers, gpt ? ['fast'] : []);
+    assert(!gatewayModel.service_tiers.some(tier => /\d(?:\.\d+)?x speed/.test(tier.description)));
     assert.equal(gatewayModel.default_service_tier, null);
   }
   assert.deepEqual(menu().slice(0, 2), [latest, old]);
-  checks.push('Unadvertised gateway speed options are empty for GPT aliases and non-GPT models; official metadata remains byte-for-byte equivalent');
+  checks.push('ID-only GPT gateways expose the native Fast request without invented speed guarantees; non-GPT stays capability-based and official metadata is unchanged');
   const running = child();
   let ready = false;
   for (let n = 0; n < 80; n++) { try { if ((await fetch(base + '/healthz')).ok) { ready = true; break; } } catch {} await delay(40); }
@@ -102,6 +105,16 @@ try {
   await (await fetch(base + '/readyz')).json();
   assert.deepEqual(menu().find(model => model.slug === 'Vendor/model').service_tiers, []);
   checks.push('Explicit upstream Fast metadata is preserved through refresh and cache; withdrawing it removes stale speed claims');
+  gatewayMetadata = { 'GPT/gpt-6.1-sol': { service_tiers: [], additional_speed_tiers: [] },
+    'GPT/gpt-6-sol': { service_tiers: [{ id: 'fast', name: 'Gateway Fast', description: 'Gateway description' }], additional_speed_tiers: ['fast'] } };
+  await (await fetch(base + '/readyz')).json();
+  assert.deepEqual(menu().find(model => model.slug === 'GPT/gpt-6.1-sol').service_tiers, []);
+  assert.deepEqual(menu().find(model => model.slug === 'GPT/gpt-6.1-sol').additional_speed_tiers, []);
+  assert.deepEqual(menu().find(model => model.slug === 'GPT/gpt-6-sol').service_tiers, gatewayMetadata['GPT/gpt-6-sol'].service_tiers);
+  gatewayMetadata = {};
+  await (await fetch(base + '/readyz')).json();
+  assert.equal(menu().find(model => model.slug === 'GPT/gpt-6.1-sol').service_tiers[0].id, 'priority');
+  checks.push('GPT gateway speed declarations override the fallback, including explicit disablement; removing a declaration restores the request option');
   extra = [{ ...template, slug: 'gpt-catalog-refresh-fixture' }];
   await (await fetch(base + '/readyz')).json();
   assert.deepEqual(menu().slice(0, 3), [latest, old, ...extra]);
@@ -153,11 +166,11 @@ try {
     assert.deepEqual(alias.model_messages, nativeMessages);
   }
   const nonGpt = menu().find(model => model.slug === 'Vendor/model');
-  assert(nonGpt.base_instructions);
-  assert.equal(nonGpt.model_messages, null);
+  assert.equal(nonGpt.base_instructions, undefined);
+  assert.deepEqual(nonGpt.model_messages, nativeMessages);
   assert.equal(nonGpt.tool_mode, 'code_mode_only');
   assert(menu().every(model => model.base_instructions || model.model_messages?.instructions_template));
-  checks.push('An updated template and an unmatched GPT alias preserve native instructions without changing non-GPT compatibility');
+  checks.push('Non-GPT and unmatched GPT models preserve every updated native instruction field, including future fields and variables');
   fs.unlinkSync(path.join(home, 'auth.json'));
   fs.unlinkSync(path.join(home, 'models_cache.json'));
   fs.writeFileSync(routeFile, JSON.stringify({ mode: 'gateway', officialProxy: '', clientVersion: '0.162.0' }));
@@ -165,9 +178,13 @@ try {
   assert.equal((await once(apiOnly, 'exit'))[0], 0, apiOnly.errorText);
   assert.equal(records.length, officialCalls);
   assert.deepEqual(new Set(menu().map(model => model.slug)), new Set(gatewayIds));
-  assert(menu().every(model => model.service_tiers.length === 0 && model.additional_speed_tiers.length === 0 && model.default_service_tier === null));
+  assert(menu().filter(model => model.slug.startsWith('GPT/')).every(model => model.service_tiers[0]?.id === 'priority' && model.additional_speed_tiers.includes('fast') && model.default_service_tier === null));
+  assert.deepEqual(menu().find(model => model.slug === 'Vendor/model').service_tiers, []);
   assert.equal(fs.existsSync(path.join(home, 'auth.json')), false);
-  checks.push('API-only mode prepares the complete gateway menu without official credentials, official requests or inherited Fast claims');
+  assert(menu().every(model => JSON.stringify(model.model_messages) === JSON.stringify(template.model_messages)));
+  assert(menu().every(model => model.base_instructions === template.base_instructions));
+  checks.push('Fresh API-only catalogs retain the complete bundled native template without official login or extra instructions');
+  checks.push('API-only GPT Fast works without official credentials or official model requests; other models still require upstream speed metadata');
   const report = { passed: true, checks };
   fs.writeFileSync(path.join(root, 'data/diagnostics/catalog-refresh-result.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));

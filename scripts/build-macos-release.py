@@ -1,4 +1,4 @@
-"""Build a standalone macOS API-only provider package without personal state or Windows files."""
+"""Build the internal macOS provider archive used by the DMG builder."""
 import argparse
 import hashlib
 import json
@@ -13,8 +13,11 @@ from urllib.request import urlopen
 ROOT = Path(__file__).resolve().parents[1]
 
 def digest(file):
+    checksum = hashlib.sha256()
     with file.open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            checksum.update(chunk)
+    return checksum.hexdigest()
 
 def build(arch, output):
     package = json.loads((ROOT / 'package.json').read_text(encoding='utf-8'))
@@ -38,9 +41,9 @@ def build(arch, output):
         bundle = Path(temporary) / name
         payload = bundle / 'payload'
         payload.mkdir(parents=True)
-        files = ['package.json', 'package-lock.json', 'macos/provider.mjs', 'macos/platform.mjs', 'macos/install.mjs', 'macos/chatgpt-apionly',
-                 'assets/model-template.json', 'assets/reasoning-levels.json',
-                 'src/shim.mjs', 'src/chat-compat.mjs', 'src/history-compat.mjs', 'src/non-gpt-compat.mjs', 'src/sse.mjs', 'src/image-compat.mjs']
+        files = ['package.json', 'package-lock.json', 'macos/provider.mjs', 'macos/platform.mjs', 'macos/native.mjs', 'macos/install.mjs', 'macos/chatgpt-apionly',
+                 'assets/model-template.json', 'assets/reasoning-levels.json', 'assets/model-contexts.json','assets/console/index.html','assets/console/console.css','assets/console/console.js','assets/console/icon.svg',
+                 'src/shim.mjs','src/transport.mjs','src/response-state.mjs','src/settings.mjs','src/gateway-sources.mjs','src/console.mjs', 'src/chat-compat.mjs', 'src/history-compat.mjs', 'src/non-gpt-compat.mjs', 'src/sse.mjs', 'src/image-compat.mjs', 'src/repair-thread-providers.mjs', 'src/model-context.mjs', 'src/gateway-recovery.mjs']
         locked = json.loads((ROOT / 'package-lock.json').read_text(encoding='utf-8'))['packages']
         for relative, metadata in locked.items():
             if not relative:
@@ -102,7 +105,7 @@ def build(arch, output):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--arch', choices=['arm64'], default='arm64')
-    parser.add_argument('--output', type=Path, default=ROOT / 'release')
+    parser.add_argument('--output', type=Path, default=ROOT / 'data/build/macos-provider')
     args = parser.parse_args()
     for architecture in [args.arch]:
         build(architecture, args.output.resolve())

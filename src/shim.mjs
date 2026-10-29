@@ -6,7 +6,7 @@ import os from 'node:os';
 import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { Agent, ProxyAgent, request } from 'undici';
+import { Agent } from 'undici';
 import WebSocket, { WebSocketServer } from 'ws';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { normalizeGptHistory, normalizeOfficialHistory, isGptModel, ResponseOutput } from './history-compat.mjs';
@@ -14,6 +14,12 @@ import { NonGptAdapter, NonGptEvents, validateNonGptCompaction } from './non-gpt
 import { usesChat, chatRequest, chatResponse, ChatEvents } from './chat-compat.mjs';
 import { decodedStream, ssePackets, encodeSse } from './sse.mjs';
 import { forwardImages, imageOnlyModel, imageCapabilities } from './image-compat.mjs';
+import { contextFields, rememberContexts, contextKey, applyContext } from './model-context.mjs';
+import { officialDispatcherFor, readEncodedBody, outgoingBody, writeChunk, relayClose,
+  requestWithAbort as request, protocolError, releaseResponseBody, RESPONSE_TIMEOUTS, MAX_REQUEST_BYTES } from './transport.mjs';
+import { PendingResponses, HistoryCache, laneOf } from './response-state.mjs';
+import { GatewaySources } from './gateway-sources.mjs';
+import { overrideKey, redact } from './settings.mjs';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const root = process.env.CHATGPT_API_ROOT || path.dirname(dir);
@@ -40,16 +46,20 @@ const mode = entryMode === 'apionly' ? 'gateway' : runtime.mode || 'mixed';
 const gatewayEnabled = entryMode !== 'official';
 const gatewayBase = (process.env.CHATGPT_GATEWAY_BASE || env.BASE_URL || '').replace(/\/+$/, '');
 const officialBase = (env.OFFICIAL_BASE || 'https://chatgpt.com/backend-api/codex').replace(/\/+$/, '');
-if (!/^https?:\/\//.test(gatewayBase) || !env.API_KEY) throw new Error('BASE_URL or API_KEY is missing.');
+if (gatewayEnabled && (!/^https?:\/\//.test(gatewayBase) || !env.API_KEY)) throw new Error('BASE_URL or API_KEY is missing.');
 const officialProxy = runtime.officialProxy ?? '';
 const transport = runtime.gatewayTransport || env.GATEWAY_TRANSPORT || 'direct';
 const tunnelPort = Number(env.GATEWAY_TUNNEL_PORT || 18003);
-const gatewayUrl = new URL(gatewayBase);
+const sources = new GatewaySources(root, env, { transport, tunnelPort, baseOverride: process.env.CHATGPT_GATEWAY_BASE || '' });
+const gatewayUrl = gatewayEnabled ? new URL(gatewayBase) : new URL('http://127.0.0.1');
 const gatewayDispatcher = new Agent(transport === 'ssh' ? { connect: { hostname: '127.0.0.1', port: tunnelPort, servername: gatewayUrl.hostname } } : {});
-const officialDispatcher = officialProxy ? new ProxyAgent({ uri: officialProxy, connect: { timeout: 10000 } }) : new Agent({ connect: { timeout: 10000 } });
-const sourceId = crypto.createHash('sha256').update(gatewayBase + '\n' + env.API_KEY).digest('hex');
+const officialDispatcher = officialDispatcherFor(officialProxy);
+const sourceId = crypto.createHash('sha256').update(gatewayBase + '\n' + (env.API_KEY || '')).digest('hex');
 const buildHash = crypto.createHash('sha256');
-for (const name of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs']) buildHash.update(fs.readFileSync(path.join(dir, name)));
+for (const name of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs','model-context.mjs','transport.mjs','response-state.mjs','settings.mjs','gateway-sources.mjs']) buildHash.update(fs.readFileSync(path.join(dir, name)));
+for (const name of ['model-contexts.json', 'model-template.json']) {
+  if (fs.existsSync(path.join(root, 'assets', name))) buildHash.update(fs.readFileSync(path.join(root, 'assets', name)));
+}
 const buildId = buildHash.digest('hex');
 const cachePath = path.join(cacheDir, 'catalog-state.json');
 const logFile = path.join(dataDir, 'logs', 'shim.log');
@@ -66,7 +76,7 @@ function log(text) {
     if (fs.existsSync(logFile) && fs.statSync(logFile).size > 5 * 1024 * 1024) {
       fs.rmSync(logFile + '.1', { force: true }); fs.renameSync(logFile, logFile + '.1');
     }
-    fs.appendFileSync(logFile, '[' + new Date().toISOString() + '] ' + text.replaceAll(env.API_KEY, '[redacted]') + '\n');
+    fs.appendFileSync(logFile, '[' + new Date().toISOString() + '] ' + redact(text, sources.settings, [env.API_KEY, ...sources.secrets]) + '\n');
   } catch {}
 }
 function auth() {
@@ -83,10 +93,10 @@ function currentClientVersion() {
 }
 function loadCatalog() {
   const saved = readJson(cachePath, {});
-  if (saved.sourceId === sourceId && Date.now() - Date.parse(saved.gatewayAt) < CACHE_MAX_AGE) {
-    catalog.gatewayIds = Array.isArray(saved.gatewayIds) ? saved.gatewayIds : [];
-    catalog.gatewayModels = Array.isArray(saved.gatewayModels) ? saved.gatewayModels : catalog.gatewayIds.map(id => ({ id }));
-    catalog.gatewayAt = saved.gatewayAt;
+  if (gatewayEnabled) {
+    catalog.gatewayModels = sources.loadCached(saved);
+    catalog.gatewayIds = catalog.gatewayModels.map(model => model.id);
+    catalog.gatewayAt = sources.sources.map(source => source.checkedAt).sort().at(-1) || null;
   }
   const native = readJson(path.join(codexHome, 'models_cache.json'), {});
   if (Array.isArray(native.models) && native.models.length) catalog.official = native.models;
@@ -99,7 +109,7 @@ function loadCatalog() {
   }
 }
 function saveCatalog() {
-  atomic(cachePath, { ...catalog, sourceId, accountIdentity: accountIdentity(), checkedAt: new Date().toISOString(), status });
+  atomic(cachePath, { ...catalog, sourceId, configurationId: sources.revision, accountIdentity: accountIdentity(), checkedAt: new Date().toISOString(), status });
 }
 function acceptOfficialCatalog(data, clientVersion) {
   if (!Array.isArray(data.models) || !data.models.length) throw new Error('Official model response has no catalog');
@@ -122,14 +132,10 @@ async function refreshCatalog() {
       (async () => {
         if (!gatewayEnabled) { status.gateway = { ready: false, enabled: false }; return; }
         try {
-          const data = await fetchJson(gatewayBase + '/models', { authorization: 'Bearer ' + env.API_KEY }, gatewayDispatcher);
-          const ids = [...new Set((data.data || []).map(m => m.id).filter(id => typeof id === 'string' && id))];
-          if (!ids.length) throw new Error('Gateway returned no models');
-          catalog.gatewayIds = ids; catalog.gatewayAt = new Date().toISOString();
-          catalog.gatewayModels = (data.data || []).filter(m => ids.includes(m.id)).map(m => Object.fromEntries(
-            ['id','type','capabilities','supported_endpoints','output_modalities','architecture',
-              'service_tiers','additional_speed_tiers','default_service_tier'].filter(key => m[key] !== undefined).map(key => [key,m[key]])));
-          status.gateway = { ready: true, checkedAt: catalog.gatewayAt, models: ids.length };
+          status.gateway = await sources.discover();
+          catalog.gatewayModels = sources.models;
+          catalog.gatewayIds = sources.models.map(model => model.id);
+          catalog.gatewayAt = sources.sources.map(source => source.checkedAt).sort().at(-1) || null;
         } catch (e) { status.gateway = { ready: false, error: e.message, checkedAt: new Date().toISOString(), cachedAt: catalog.gatewayAt }; }
       })(),
       (async () => {
@@ -167,34 +173,45 @@ function writeDesktopCatalog() {
   const compareNames = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' }).compare;
   const gatewayPriority = mode === 'mixed' ? Math.max(0, ...catalog.official.map(m => Number(m.priority) || 0)) + 1 : 1;
   const imageOnlyIds = new Set(catalog.gatewayModels.filter(imageOnlyModel).map(m => m.id));
-  const gateway = catalog.gatewayIds.filter(id => !imageOnlyIds.has(id) && (mode === 'gateway' || !officialIds.has(id))).sort(compareNames).map((id, index) => {
-    const leaf = id.split('/').at(-1);
-    const gpt = /^gpt\//i.test(id) || /^gpt(?:-|\d)/i.test(leaf);
-    const native = gpt ? catalog.official.find(m => m.slug === leaf) : null;
+  const contexts = new Map();
+  if (gatewayEnabled) for (const profile of sources.profiles()) contexts.set(profile.id, rememberContexts({ file: path.join(cacheDir, 'model-contexts.json'), base: profile.baseUrl,
+    models: catalog.gatewayModels.filter(model => (model._providerId || 'default') === profile.id && !imageOnlyIds.has(model.id)).map(model => ({ ...model, id: model._upstreamId || model.id })),
+    official: catalog.official, known: readJson(path.join(root, 'assets/model-contexts.json'), {}), write: atomic }));
+  const gateway = (gatewayEnabled ? catalog.gatewayIds : []).filter(id => !imageOnlyIds.has(id) && (mode === 'gateway' || !officialIds.has(id))).sort(compareNames).map((id, index) => {
+    const upstream = catalog.gatewayModels.find(m => m.id === id);
+    const originalId = upstream?._upstreamId || id, profile = sources.profile(upstream?._providerId || 'default');
+    const leaf = originalId.split('/').at(-1);
+    const gpt = isGptModel(originalId);
+    const native = gpt ? catalog.official.find(m => m.slug?.toLowerCase() === leaf.toLowerCase()) : null;
     const model = structuredClone(native || template);
-    Object.assign(model, { slug: id, display_name: id, description: 'Gateway model', priority: gatewayPriority + index,
+    applyContext(model, contexts.get(profile.id)?.entries[contextKey(profile.baseUrl, originalId)], { limit: sources.settings.contextLimit,
+      override: sources.settings.contextOverrides[overrideKey(profile.id, originalId)] });
+    Object.assign(model, { slug: id, display_name: sources.profiles().length > 1 || profile.id !== 'default' ? originalId + ' · ' + profile.name : id,
+      description: 'API · ' + profile.name, priority: gatewayPriority + index,
       visibility: 'list', supported_in_api: true, supported_reasoning_levels: levels.supported_reasoning_levels,
       default_reasoning_level: levels.default_reasoning_level, comp_hash: null });
-    // An official model's speed options do not describe the gateway's service.
-    // Keep only speed metadata explicitly advertised by that upstream.
-    const upstream = catalog.gatewayModels.find(m => m.id === id);
+    // OpenAI-compatible model lists commonly contain IDs only. GPT still accepts
+    // the native priority request; missing catalog fields must not hide it.
+    // An explicit upstream declaration (including an empty list) takes precedence.
+    const declaredSpeed = upstream && ['service_tiers', 'additional_speed_tiers'].some(key => Object.hasOwn(upstream, key));
+    const requestFast = gpt && !declaredSpeed;
     model.default_service_tier = upstream?.default_service_tier ?? null;
-    model.service_tiers = structuredClone(upstream?.service_tiers ?? []);
-    model.additional_speed_tiers = structuredClone(upstream?.additional_speed_tiers ?? []);
-    // Native GPT catalogs can carry instructions in model_messages instead of
-    // base_instructions. Preserve that entire object, including its variables.
-    if (!gpt) Object.assign(model, { model_messages: null, use_responses_lite: false, tool_mode: 'code_mode_only', shell_type: 'unified_exec', apply_patch_tool_type: 'freeform',
-      base_instructions: 'You are a helpful coding assistant. Follow application and user instructions. Follow each tool schema exactly. Source-code and patch inputs must contain raw source text, not an extra JSON-encoded wrapper. Keep numeric arguments as numbers. In JavaScript REPL tools, use documented output helpers and do not use a top-level return. Treat tool errors as failures and correct the call before claiming success.' });
+    model.service_tiers = structuredClone(upstream?.service_tiers ?? (requestFast
+      ? [{ id: 'priority', name: 'Fast', description: 'Request priority processing; availability and usage depend on the gateway.' }] : []));
+    model.additional_speed_tiers = structuredClone(upstream?.additional_speed_tiers ?? (requestFast ? ['fast'] : []));
+    // Let the native client assemble all instruction sections for every model.
+    // Only the wire/tool capabilities required by the converter differ.
+    if (!gpt) Object.assign(model, { use_responses_lite: false, tool_mode: 'code_mode_only', shell_type: 'unified_exec', apply_patch_tool_type: 'freeform' });
     return model;
   });
   atomic(path.join(cacheDir, 'models-gateway.json'), { models: gateway });
   atomic(path.join(cacheDir, 'models-smr.json'), { models: [...(mode === 'mixed' ? catalog.official : []), ...(gatewayEnabled ? gateway : [])] });
 }
 function route(model) {
-  if (!model) throw Object.assign(new Error('The request does not identify a model.'), { status: 400 });
+  if (!model) throw Object.assign(new Error('The request does not identify a model.'), { status: 400, code: 'missing_model' });
   if (mode === 'mixed' && catalog.official.some(m => m.slug === model)) return 'official';
   if (gatewayEnabled && catalog.gatewayIds.includes(model)) return 'gateway';
-  throw Object.assign(new Error('Unknown model: ' + model + '. Refresh the model list; this request was not forwarded.'), { status: 400 });
+  throw Object.assign(new Error('Unknown model: ' + model + '. Refresh the model list; this request was not forwarded.'), { status: 400, code: 'unknown_model' });
 }
 function historyForTarget(payload, which) {
   if (which !== 'official' && !isGptModel(payload.model)) return { payload, changed: false };
@@ -240,33 +257,49 @@ async function gatewayImageReferences(payload, incoming, signal) {
   }
   return converted;
 }
-function headersFor(incoming, target) {
+function hasOfficialAuth(incoming) {
+  const token = String(incoming.authorization || '').replace(/^Bearer\s+/i, '');
+  return mode === 'mixed' && (!!auth().token ||
+    ((entryMode === 'official' || runtime.nativeAccount === true) && !!token && !isGatewayKey(token)));
+}
+function isGatewayKey(token) { return token === env.API_KEY || sources.secrets.has(token); }
+function headersFor(incoming, target, profile) {
   const headers = {};
   for (const [k, v] of Object.entries(incoming)) {
     if (['host','connection','content-length','transfer-encoding','content-encoding','upgrade','proxy-authorization'].includes(k) || k.startsWith('sec-websocket-')) continue;
     headers[k] = v;
   }
-  headers['accept-encoding'] = 'identity';
+  if (target !== 'official') headers['accept-encoding'] = 'identity';
   if (target === 'gateway') {
-    headers.authorization = 'Bearer ' + env.API_KEY;
+    headers.authorization = 'Bearer ' + (profile?.apiKey || env.API_KEY);
     delete headers['chatgpt-account-id']; delete headers['openai-organization']; delete headers['openai-project'];
   } else {
     const a = auth();
     // Honor refreshed credentials sent by the native client; legacy custom-provider
     // threads carry our gateway key and must instead use the saved local account.
     const incomingToken = String(incoming.authorization || '').replace(/^Bearer\s+/i, '');
-    const token = incomingToken && incomingToken !== env.API_KEY ? incomingToken : a.token;
+    const token = incomingToken && !isGatewayKey(incomingToken) ? incomingToken : a.token;
     if (!token) throw Object.assign(new Error('Official models require a local ChatGPT sign-in.'), { status: 401 });
     headers.authorization = 'Bearer ' + token;
-    if (!incomingToken || incomingToken === env.API_KEY) {
+    if (!incomingToken || isGatewayKey(incomingToken)) {
       delete headers['chatgpt-account-id']; if (a.accountId) headers['chatgpt-account-id'] = a.accountId;
     }
   }
   return headers;
 }
-function targetUrl(which, url) {
+function targetUrl(which, url, gateway) {
   const suffix = url.pathname.replace(/^\/v1(?=\/|$)/, '');
-  return (which === 'official' ? officialBase : gatewayBase) + (suffix || '/') + url.search;
+  return (which === 'official' ? officialBase : gateway?.base || gatewayBase) + (suffix || '/') + url.search;
+}
+function gatewayRequest(payload, gateway) { return payload.model === gateway.model ? payload : { ...payload, model: gateway.model }; }
+function clientEvent(event, model, gateway) {
+  return gateway && gateway.model !== model && event.response?.model ? { ...event, response: { ...event.response, model } } : event;
+}
+function imageSettings() {
+  const profile = sources.profile(sources.settings.preferredProviderId);
+  const id = name => profile?.id === 'default' ? name : '@' + profile?.id + '/' + name;
+  return { ...env, IMAGE_MODEL: profile?.imageModel ? id(profile.imageModel) : '',
+    IMAGE_EDIT_MODEL: profile?.imageEditModel ? id(profile.imageEditModel) : '' };
 }
 function decodeBody(body, encoding = '') {
   if (!body.length) return body;
@@ -275,13 +308,14 @@ function decodeBody(body, encoding = '') {
   if (!decoders[encoding]) throw new Error('Unsupported content encoding');
   return decoders[encoding](body);
 }
-async function readBody(req) {
-  const chunks = []; let n = 0;
-  for await (const chunk of req) { n += chunk.length; if (n > 256 * 1024 * 1024) throw new Error('Request too large'); chunks.push(chunk); }
-  return decodeBody(Buffer.concat(chunks), req.headers['content-encoding']);
-}
 function json(res, code, value) { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); }
-function protocolError(e) { return { type: 'error', status: e.status || 502, error: { type: 'server_error', code: e.code || 'upstream_error', message: e.message } }; }
+function parseRequest(text) {
+  let value;
+  try { value = JSON.parse(text); }
+  catch { throw Object.assign(new Error('The request body must contain valid JSON.'), { status: 400, code: 'invalid_json_request' }); }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw Object.assign(new Error('The request body must be a JSON object.'), { status: 400, code: 'invalid_json_request' });
+  return value;
+}
 async function* convertedEvents(stream, adapted) {
   const events = adapted.adapter ? new NonGptEvents(adapted.adapter) : null;
   const chat = adapted.chat ? new ChatEvents(adapted.payload.model) : null;
@@ -293,6 +327,9 @@ async function* convertedEvents(stream, adapted) {
       if (['response.completed','response.incomplete','response.failed','error'].includes(event.type)) terminal = true;
       for (const converted of events ? events.convert(event) : [event]) yield converted;
     }
+    // A Responses terminal event is complete even if the peer keeps HTTP open.
+    // Chat completion is emitted by finish() after its usage/[DONE] packets.
+    if (terminal) break;
   }
   if (chat) for (const event of chat.finish()) {
     for (const converted of events.convert(event)) yield converted;
@@ -300,8 +337,8 @@ async function* convertedEvents(stream, adapted) {
   if (events) events.finish();
   else if (!terminal) throw Object.assign(new Error('Upstream stream ended before a terminal response event.'), { status: 502, code: 'incomplete_upstream_response' });
 }
-function health() { return { status: (gatewayEnabled ? status.gateway.ready : status.official.ready) ? 'ok' : 'degraded', service: 'chatgpt-api-router', version: 2, compatibilityVersion: 2, buildId, mode, entryMode, sourceId, gatewayBase, clientVersion: currentClientVersion(), ...status, officialModels: mode === 'mixed' ? catalog.official.length : 0, gatewayModels: gatewayEnabled ? catalog.gatewayIds.length : 0,
-  gatewayImageModels: gatewayEnabled ? catalog.gatewayModels.filter(m => imageCapabilities(m).known || [env.IMAGE_MODEL,env.IMAGE_EDIT_MODEL].includes(m.id)).map(m => m.id) : [] }; }
+function health() { return { status: (gatewayEnabled ? status.gateway.ready : status.official.ready) ? 'ok' : 'degraded', service: 'chatgpt-api-router', version: 2, compatibilityVersion: 2, buildId, mode, entryMode, sourceId, gatewayBase, configurationId: sources.revision, clientVersion: currentClientVersion(), ...status, officialModels: mode === 'mixed' ? catalog.official.length : 0, gatewayModels: gatewayEnabled ? catalog.gatewayIds.length : 0,
+  gatewayImageModels: gatewayEnabled ? catalog.gatewayModels.filter(m => imageCapabilities(m).known || [imageSettings().IMAGE_MODEL,imageSettings().IMAGE_EDIT_MODEL].includes(m.id)).map(m => m.id) : [] }; }
 async function forwardOfficialCatalog(req, res, url) {
   // A native model-list request carries its own version, account, and query.
   // Forward its response, including metadata/ETag/304, rather than substituting
@@ -336,6 +373,7 @@ async function forwardOfficialCatalog(req, res, url) {
   } finally { controllers.delete(controller); }
 }
 async function handleHttp(req, res) {
+  const receivedAt = Date.now();
   const url = new URL(req.url, 'http://localhost');
   if (['/healthz','/v1/healthz','/readyz'].includes(url.pathname)) {
     if (url.pathname === '/readyz') await refreshCatalog();
@@ -350,40 +388,61 @@ async function handleHttp(req, res) {
     // Preserve that schema without exposing API models in the official entry.
     ...(mode === 'mixed' ? { models: catalog.official } : {}),
     object: 'list', data: [...(mode === 'mixed' ? catalog.official.map(m => m.slug) : []), ...(gatewayEnabled ? catalog.gatewayIds : [])].filter((m,i,a) => a.indexOf(m) === i).map(id => ({ id, object: 'model' })) });
-  let body = await readBody(req);
+  const incoming = await readEncodedBody(req);
+  let body = incoming.decoded;
   const imageRoute = /^\/(?:v1\/)?images\/(generations|edits)$/.exec(url.pathname);
   if (imageRoute) {
     if (req.method !== 'POST') throw Object.assign(new Error('Images endpoints require POST.'), { status: 405, code: 'invalid_image_request' });
     const controller = new AbortController(); controllers.add(controller);
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
     try {
-      return await forwardImages({ req,res,url,body,operation: imageRoute[1],env,
-        hasLogin: mode === 'mixed' && !!auth().token, allowGateway: gatewayEnabled,
-        getModels: async () => catalog.gatewayModels,
+      return await forwardImages({ req,res,url,body,operation: imageRoute[1],env: imageSettings(),
+        hasLogin: hasOfficialAuth(req.headers), allowGateway: gatewayEnabled,
+        getModels: async () => catalog.gatewayModels.map(model => {
+          const profile = sources.profile(model._providerId || 'default'), original = model._upstreamId || model.id;
+          return profile && [profile.imageModel, profile.imageEditModel].includes(original) ? { ...model, type: 'image' } : model;
+        }),
+        resolveGateway: model => {
+          const selected = sources.target(model.id, catalog.gatewayModels);
+          return { ...selected, env: { ...env, IMAGE_EDIT_FORMAT: selected.profile.imageEditFormat } };
+        },
         headersFor,targetUrl,officialDispatcher,gatewayDispatcher,imageDispatcher: officialDispatcher,decodeBody,signal: controller.signal,log,
         resolveFile: async id => {
-          if (mode !== 'mixed' || !auth().token) throw Object.assign(new Error('A native file ID requires its owning ChatGPT sign-in; use a URL or local reference image.'), { status: 400, code: 'image_reference_unavailable' });
+          if (!hasOfficialAuth(req.headers)) throw Object.assign(new Error('A native file ID requires its owning ChatGPT sign-in; use a URL or local reference image.'), { status: 400, code: 'image_reference_unavailable' });
           const result = await fetchJson(officialBase.replace(/\/codex$/, '') + '/files/download/' + encodeURIComponent(id), headersFor(req.headers, 'official'), officialDispatcher, 12000, controller.signal);
           if (typeof result.download_url !== 'string' || !/^https?:\/\//.test(result.download_url)) throw Object.assign(new Error('The native file service did not provide an image URL.'), { status: 502, code: 'image_reference_unavailable' });
           return result.download_url;
         } });
     } finally { controllers.delete(controller); }
   }
-  const parsed = JSON.parse(body.toString('utf8'));
+  const parsed = parseRequest(body.toString('utf8'));
   const which = route(parsed.model);
+  const gateway = which === 'gateway' ? sources.target(parsed.model, catalog.gatewayModels) : null;
   const controller = new AbortController(); controllers.add(controller);
   res.on('close', () => { if (!res.writableEnded) controller.abort(); });
   const started = Date.now();
+  const requestId = crypto.randomUUID();
+  let phase = 'conversion', firstByteMs = null, upstreamBytes = null, upstreamStatus = null, upstreamBody;
+  log('request start ' + JSON.stringify({ requestId, route: which, model: parsed.model,
+    wireBytes: incoming.raw.length, decodedBytes: incoming.decoded.length, encoding: incoming.encoding || 'identity',
+    readDecodeMs: started - receivedAt }));
   try {
-    const resolved = which === 'gateway' ? await gatewayImageReferences(parsed, req.headers, controller.signal) : parsed;
+    const resolved = which === 'gateway' ? await gatewayImageReferences(gatewayRequest(parsed, gateway), req.headers, controller.signal) : parsed;
     const adapted = prepareRequest(resolved, which, url.pathname);
-    if (adapted.changed || resolved !== parsed) body = Buffer.from(JSON.stringify(adapted.payload));
-    const headers = headersFor(req.headers, which);
+    const outgoingBodyData = await outgoingBody(incoming, adapted.payload, adapted.changed || resolved !== parsed, which === 'official');
+    body = outgoingBodyData.body; upstreamBytes = body.length;
+    const headers = headersFor(req.headers, which, gateway?.profile);
+    if (outgoingBodyData.encoding) headers['content-encoding'] = outgoingBodyData.encoding;
     if (adapted.adapter) delete headers['x-openai-internal-codex-responses-lite'];
-    const upstream = await request(adapted.chat ? gatewayBase + '/chat/completions' + url.search : targetUrl(which, url), { method: req.method, body, headers, dispatcher: which === 'official' ? officialDispatcher : gatewayDispatcher,
-      signal: controller.signal, headersTimeout: 120000, bodyTimeout: 300000 });
+    phase = 'upstream_headers';
+    const upstream = await request(adapted.chat ? gateway.base + '/chat/completions' + url.search : targetUrl(which, url, gateway), { method: req.method, body, headers, dispatcher: which === 'official' ? officialDispatcher : gateway.dispatcher,
+      signal: controller.signal, ...RESPONSE_TIMEOUTS });
+    upstreamBody = upstream.body;
+    upstreamStatus = upstream.statusCode; phase = 'stream';
+    log('request headers ' + JSON.stringify({ requestId, status: upstreamStatus, upstreamBytes,
+      encoding: outgoingBodyData.encoding || 'identity', ms: Date.now() - started }));
     const outgoing = { ...upstream.headers }; for (const name of ['connection','transfer-encoding','keep-alive']) delete outgoing[name];
-    if (adapted.adapter && upstream.statusCode >= 200 && upstream.statusCode < 300) {
+    if ((adapted.adapter || gateway && parsed.model !== gateway.model) && upstream.statusCode >= 200 && upstream.statusCode < 300) {
       const stream = decodedStream(upstream.body, upstream.headers['content-encoding']);
       delete outgoing['content-length']; delete outgoing['content-encoding'];
       outgoing['x-chatgpt-api-adapted'] = 'true';
@@ -392,27 +451,41 @@ async function handleHttp(req, res) {
         try {
           for await (const event of convertedEvents(stream, adapted)) {
             if (res.destroyed) break;
-            res.write(encodeSse(event));
+            firstByteMs ??= Date.now() - started;
+            await writeChunk(res, encodeSse(clientEvent(event, parsed.model, gateway)));
           }
         } catch (e) {
-          if (!res.destroyed) res.write(encodeSse(protocolError(e)));
+          if (!res.destroyed) await writeChunk(res, encodeSse(protocolError(e)));
           log('Stream conversion error ' + e.message);
         }
       } else {
         const chunks = []; let size = 0;
         for await (const chunk of stream) { size += chunk.length; if (size > 64 * 1024 * 1024) throw new Error('Upstream response exceeds limit'); chunks.push(chunk); }
         const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-        const response = adapted.adapter.response(adapted.chat ? chatResponse(data, parsed.model) : data);
+        const converted = adapted.chat ? chatResponse(data, gateway.model) : data;
+        const response = adapted.adapter ? adapted.adapter.response(converted) : converted;
+        if (gateway && gateway.model !== parsed.model && response.model) response.model = parsed.model;
         res.writeHead(upstream.statusCode, outgoing);
-        res.write(JSON.stringify(response));
+        firstByteMs ??= Date.now() - started;
+        await writeChunk(res, JSON.stringify(response));
       }
-      log('non-GPT compatibility model=' + parsed.model + ' ' + JSON.stringify(adapted.adapter.stats));
+      if (adapted.adapter) log('non-GPT compatibility model=' + parsed.model + ' ' + JSON.stringify(adapted.adapter.stats));
     } else {
       res.writeHead(upstream.statusCode, outgoing);
-      for await (const chunk of upstream.body) { if (res.destroyed) break; res.write(chunk); }
+      for await (const chunk of upstream.body) {
+        if (res.destroyed) break;
+        firstByteMs ??= Date.now() - started;
+        await writeChunk(res, chunk);
+      }
     }
     res.end(); log(which + ' HTTP model=' + parsed.model + ' status=' + upstream.statusCode + ' ms=' + (Date.now() - started));
-  } finally { controllers.delete(controller); }
+    log('request end ' + JSON.stringify({ requestId, status: upstreamStatus, firstByteMs, ms: Date.now() - started }));
+  } catch (error) {
+    log('request error ' + JSON.stringify({ requestId, route: which, model: parsed.model, phase,
+      upstreamBytes, status: upstreamStatus, firstByteMs, cancelled: controller.signal.aborted,
+      code: error.code || error.name, ms: Date.now() - started }));
+    throw error;
+  } finally { releaseResponseBody(upstreamBody); controllers.delete(controller); }
 }
 loadCatalog();
 if (process.argv.includes('--prepare')) {
@@ -422,44 +495,41 @@ if (process.argv.includes('--prepare')) {
     if (gatewayEnabled && !gatewayAvailable) {
       catalog.gatewayIds = [];
       catalog.gatewayModels = [];
-      if (mode !== 'mixed' || !catalog.official.length) throw new Error('Gateway unavailable and no current cache for this URL/key. ' + (status.gateway.error || ''));
+      if (mode !== 'mixed' || !catalog.official.length) throw Object.assign(new Error('Gateway unavailable and no current cache for this URL/key. ' + (status.gateway.error || '')), { code: 'gateway_unavailable' });
       saveCatalog();
     }
     writeDesktopCatalog();
     process.stdout.write(JSON.stringify(health()) + '\n');
-  } catch (e) { process.stderr.write(e.message.replaceAll(env.API_KEY, '[redacted]') + '\n'); process.exitCode = 1; }
-  await gatewayDispatcher.close(); await officialDispatcher.close();
+  } catch (e) { process.stderr.write((e.code === 'gateway_unavailable' ? '[gateway_unavailable] ' : '') + redact(e.message, sources.settings, [env.API_KEY, ...sources.secrets]) + '\n'); process.exitCode = 1; }
+  await sources.close(); await gatewayDispatcher.close(); await officialDispatcher.close();
 } else {
   const saved = readJson(cachePath, {});
   if (saved.sourceId === sourceId && saved.status) status = saved.status;
   const server = http.createServer((req, res) => handleHttp(req, res).catch(e => {
-    log('HTTP error ' + e.message); if (!res.headersSent) json(res, e.status || 502, { error: protocolError(e).error }); else res.destroy();
+    const failure = protocolError(e);
+    log('HTTP error ' + failure.error.code + ' ' + e.message); if (!res.headersSent) json(res, failure.status, { error: failure.error }); else res.destroy();
   }));
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 * 1024 });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_REQUEST_BYTES });
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url, 'http://localhost');
     if (!['/v1/responses','/responses'].includes(url.pathname)) { socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n'); return; }
     wss.handleUpgrade(req, socket, head, client => {
+      const connectionId = crypto.randomUUID();
       let upstream; let closed = false; let officialOpening = false;
       const officialQueue = []; const laneRoutes = new Map(); const responseRoutes = new Map(); const active = new Map();
       // HTTP gateways are usually stateless. Preserve WS incremental context only
       // for this connection, with bounded memory; never write conversation copies.
-      const gatewayHistory = new Map(); let historyBytes = 0;
-      const officialPending = new Map(), officialBodies = new Map(), officialLanes = new Map();
+      const gatewayHistory = new HistoryCache();
+      const officialPending = new PendingResponses(), officialBodies = new Map(), officialLanes = new Map();
       const send = value => { if (client.readyState === WebSocket.OPEN) client.send(typeof value === 'string' ? value : JSON.stringify(value)); };
-      const failure = (e, lane) => send({ type: 'error', status: e.status || 502, code: e.code || 'upstream_error', message: e.message, ...(lane ? { stream_id: lane } : {}), error: { type: 'server_error', code: e.code || 'upstream_error', message: e.message } });
-      function rememberGateway(id, body, output, which = 'gateway', { complete = true, connection = null } = {}) {
+      const failure = (e, lane) => { const value = protocolError(e); send({ ...value, code: value.error.code, message: value.error.message, ...(lane ? { stream_id: lane } : {}) }); };
+      function rememberGateway(id, body, output, which = 'gateway', { complete = true, connection = null, lane = laneOf(body) } = {}) {
         if (!id) return;
         const input = [...body.input, ...(output || [])];
         const defaults = { ...body };
         for (const key of ['input','stream','type','stream_id','previous_response_id','generate']) delete defaults[key];
-        const bytes = Buffer.byteLength(JSON.stringify({ defaults, input }));
-        if (gatewayHistory.has(id)) { historyBytes -= gatewayHistory.get(id).bytes; gatewayHistory.delete(id); }
-        if (bytes <= 64 * 1024 * 1024) { gatewayHistory.set(id, { input, defaults, bytes, complete, connection }); historyBytes += bytes; }
-        while (gatewayHistory.size > 8 || historyBytes > 64 * 1024 * 1024) {
-          const oldest = gatewayHistory.keys().next().value;
-          historyBytes -= gatewayHistory.get(oldest).bytes; gatewayHistory.delete(oldest);
-        }
+        if (!gatewayHistory.set(id, { input, defaults, complete, connection, lane }))
+          log('history cache miss reason=capacity route=' + which);
         responseRoutes.set(id, which);
       }
       function officialSend(text) {
@@ -482,7 +552,10 @@ if (process.argv.includes('--prepare')) {
           }
           const normalized = historyForTarget(event, 'official');
           if (changed || normalized.changed) text = JSON.stringify(normalized.payload);
-          officialPending.set(event.stream_id || 'default', { body: context, complete, incremental: Boolean(event.previous_response_id) });
+          const trace = { requestId: crypto.randomUUID(), started: Date.now() };
+          officialPending.push(laneOf(event), { body: context, complete, incremental: Boolean(event.previous_response_id), trace });
+          log('WS request ' + JSON.stringify({ connectionId, requestId: trace.requestId, route: 'official',
+            model: event.model, bytes: Buffer.byteLength(text), incremental: Boolean(event.previous_response_id) }));
         }
         officialQueue.push(text);
         if (upstream?.readyState === WebSocket.OPEN) { while (officialQueue.length) upstream.send(officialQueue.shift()); return; }
@@ -503,12 +576,17 @@ if (process.argv.includes('--prepare')) {
           if (connection !== upstream || closed) return;
           const text = data.toString();
           try {
-            const event = JSON.parse(text), id = event.response?.id, lane = event.stream_id || 'default';
+            const event = JSON.parse(text), id = event.response?.id, lane = laneOf(event);
             if (event.type === 'error') {
-              const error = event.error || event, pending = officialPending.get(lane);
+              const error = event.error || event;
+              // A request error before response.created consumes one FIFO entry.
+              // Once work is accepted, never replay it or guess which later
+              // queued request an uncorrelated error belongs to.
+              const accepted = officialLanes.has(lane);
+              const pending = accepted ? null : officialPending.shift(lane);
               const invalidPrevious = Number(event.status) === 400 &&
                 (error.code === 'previous_response_not_found' || error.param === 'previous_response_id' || /Invalid\s+[`'"]?previous_response_id[`'"]?/i.test(error.message || ''));
-              if (invalidPrevious && pending?.incremental && pending.complete) {
+              if (invalidPrevious && pending?.incremental && pending.complete && !officialPending.peek(lane)) {
                 // This validation error precedes response.created. Retry once
                 // using the already assembled context, without the expired ID.
                 // The retry is non-incremental, so it cannot enter this branch again.
@@ -517,24 +595,29 @@ if (process.argv.includes('--prepare')) {
                 officialSend(JSON.stringify(replay));
                 return;
               }
-              officialPending.delete(lane);
+              if (accepted) officialPending.delete(lane);
               officialLanes.delete(lane);
               for (const [responseId, pendingBody] of officialBodies) {
-                if ((pendingBody.body.stream_id || 'default') === lane) officialBodies.delete(responseId);
+                if (laneOf(pendingBody.body) === lane) officialBodies.delete(responseId);
               }
               log('official WS error status=' + (event.status || '') + ' code=' + (error.code || '') + ' invalid_previous=' + invalidPrevious);
             }
             if (id) responseRoutes.set(id, 'official');
-            if (event.type === 'response.created' && id && officialPending.has(lane)) {
-              officialBodies.set(id, { ...officialPending.get(lane), output: new ResponseOutput() }); officialPending.delete(lane);
+            if (event.type === 'response.created' && id) {
+              const pending = officialPending.shift(lane);
+              if (pending) officialBodies.set(id, { ...pending, output: new ResponseOutput() });
+              if (pending?.trace) log('WS accepted ' + JSON.stringify({ connectionId, requestId: pending.trace.requestId, ms: Date.now() - pending.trace.started }));
               officialLanes.set(lane, id);
             }
             const responseId = id || event.response_id || officialLanes.get(lane);
+            if (event.type === 'response.interrupt.accepted' && officialBodies.has(responseId))
+              officialBodies.get(responseId).interrupted = true;
             officialBodies.get(responseId)?.output.observe(event);
             if (['response.completed','response.incomplete'].includes(event.type) && officialBodies.has(id)) {
               const pending = officialBodies.get(id);
               const result = pending.output.finish(event.response.output);
-              rememberGateway(id, pending.body, result.output, 'official', { complete: pending.complete && result.complete, connection }); officialBodies.delete(id);
+              rememberGateway(id, pending.body, result.output, 'official', { complete: pending.complete && (result.complete || pending.interrupted === true), connection }); officialBodies.delete(id);
+              if (pending.trace) log('WS end ' + JSON.stringify({ connectionId, requestId: pending.trace.requestId, status: event.response.status, ms: Date.now() - pending.trace.started }));
               if (officialLanes.get(lane) === id) officialLanes.delete(lane);
             }
             if (event.type === 'response.failed') {
@@ -547,17 +630,17 @@ if (process.argv.includes('--prepare')) {
           if (connection !== upstream || closed) return;
           officialOpening = false; officialQueue.length = 0; failure(e);
         });
-        connection.on('close', code => {
+        connection.on('close', (code, reason) => {
           if (connection !== upstream) return;
           officialOpening = false; upstream = null;
-          log('official WS closed code=' + code + ' lifetime_ms=' + (Date.now() - openedAt));
+          log('official WS closed code=' + code + ' lifetime_ms=' + (Date.now() - openedAt) + ' connection=' + connectionId);
           // If generation was in flight, let the native client handle the broken
           // transport. Never silently replay possibly accepted work or tool calls.
-          if (!closed && (officialPending.size || officialBodies.size)) client.close(1012, 'Official upstream disconnected during a response');
+          if (!closed && (officialPending.size || officialBodies.size || ![1000, 1001, 1005].includes(code))) relayClose(client, code, reason);
         });
       }
       async function gatewayCreate(event) {
-        const lane = event.stream_id || 'default';
+        const lane = laneOf(event);
         if (active.has(lane)) throw Object.assign(new Error('A response is already running on this stream.'), { status: 409 });
         const previous = event.previous_response_id ? gatewayHistory.get(event.previous_response_id) : null;
         if (event.previous_response_id && (!previous || !previous.complete)) throw Object.assign(new Error('Previous response is not cached on this connection. Retry with the full input history.'), { status: 400, code: 'previous_response_not_found' });
@@ -568,63 +651,116 @@ if (process.argv.includes('--prepare')) {
         if (event.generate === false) {
           // Native clients prewarm WS connections without requesting generation.
           const response = { id: 'resp_router_' + crypto.randomUUID().replaceAll('-', ''), object: 'response', created_at: Math.floor(Date.now()/1000), model: body.model, output: [], status: 'completed', error: null };
-          rememberGateway(response.id, body, []);
+          rememberGateway(response.id, body, [], 'gateway', { lane });
           const extra = event.stream_id ? { stream_id: event.stream_id } : {};
           send({ type: 'response.created', sequence_number: 0, response: { ...response, status: 'in_progress' }, ...extra });
           send({ type: 'response.completed', sequence_number: 1, response, ...extra });
           return;
         }
-        const controller = new AbortController(); active.set(lane, controller); controllers.add(controller);
+        const controller = new AbortController();
+        const gateway = sources.target(body.model, catalog.gatewayModels);
+        const pending = { controller, lane, streamId: event.stream_id, body, output: new ResponseOutput(), response: null, nextSequence: 0, interrupted: false };
+        active.set(lane, pending); controllers.add(controller);
+        let upstreamBody;
+        const requestId = crypto.randomUUID(), started = Date.now();
         try {
-          const adapted = prepareRequest(await gatewayImageReferences(body, req.headers, controller.signal), 'gateway');
+          const adapted = prepareRequest(await gatewayImageReferences(gatewayRequest(body, gateway), req.headers, controller.signal), 'gateway');
           const wireBody = adapted.payload;
-          const headers = { ...headersFor(req.headers, 'gateway'), 'content-type': 'application/json' };
+          const headers = { ...headersFor(req.headers, 'gateway', gateway.profile), 'content-type': 'application/json' };
           if (adapted.adapter) delete headers['x-openai-internal-codex-responses-lite'];
-          const up = await request(gatewayBase + (adapted.chat ? '/chat/completions' : '/responses'), { method: 'POST', headers, body: JSON.stringify(wireBody), dispatcher: gatewayDispatcher, signal: controller.signal, headersTimeout: 120000, bodyTimeout: 300000 });
+          const wireText = JSON.stringify(wireBody);
+          log('WS request ' + JSON.stringify({ connectionId, requestId, route: 'gateway', model: event.model, bytes: Buffer.byteLength(wireText) }));
+          const up = await request(gateway.base + (adapted.chat ? '/chat/completions' : '/responses'), { method: 'POST', headers, body: wireText, dispatcher: gateway.dispatcher, signal: controller.signal, ...RESPONSE_TIMEOUTS });
+          upstreamBody = up.body;
+          log('WS headers ' + JSON.stringify({ connectionId, requestId, status: up.statusCode, ms: Date.now() - started }));
           if (up.statusCode < 200 || up.statusCode >= 300) {
-            const text = await up.body.text(); let message = text.slice(0,1800); let code;
-            try { const obj = JSON.parse(text); message = obj.error?.message || obj.message || message; code = obj.error?.code; } catch {}
-            throw Object.assign(new Error(message), { status: up.statusCode, code });
+            const text = await up.body.text(); let message = text.slice(0,1800), upstreamError;
+            try { const obj = JSON.parse(text); message = obj.error?.message || obj.message || message; if (obj.error && typeof obj.error === 'object') upstreamError = obj.error; } catch {}
+            throw Object.assign(new Error(message), { status: up.statusCode, upstreamError });
           }
-          if (!String(up.headers['content-type']).includes('text/event-stream')) throw new Error('Gateway did not return an SSE response');
-          const output = new ResponseOutput();
-          for await (const response of convertedEvents(decodedStream(up.body, up.headers['content-encoding']), adapted)) {
-              output.observe(response);
+          if (!String(up.headers['content-type']).includes('text/event-stream')) throw Object.assign(new Error('Gateway did not return an SSE response'), { status: 502, code: 'invalid_upstream_content_type' });
+          for await (const original of convertedEvents(decodedStream(up.body, up.headers['content-encoding']), adapted)) {
+              const response = clientEvent(original, body.model, gateway);
+              if (pending.interrupted) break;
+              pending.output.observe(response);
+              if (response.response) pending.response = { ...pending.response, ...response.response };
+              pending.nextSequence = Math.max(pending.nextSequence + 1, Number.isInteger(response.sequence_number) ? response.sequence_number + 1 : 0);
               if (response.response?.id) responseRoutes.set(response.response.id, 'gateway');
               if (['response.completed','response.incomplete'].includes(response.type)) {
-                const result = output.finish(response.response?.output);
-                rememberGateway(response.response?.id, body, result.output, 'gateway', { complete: result.complete });
+                const result = pending.output.finish(response.response?.output);
+                rememberGateway(response.response?.id, body, result.output, 'gateway', { complete: result.complete, lane });
                 // Completion can arrive before the HTTP body closes. The client
                 // may immediately start its next turn on this same WS stream.
-                if (active.get(lane) === controller) active.delete(lane);
+                if (active.get(lane) === pending) active.delete(lane);
               }
               if (event.stream_id) response.stream_id = event.stream_id;
               send(response);
           }
           if (adapted.adapter) log('non-GPT compatibility model=' + event.model + ' ' + JSON.stringify(adapted.adapter.stats));
           log('gateway WS-to-HTTP model=' + event.model + ' status=' + up.statusCode);
-        } finally { if (active.get(lane) === controller) active.delete(lane); controllers.delete(controller); }
+        } catch (error) {
+          // A successful native interrupt owns the terminal acknowledgement;
+          // the deliberate HTTP abort must not fail it or a following turn.
+          if (pending.interrupted) return;
+          log('WS error ' + JSON.stringify({ connectionId, requestId, code: error.code || error.name, status: error.status,
+            cancelled: controller.signal.aborted, ms: Date.now() - started }));
+          throw error;
+        } finally { releaseResponseBody(upstreamBody); if (active.get(lane) === pending) active.delete(lane); controllers.delete(controller); }
+      }
+      function gatewayInterrupt(event) {
+        const id = event.response_id;
+        if (typeof id !== 'string' || !id) throw Object.assign(new Error('response.interrupt requires a response_id.'), { status: 400, code: 'invalid_response_id' });
+        const pending = [...active.values()].find(value => value.response?.id === id);
+        const cached = pending ? null : gatewayHistory.get(id);
+        const lane = pending?.lane ?? cached?.lane;
+        const streamId = event.stream_id ?? pending?.streamId ?? (typeof cached?.lane === 'string' ? cached.lane : undefined);
+        const extra = streamId !== undefined ? { stream_id: streamId } : {};
+        const modeSupported = event.mode === 'discard_partial_items';
+        if (!modeSupported || (!pending && (!cached || responseRoutes.get(id) !== 'gateway')) || (event.stream_id != null && laneOf(event) !== lane)) {
+          send({ type: 'response.interrupt.failed', response_id: id, ...extra,
+            error: { code: modeSupported ? 'response_not_found' : 'unsupported_interrupt_mode',
+              message: modeSupported ? 'No matching gateway response exists on this stream.' : 'Only discard_partial_items interruption is supported.' } });
+          return;
+        }
+        if (!pending) {
+          // Completion may already be on the wire when its interrupt arrives.
+          // Acknowledge it without emitting a second terminal response.
+          send({ type: 'response.interrupt.accepted', response_id: id, ...extra });
+          return;
+        }
+        pending.interrupted = true;
+        if (active.get(lane) === pending) active.delete(lane);
+        pending.controller.abort();
+        // Retain only original, completed items. Never complete partial tool
+        // arguments or manufacture assistant text from uncommitted deltas.
+        const output = pending.output.finish().output.filter(item => !item.status || item.status === 'completed');
+        const response = { ...pending.response, status: 'cancelled', output };
+        rememberGateway(id, pending.body, output, 'gateway', { lane });
+        send({ type: 'response.interrupt.accepted', response_id: id, sequence_number: pending.nextSequence++, ...extra });
+        send({ type: 'response.completed', response, sequence_number: pending.nextSequence++, ...extra });
+        log('gateway WS interrupted response=' + id);
       }
       // Attach immediately, before opening either upstream, so the first frame is retained.
       client.on('message', data => {
         try {
-          const text = data.toString(); const event = JSON.parse(text); const lane = event.stream_id || 'default';
-          const which = event.model ? route(event.model) : responseRoutes.get(event.previous_response_id) || laneRoutes.get(lane);
+          const text = data.toString(); const event = parseRequest(text); const lane = laneOf(event);
+          const which = event.model ? route(event.model) : responseRoutes.get(event.response_id) || responseRoutes.get(event.previous_response_id) || laneRoutes.get(lane);
+          if (event.type === 'response.interrupt' && which !== 'official') { gatewayInterrupt(event); return; }
           if (!which) throw Object.assign(new Error('A model is required before continuing this stream.'), { status: 400 });
           laneRoutes.set(lane, which);
           if (which === 'official') officialSend(text);
           else if (event.type === 'response.create') gatewayCreate(event).catch(e => failure(e, event.stream_id));
-          else if (event.type === 'response.cancel') active.get(lane)?.abort();
+          else if (event.type === 'response.cancel') active.get(lane)?.controller.abort();
           else throw Object.assign(new Error('This gateway does not support WebSocket event ' + event.type), { status: 400, code: 'unsupported_event' });
         } catch (e) { failure(e); }
       });
-      client.on('close', () => { closed = true; upstream?.terminate(); for (const ctrl of active.values()) ctrl.abort(); });
+      client.on('close', () => { closed = true; upstream?.terminate(); for (const value of active.values()) value.controller.abort(); });
       client.on('error', e => log('WebSocket client ' + e.message));
     });
   });
   const host = env.SHIM_HOST || '127.0.0.1';
   if (!['127.0.0.1','::1'].includes(host)) throw new Error('The local router must bind to loopback.');
   server.listen(Number(process.env.CHATGPT_SHIM_PORT || env.SHIM_PORT || 8102), host, () => log('router v2 listening mode=' + mode + ' transport=' + transport));
-  function shutdown() { for (const c of controllers) c.abort(); for (const ws of wss.clients) ws.terminate(); server.close(); gatewayDispatcher.destroy(); officialDispatcher.destroy(); setTimeout(() => process.exit(), 500).unref(); }
+  function shutdown() { for (const c of controllers) c.abort(); for (const ws of wss.clients) ws.terminate(); server.close(); sources.destroy(); gatewayDispatcher.destroy(); officialDispatcher.destroy(); setTimeout(() => process.exit(), 500).unref(); }
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
 }

@@ -24,7 +24,7 @@ function Get-ReleaseRelativeFile([string]$root, [string]$relative) {
         @($relative.Split('/') | Where-Object { $_ -in @('', '.', '..') }).Count) {
         throw ('发布包包含无效的相对路径：' + $relative)
     }
-    if ($relative -notmatch '^(?:ChatGPT\.vbs|chatgpt-api(?:only)?\.vbs|Launch-ChatGPT\.ps1|Read-ApiKey\.ps1|安装\.cmd|package(?:-lock)?\.json|(?:src|install|assets|runtime|node_modules)/.+)$' -or
+    if ($relative -notmatch '^(?:ChatGPT\.vbs|chatgpt-api(?:only)?\.vbs|Launch-ChatGPT\.ps1|Read-ApiKey\.ps1|安装\.cmd|控制台\.vbs|package(?:-lock)?\.json|(?:src|install|assets|runtime|node_modules)/.+)$' -or
         $relative -match '(^|/)(?:\.env(?:\..*)?|\.npmrc|\.git|data|\.cache)(/|$)') {
         throw ('发布包包含非程序文件：' + $relative)
     }
@@ -66,7 +66,7 @@ function Copy-ReleasePayload([string]$releaseRoot, [string]$destination) {
         }
         $copies += [pscustomobject]@{source=$source;target=$target}
     }
-    foreach ($required in @('Launch-ChatGPT.ps1','ChatGPT.vbs','chatgpt-api.vbs','chatgpt-apionly.vbs','Read-ApiKey.ps1','install/Install-ChatGPT.ps1','src/shim.mjs','runtime/node.exe','package-lock.json')) {
+    foreach ($required in @('Launch-ChatGPT.ps1','ChatGPT.vbs','chatgpt-api.vbs','chatgpt-apionly.vbs','Read-ApiKey.ps1','控制台.vbs','src/settings.mjs','src/gateway-sources.mjs','src/console.mjs','assets/console/index.html','install/Install-ChatGPT.ps1','src/shim.mjs','src/transport.mjs','src/response-state.mjs','src/model-context.mjs','src/gateway-recovery.mjs','src/Api-Settings.ps1','assets/model-contexts.json','runtime/node.exe','package-lock.json')) {
         if (-not $seen.ContainsKey($required)) { throw ('发布包缺少文件：' + $required) }
     }
     # Validate every source and destination before overwriting any installed file.

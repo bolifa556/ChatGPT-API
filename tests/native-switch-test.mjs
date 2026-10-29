@@ -8,16 +8,21 @@ import zlib from 'node:zlib';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { WebSocketServer } from 'ws';
+import { readRequestJson } from './http-fixture.mjs';
 import { root, delay } from './live-support.mjs';
 import { repairThreadProviders } from '../src/repair-thread-providers.mjs';
+import { applyConfig as applyMacConfig, restoreConfig as restoreMacConfig } from '../macos/provider.mjs';
 
-const models = JSON.parse(fs.readFileSync(path.join(root,'data/cache/catalog-state.json'),'utf8')).gatewayIds;
+const models = process.env.NATIVE_TEST_MODELS ? JSON.parse(process.env.NATIVE_TEST_MODELS) : JSON.parse(fs.readFileSync(path.join(root,'data/cache/catalog-state.json'),'utf8')).gatewayIds;
 const fixture = fs.mkdtempSync(path.join(root,'data/testing/native-switch-'));
 const home = path.join(fixture,'home'), cwd = path.join(fixture,'workspace');
 const reportFile=path.join(root,'data/diagnostics',(process.env.NATIVE_SWITCH_REPORT_NAME||'native-switch-result')+'.json');
 const provider=process.env.NATIVE_TEST_PROVIDER||'chatgpt_api_mixed';
 const extended=process.env.EXTENDED_NATIVE==='true';
 const apiOnly=process.env.NATIVE_API_ONLY==='true';
+const macConfig=process.env.NATIVE_MACOS_CONFIG==='true';
+const contextProbe=process.env.NATIVE_CONTEXT_PROBE==='true';
+const fastProbe=process.env.NATIVE_FAST_PROBE==='true';
 function pngChunk(type,data){const name=Buffer.from(type),body=Buffer.concat([name,data]);let crc=0xffffffff;for(const b of body){crc^=b;for(let n=0;n<8;n++)crc=(crc>>>1)^((crc&1)?0xedb88320:0);}const prefix=Buffer.alloc(4),suffix=Buffer.alloc(4);prefix.writeUInt32BE(data.length);suffix.writeUInt32BE((crc^0xffffffff)>>>0);return Buffer.concat([prefix,body,suffix]);}
 const ihdr=Buffer.alloc(13);ihdr.writeUInt32BE(64,0);ihdr.writeUInt32BE(64,4);ihdr[8]=8;ihdr[9]=6;
 const pixels=Buffer.alloc(64*(1+64*4));for(let y=0;y<64;y++)for(let x=0;x<64;x++){const offset=y*257+1+x*4;pixels[offset]=255;pixels[offset+3]=255;}
@@ -26,10 +31,11 @@ const pixel='data:image/png;base64,'+png.toString('base64');
 const wav=Buffer.alloc(1644);wav.write('RIFF');wav.writeUInt32LE(1636,4);wav.write('WAVEfmt ',8);wav.writeUInt32LE(16,16);wav.writeUInt16LE(1,20);wav.writeUInt16LE(1,22);wav.writeUInt32LE(8000,24);wav.writeUInt32LE(16000,28);wav.writeUInt16LE(2,32);wav.writeUInt16LE(16,34);wav.write('data',36);wav.writeUInt32LE(1600,40);
 const audio='data:audio/wav;base64,'+wav.toString('base64');
 for (const directory of [home,cwd,path.join(fixture,'src'),path.join(fixture,'assets'),path.join(fixture,'data/cache'),path.join(fixture,'data/state')]) fs.mkdirSync(directory,{recursive:true});
-for (const name of ['model-template.json','reasoning-levels.json']) fs.copyFileSync(path.join(root,'assets',name),path.join(fixture,'assets',name));
-for(const name of ['Common.ps1','Package-Paths.ps1','Launcher-State.ps1','Router-Control.ps1','shim.mjs','history-compat.mjs','non-gpt-compat.mjs','chat-compat.mjs','sse.mjs','image-compat.mjs'])fs.copyFileSync(path.join(root,'src',name),path.join(fixture,'src',name));
+for (const name of ['model-template.json','reasoning-levels.json','model-contexts.json']) fs.copyFileSync(path.join(root,'assets',name),path.join(fixture,'assets',name));
+for(const name of ['Common.ps1','Package-Paths.ps1','Launcher-State.ps1','Router-Control.ps1','shim.mjs','transport.mjs','response-state.mjs','settings.mjs','gateway-sources.mjs','history-compat.mjs','non-gpt-compat.mjs','chat-compat.mjs','sse.mjs','image-compat.mjs','model-context.mjs','gateway-recovery.mjs'])fs.copyFileSync(path.join(root,'src',name),path.join(fixture,'src',name));
 fs.copyFileSync(path.join(root,'Read-ApiKey.ps1'),path.join(fixture,'Read-ApiKey.ps1'));
 const official = { ...JSON.parse(fs.readFileSync(path.join(root,'assets/model-template.json'),'utf8')).models[0], slug:'gpt-6-astra', supported_in_api:true };
+if(contextProbe){official.slug='gpt-6.1-sol';delete official.max_context_window;}
 // Only this synthetic endpoint advertises audio to exercise native serialization.
 // The production catalog is not changed or claimed to have audio capability.
 if(extended)official.input_modalities=[...new Set([...(official.input_modalities||[]),'audio'])];
@@ -48,6 +54,7 @@ function events(body, url, send) {
   emit({type:'response.created',response:base});
   if(body.generate===false){emit({type:'response.completed',response:{...base,status:'completed'}});return;}
   const count=++phase.requests;
+  if(fastProbe&&!phase.compaction)assert.equal(body.service_tier,'priority','Native Fast choice did not reach the upstream request');
   if(phase.interrupt)return;
   if(phase.compaction){
     const remote=url.startsWith('/backend-api')&&input.some(i=>i.type==='compaction_trigger');
@@ -100,8 +107,8 @@ function events(body, url, send) {
 }
 const server=http.createServer(async(req,res)=>{
   try{
-    if(req.url.includes('/models')){res.setHeader('content-type','application/json');res.end(JSON.stringify(req.url.startsWith('/backend-api')?{models:[official]}:{data:models.map(id=>({id}))}));return;}
-    let text='';for await(const b of req)text+=b;const body=JSON.parse(text);
+    if(req.url.includes('/models')){res.setHeader('content-type','application/json');res.end(JSON.stringify(req.url.startsWith('/backend-api')?{models:[official]}:{data:models.map(id=>({id,...(contextProbe&&id==='Vendor/small'?{context_window:128000}:{})}))}));return;}
+    const body=await readRequestJson(req);
     res.writeHead(200,{'content-type':'text/event-stream'});
     if(req.url.endsWith('/chat/completions')){
       // Reuse the same audited response logic, encoding its original output as Chat.
@@ -136,16 +143,24 @@ async function startClient(){
     else notifications.push(v);
   });
   await rpc('initialize',{clientInfo:{name:'native-switch-validation',version:'1'},capabilities:{experimentalApi:true}});send({method:'initialized',params:{}});
+  if(fastProbe&&fs.readFileSync(path.join(home,'config.toml'),'utf8').includes('model_catalog_json')){
+    const listed=await rpc('model/list',{includeHidden:true});
+    for(const id of models.filter(id=>/^GPT\//i.test(id))){
+      const entry=listed.data.find(model=>model.id===id||model.model===id);
+      assert(entry?.serviceTiers?.some(tier=>tier.id==='priority'),'Native model menu has no Fast option for '+id);
+    }
+  }
 }
 async function stopClient(){
   if(!client)return;const stopped=client;client=null;
   if(!stopped.stdin.destroyed)stopped.stdin.end();
-  await new Promise(resolve=>{if(stopped.exitCode!==null){resolve();return;}const timer=setTimeout(()=>{stopped.kill();resolve();},3000);stopped.once('exit',()=>{clearTimeout(timer);resolve();});});
+  await new Promise(resolve=>{if(stopped.exitCode!==null){resolve();return;}const timer=setTimeout(()=>stopped.kill(),3000);stopped.once('exit',()=>{clearTimeout(timer);resolve();});});
   lines.close();for(const p of pending.values())clearTimeout(p.timer);pending.clear();
 }
 async function doTurn(threadId,model,options){
   phase={requests:0,...options};const offset=notifications.length,recordOffset=records.length;
   const started=await rpc('turn/start',{threadId,model,effort:'low',sandboxPolicy:{type:'dangerFullAccess'},input:[{type:'text',text:phase.marker+'; exercise existing tools.'}],
+    ...(fastProbe?{serviceTier:'priority'}:{}),
     ...(phase.plan?{collaborationMode:{mode:'plan',settings:{model,reasoning_effort:'low',developer_instructions:null}}}:{})});
   if(phase.interrupt){
     for(let n=0;n<100&&!phase.requests;n++)await delay(30);
@@ -165,7 +180,14 @@ async function doTurn(threadId,model,options){
     }
   }
   if(phase.question)assert(phase.questionAnswered,'Native question callback was not invoked');
-  return{model,status:done.params.turn.status,requests:phase.requests,media:phase.media||false,plan:phase.plan||false,steer:phase.steer||false,mcp:phase.mcp||false,question:phase.questionAnswered||false,itemTypes:[...new Set(notifications.slice(offset).filter(n=>n.method==='item/completed').map(n=>n.params.item.type))]};
+  const tokenEvent=notifications.slice(offset).filter(n=>n.method==='thread/tokenUsage/updated'&&n.params?.threadId===threadId).at(-1);
+  const modelContextWindow=tokenEvent?.params?.tokenUsage?.modelContextWindow;
+  if(contextProbe&&!phase.interrupt){
+    const info=model===official.slug?official:JSON.parse(fs.readFileSync(path.join(fixture,'data/cache/models-smr.json'),'utf8')).models.find(m=>m.slug===model);
+    const expected=Math.floor(info.context_window*(info.effective_context_window_percent??95)/100);
+    assert.equal(modelContextWindow,expected,'Native token-usage window does not match the selected model: '+model);
+  }
+  return{model,status:done.params.turn.status,requests:phase.requests,modelContextWindow,media:phase.media||false,plan:phase.plan||false,steer:phase.steer||false,mcp:phase.mcp||false,question:phase.questionAnswered||false,itemTypes:[...new Set(notifications.slice(offset).filter(n=>n.method==='item/completed').map(n=>n.params.item.type))]};
 }
 async function doCompact(threadId,marker,{remote=false}={}){
   phase={requests:0,compaction:true,marker};const offset=notifications.length,recordOffset=records.length;
@@ -182,6 +204,14 @@ async function doCompact(threadId,marker,{remote=false}={}){
   return{status:'completed',nativeTextCompaction:!remote,nativeRemoteCompaction:remote,requests:phase.requests};
 }
 async function applyEntry(entry){
+  if(macConfig){
+    const ctx={root:fixture,data:path.join(fixture,'data'),home,config:path.join(home,'config.toml'),node:process.execPath};
+    fs.mkdirSync(path.join(fixture,'macos'),{recursive:true});
+    // The Darwin-only credential helper is exercised by the POSIX Mac tests.
+    // This Windows native-core projection supplies the same inert fixture key.
+    fs.writeFileSync(path.join(fixture,'macos/provider.mjs'),"if(process.argv[2]!=='auth')process.exit(1);process.stdout.write('inert-gateway\\n');\n");
+    restoreMacConfig(ctx);applyMacConfig(ctx,{entryMode:apiOnly?'apionly':entry,mode:apiOnly?'gateway':'mixed'});return;
+  }
   const script=path.join(fixture,'apply-entry.ps1');
   const quote=s=>"'"+s.replaceAll("'","''")+"'";
   fs.writeFileSync(script,["$ErrorActionPreference='Stop'",...['Common','Package-Paths','Launcher-State'].map(n=>'. '+quote(path.join(root,'src',n+'.ps1'))),
@@ -195,6 +225,10 @@ try{
   fs.writeFileSync(path.join(fixture,'data/.env'),['BASE_URL='+peerBase+'/v1','API_KEY=inert-gateway','OFFICIAL_BASE='+peerBase+'/backend-api/codex','SHIM_PORT='+new URL(routerBase).port].join('\n'));
   fs.writeFileSync(path.join(fixture,'data/state/route-state.json'),JSON.stringify({mode:apiOnly?'gateway':'mixed',officialProxy:'',clientVersion:'0.162.0'}));
   const env={...process.env,CODEX_HOME:home,CHATGPT_API_ROOT:fixture,CHATGPT_API_ENV_PATH:path.join(fixture,'data/.env'),CHATGPT_GATEWAY_BASE:peerBase+'/v1',CHATGPT_SHIM_PORT:new URL(routerBase).port};
+  if(contextProbe){
+    const key=JSON.stringify([peerBase+'/v1','GPT/gpt-6.1-Sol']);
+    fs.writeFileSync(path.join(fixture,'data/cache/model-contexts.json'),JSON.stringify({version:1,entries:{[key]:{capacity:272000,source:'native-model-catalog',checkedAt:'legacy-fixture'}}}));
+  }
   await processRun(process.execPath,[path.join(root,'src/shim.mjs'),'--prepare'],env);
   const router=spawn(process.execPath,[path.join(root,'src/shim.mjs')],{env,windowsHide:true,stdio:'ignore'});children.push(router);
   for(let n=0;n<100;n++){try{if((await fetch(routerBase+'/healthz')).ok)break;}catch{}await delay(30);}
@@ -305,8 +339,8 @@ try{
     if(!row.passed)break;
   }
 }finally{
-  await stopClient();for(const c of children)c.kill();for(const ws of wss.clients)ws.terminate();for(const s of sockets)s.destroy();server.close();
-  const report={at:new Date().toISOString(),passed:cases.length>0&&cases.every(c=>c.passed)&&errors.length===0,fixture,provider:apiOnly?'chatgpt_api_launcher':provider,apiOnly,syntheticAudioCapability:extended,scope:'Unmodified native app-server plus production router with isolated upstreams and launcher configurations; real patch and terminal tools execute only in fixture',cases,errors};
+  await stopClient();for(const c of children){c.kill();c.stdin?.destroy();c.stdout?.destroy();c.stderr?.destroy();}for(const ws of wss.clients)ws.terminate();for(const s of sockets)s.destroy();server.close();
+  const report={at:new Date().toISOString(),passed:cases.length>0&&cases.every(c=>c.passed)&&errors.length===0,fixture,provider:apiOnly?'chatgpt_api_launcher':provider,apiOnly,macConfig,fastProbe,syntheticAudioCapability:extended,scope:(macConfig?'Mac-generated provider configuration projected onto the unmodified Windows native core; ':'')+'Unmodified native app-server plus production router with isolated upstreams; real patch and terminal tools execute only in fixture',cases,errors};
   fs.writeFileSync(reportFile,JSON.stringify(report,null,2));
   if(!report.passed)process.exitCode=1;
 }

@@ -1,7 +1,11 @@
 ﻿function Get-RouterBuildId([string]$packageDir) {
     $bytes = New-Object 'System.Collections.Generic.List[byte]'
-    foreach($name in @('shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs')) {
+    foreach($name in @('shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs','model-context.mjs','transport.mjs','response-state.mjs','settings.mjs','gateway-sources.mjs')) {
         $bytes.AddRange([IO.File]::ReadAllBytes((Join-Path $packageDir ('src\'+$name))))
+    }
+    foreach($asset in @('model-contexts.json','model-template.json')) {
+        $assetFile = Join-Path $packageDir ('assets\' + $asset)
+        if (Test-Path -LiteralPath $assetFile) { $bytes.AddRange([IO.File]::ReadAllBytes($assetFile)) }
     }
     $hash = [Security.Cryptography.SHA256]::Create()
     try { return ([BitConverter]::ToString($hash.ComputeHash($bytes.ToArray()))).Replace('-','').ToLowerInvariant() }

@@ -28,6 +28,17 @@ function Get-ExistingOfficialProxy {
     return ''
 }
 
+function Get-UserApiSettings([string]$packageDir) {
+    $values = Get-EnvValues (Join-Path $packageDir 'data\.env')
+    $file = Join-Path $packageDir 'data\providers.json'
+    if (Test-Path -LiteralPath $file) {
+        $saved = [IO.File]::ReadAllText($file) | ConvertFrom-Json
+        $provider = @($saved.providers | Where-Object { $_.id -eq $saved.preferredProviderId -and $_.enabled -ne $false }) | Select-Object -First 1
+        if ($provider) { $values['BASE_URL'] = [string]$provider.baseUrl; $values['API_KEY'] = [string]$provider.apiKey }
+    }
+    return $values
+}
+
 function Normalize-BaseUrl([string]$value) {
     $url = $value.Trim().TrimEnd('/')
     $url = [regex]::Replace($url, '(?i)/(?:models|responses)$', '')

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 
 // Keep dates predictable without replacing UTF-8 installation paths with '?'.
 const psEnv = () => ({ ...process.env, LC_ALL: '', LC_TIME: 'C',
@@ -62,4 +62,61 @@ export function clientExecutable(readPlist = file => execFileSync('/usr/libexec/
     } catch {}
   }
   throw new Error('ChatGPT/Codex.app was not found. Install the official desktop app, or set CHATGPT_API_CLIENT to its .app bundle or executable path.');
+}
+
+export function nativeCli(client) {
+  const bundle = client?.match(/^(.*\.app)\/Contents\/MacOS\//)?.[1];
+  const candidates = process.env.CHATGPT_API_CLI ? [process.env.CHATGPT_API_CLI]
+    : bundle ? [
+      path.join(bundle, 'Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex'),
+      path.join(bundle, 'Contents/Resources/codex'),
+      path.join(bundle, 'Contents/Resources/codex-cli'),
+    ] : [];
+  for (const file of candidates) {
+    try { fs.accessSync(file, fs.constants.X_OK); if (fs.statSync(file).isFile()) return file; } catch {}
+  }
+  return null;
+}
+
+export function clientLaunchCommand(client, args, home, { wait = true, platform = process.platform, opener = '/usr/bin/open' } = {}) {
+  if (platform !== 'darwin') return { command: client, args };
+  const bundle = client?.match(/^(.*\.app)\/Contents\/MacOS\/[^/]+$/i)?.[1];
+  if (!bundle) throw new Error('The macOS client must be an executable inside its official .app bundle. Set CHATGPT_API_CLIENT to the installed .app.');
+  // Launch the signed application through LaunchServices, rather than making
+  // its main executable a descendant of the API launcher. -W keeps restoration
+  // tied to the application lifetime; neither -n nor -F may reset its session.
+  return { command: opener, args: [...(wait ? ['-W'] : []), '-a', bundle, '--env', 'CODEX_HOME=' + home,
+    ...(args.length ? ['--args', ...args] : [])] };
+}
+
+export async function startNativeClient(client, args, home, options = {}) {
+  const launch = clientLaunchCommand(client, args, home, options);
+  const child = spawn(launch.command, launch.args, { detached: true, stdio: 'ignore',
+    env: { ...process.env, CODEX_HOME: home } });
+  await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+  return child;
+}
+
+export function officialProxy(settings = {}, env = process.env, readSystem = () => execFileSync('/usr/sbin/scutil', ['--proxy'],
+  { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] })) {
+  const configured = settings.OFFICIAL_PROXY || env.HTTPS_PROXY || env.https_proxy || env.HTTP_PROXY || env.http_proxy;
+  if (configured) {
+    const url = new URL(configured);
+    if (!['http:', 'https:'].includes(url.protocol)) throw new Error('The official HTTP proxy must use http:// or https://.');
+    return url.href;
+  }
+  if (process.platform !== 'darwin') return '';
+  let text; try { text = readSystem(); } catch { return ''; }
+  return parseSystemProxy(text);
+}
+
+export function parseSystemProxy(text) {
+  const value = key => text.match(new RegExp('^\\s*' + key + '\\s*:\\s*(.+)$', 'm'))?.[1].trim();
+  for (const prefix of ['HTTPS', 'HTTP']) {
+    const host = value(prefix + 'Proxy'), port = value(prefix + 'Port');
+    if (value(prefix + 'Enable') === '1' && host && /^\d+$/.test(port || '') && Number(port) > 0 && Number(port) <= 65535) {
+      return 'http://' + (host.includes(':') ? '[' + host + ']' : host) + ':' + port;
+    }
+  }
+  return '';
 }

@@ -1,3 +1,4 @@
+import { readRequestJson } from './http-fixture.mjs';
 // Native file IDs belong to ChatGPT; API vendors need the original download URL.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -49,7 +50,7 @@ try {
       if(record.id==='file_no_link')return respond(res,{status:'unavailable'});
       return respond(res,{status:'success',download_url:link});
     }
-    let text='';for await(const b of req)text+=b;const body=JSON.parse(text);records.push({target:'official',body});respond(res,{output:[]});
+    const body=await readRequestJson(req);records.push({target:'official',body});respond(res,{output:[]});
   });
   const wss=new WebSocketServer({noServer:true});
   official.on('upgrade',(req,socket,head)=>wss.handleUpgrade(req,socket,head,ws=>{
@@ -58,7 +59,7 @@ try {
   const officialBase=await listen(official);
   const gatewayBase=await listen(http.createServer(async(req,res)=>{
     if(req.url==='/v1/models')return respond(res,{data:models.map(id=>({id}))});
-    let text='';for await(const b of req)text+=b;const body=JSON.parse(text);records.push({target:'gateway',body});
+    const body=await readRequestJson(req);records.push({target:'gateway',body});
     const chat=req.url.includes('/chat/completions');
     if(!body.stream)return respond(res,chat?{id:'chat_fixture',choices:[{message:{role:'assistant',content:'ok'},finish_reason:'stop'}]}:{id:'resp_fixture',output:[]});
     res.writeHead(200,{'content-type':'text/event-stream'});

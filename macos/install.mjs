@@ -42,7 +42,7 @@ export function verifyRelease(release, destination, architecture = process.arch)
     if (![0o644, 0o755].includes(entry.mode)) throw new Error('Invalid release permissions.');
     copies.push({ target, bytes, mode: entry.mode });
   }
-  for (const required of ['runtime/node','macos/provider.mjs','macos/platform.mjs','macos/chatgpt-apionly','macos/install.mjs','src/shim.mjs','assets/model-template.json','package-lock.json']) {
+  for (const required of ['runtime/node','macos/provider.mjs','macos/platform.mjs','macos/native.mjs','macos/chatgpt-apionly','macos/install.mjs','src/shim.mjs','src/transport.mjs','src/response-state.mjs','src/settings.mjs','src/gateway-sources.mjs','src/console.mjs','assets/console/index.html','assets/console/console.css','assets/console/console.js','assets/console/icon.svg','src/repair-thread-providers.mjs','src/model-context.mjs','src/gateway-recovery.mjs','assets/model-template.json','assets/model-contexts.json','package-lock.json']) {
     if (!seen.has(required)) throw new Error('Incomplete release: ' + required);
   }
   return { manifest, copies };

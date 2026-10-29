@@ -54,7 +54,7 @@ async function start(mode, options = {}) {
     'OFFICIAL_BASE=http://127.0.0.1:' + officialPort + '/backend-api/codex',
     ...Object.entries(options.settings || {}).map(([key,value]) => key + '=' + value),
   ].join('\n'));
-  fs.writeFileSync(path.join(dir, 'data/state/route-state.json'), JSON.stringify({ mode, entryMode: options.entryMode || 'api', officialProxy: '', gatewayTransport: 'direct', clientVersion: '0.159.0' }));
+  fs.writeFileSync(path.join(dir, 'data/state/route-state.json'), JSON.stringify({ mode, entryMode: options.entryMode || 'api', nativeAccount: options.nativeAccount === true, officialProxy: '', gatewayTransport: 'direct', clientVersion: '0.159.0' }));
   const child = spawn(process.execPath, [path.join(root, 'src/shim.mjs')], { env: { ...process.env, CHATGPT_API_ROOT: dir, CODEX_HOME: path.join(dir, 'home') }, windowsHide: true, stdio: ['ignore','ignore','pipe'] }); children.push(child);
   let stderr = ''; child.stderr.on('data', chunk => stderr += chunk);
   const base = 'http://127.0.0.1:' + port;
@@ -62,10 +62,10 @@ async function start(mode, options = {}) {
   const ready = await fetch(base + '/readyz', { signal: AbortSignal.timeout(5000) }); assert.equal(ready.status, 200, stderr);
   return { base,dir };
 }
-async function send(router, operation = 'generations', extra = {}, routePrefix = '/v1') {
+async function send(router, operation = 'generations', extra = {}, routePrefix = '/v1', token = 'mock-api-key') {
   const payload = { ...nativeBody,...extra };
   const response = await fetch(router.base + routePrefix + '/images/' + operation, {
-    method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer mock-api-key', 'chatgpt-account-id': 'must-not-leak', 'openai-organization': 'must-not-leak', 'x-codex-image-turn-id': 'original-turn-id' },
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token, 'chatgpt-account-id': 'must-not-leak', 'openai-organization': 'must-not-leak', 'x-codex-image-turn-id': 'original-turn-id' },
     body: JSON.stringify(payload), signal: AbortSignal.timeout(10000),
   });
   return { status: response.status,headers: response.headers,raw: await response.text() };
@@ -88,6 +88,16 @@ try {
   assert.equal(result.status, 200); assert.equal(records.at(-1).path, '/backend-api/codex/images/edits'); assert.deepEqual(records.at(-1).body.images, [{ image_url: dataUrl }]);
   checks.push('Native JSON image editing and both native endpoint prefixes are supported');
 
+  const nativeAccount = await start('mixed', { login: false, nativeAccount: true });
+  result = await send(nativeAccount, 'generations', {}, '/v1', 'native-keychain-oauth');
+  assert.equal(result.status, 200); assert.equal(records.at(-1).which, 'official');
+  assert.equal(records.at(-1).headers.authorization, 'Bearer native-keychain-oauth');
+  assert(!fs.existsSync(path.join(nativeAccount.dir, 'home/auth.json')));
+  const beforeNativeAccount = count('official');
+  result = await send(nativeAccount);
+  assert.equal(result.status, 200); assert.equal(records.at(-1).which, 'gateway'); assert.equal(count('official'), beforeNativeAccount);
+  checks.push('Native-account image requests use client OAuth without auth.json; a bare API key never gains official identity');
+
   officialStatus = 404; officialData = { error: { code: 'model_not_found', message: 'Official image model unavailable' } };
   result = await send(mixed);
   assert.equal(result.status, 200); assert.equal(records.at(-1).which, 'gateway'); assert.equal(records.at(-1).body.model, '绘图/任意别名');
@@ -107,7 +117,7 @@ try {
   assert.equal(result.status, 200); assert.equal(count('official'), beforeOfficial); assert.deepEqual(records.at(-1).body.images, [{ image_url: dataUrl }]);
   checks.push('Provider-only ignores saved official credentials; missing sign-in also uses API directly, for generation and editing');
 
-  const apiOnlyEntry = await start('mixed', { entryMode: 'apionly' });
+  const apiOnlyEntry = await start('mixed', { entryMode: 'apionly', nativeAccount: true });
   beforeOfficial = count('official');
   result = await send(apiOnlyEntry);
   assert.equal(result.status, 200); assert.equal(count('official'), beforeOfficial);

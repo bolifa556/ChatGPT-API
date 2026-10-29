@@ -1,98 +1,248 @@
-# ChatGPT API Launcher
+<div align="center">
 
-Windows x64 下的三入口启动器，适用于已安装的 `OpenAI.Codex` 桌面应用。它不是另一份 ChatGPT 客户端。
+# 🚀 ChatGPT API Launcher
 
-另提供 **Linux provider 独立版**（x64 / ARM64）：模型目录来自网关，使用 API Key，提供单一 `ChatGPT API` 入口，不处理官方登录。安装及功能边界见 [Linux 使用说明](docs/linux-readme.md)。
+### 让原汁原味的官方 ChatGPT 桌面端，无缝接入任意第三方大模型！
 
-另提供 **macOS 3.0.9 API-only 独立版**（Apple Silicon / ARM64）：推荐单文件 DMG，内含 `chatgpt-apionly.app`，首次使用图形窗口配置，模型与生图只走网关。未做 Apple Developer ID 签名和公证，首次需在系统设置中正常允许。见 [DMG 使用说明](docs/macos-dmg-readme.md)；原 [tar.gz 脚本包](docs/macos-readme.md) 保留为历史格式。
+支持接入 **DeepSeek** · **Claude** · **Gemini** · **OpenAI 全系/中转** · **本地 Ollama / vLLM** 与任意兼容 API  
+**原版丝滑体验 · 零修改客户端 · 三种灵活模式 · 深度思考与生图全面适配**
 
-## 安装与更新
+[![Version](https://img.shields.io/badge/Release-v3.1.5-blue.svg)](release/README.md)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-brightgreen.svg)](#-极速上手)
+[![Zero Intrusion](https://img.shields.io/badge/Security-Zero%20Intrusion%20(No%20Patching)-success.svg)](#-核心特性与优势)
+[![Node Runtime](https://img.shields.io/badge/Runtime-Built--in%20Node.js-orange.svg)](#-极速上手)
 
-1. 使用独立发布包 `ChatGPT-API-Launcher-<版本>-win-x64.zip`，完整解压后双击包内 **安装.cmd**。
-2. 选择程序安装目录，再填写 API 基础 URL 和 API Key，点击“安装 / 更新”。已有安装时自动优先识别桌面入口的目录，更新保留 `data/`。支持 HTTP 和 HTTPS；地址未带 `/v1` 时自动补齐。
-3. 桌面生成 **ChatGPT**、**chatgpt-api** 和 **chatgpt-apionly** 三个快捷方式。重复安装更新同名入口，保留已有配置和额外设置。
-4. 切换入口前，从托盘完全退出当前客户端。安装器不会更新客户端本体，也不会从 GitHub 自动下载启动器新版。
+[安装指南](#-极速上手) · [三大模式怎么选](#-三大启动模式怎么选) · [控制台指南](#-本地可视化控制台) · [同类对比](#-为什么选择本项目与同类项目对比) · [常见问题 (FAQ)](#-常见问题与温馨提示-faq) · [技术文档索引](docs/README.md)
 
-独立发布包携带 `runtime/node.exe` 和锁定版本的依赖，不包含源码仓库、开发测试、个人配置或运行数据。安装完成后可以删除解压的发布包，桌面入口指向选定的程序目录。首次安装默认目录为 `%LOCALAPPDATA%\Programs\ChatGPT-API-Launcher`。仅运行时必需的脚本会随程序安装。
+</div>
 
-从 Git 源码安装时仍可运行仓库根目录 `安装.cmd`，直接将该目录用作运行目录；缺少依赖时安装器会联网下载固定版本并校验哈希。日常安装、更新和分享建议使用独立 ZIP。
+---
 
-## 三个入口
+## 💡 为什么需要它？
 
-| 入口 | 行为 |
-| --- | --- |
-| `ChatGPT.vbs` | 保留原生登录，模型目录与模型请求只使用官方；本地兼容层转换混合历史，不回退到网关模型。 |
-| `chatgpt-api.vbs`，有已保存的 ChatGPT 登录 | 合并官方与网关的实际模型目录，按选中的模型分别使用官方账号或 API Key。 |
-| `chatgpt-api.vbs`，没有已保存的 ChatGPT 登录 | 使用自定义 provider 和网关实际模型目录，无需先登录官方账号。 |
-| `chatgpt-apionly.vbs` | 始终使用网关目录、API Key 和网关模型，生图也只走 API；已有官方登录文件保留。 |
+官方原版的 **ChatGPT / Codex 桌面客户端** 拥有极其优雅丝滑的交互质感、全局快捷键、原生工具链与文件交互能力，但痛点也很明显：
+- ❌ **被官方单一生态绑死**：无法自由接入各家性价比更高、推理更强的新一代顶尖大模型（如满血 DeepSeek 全系推理与通用模型、Claude 最新旗舰、Google Gemini、通义千问/Kimi，或本地部署的私有开源模型）；
+- ❌ **官方账号额度容易受限**：一旦用完官方额度，输入框直接被锁死，只能苦等重置；
+- ❌ **第三方套壳客户端体验粗糙**：市面上的 Web 套壳应用往往缺乏原生客户端的精致细节、快捷键和动画质感；
+- ❌ **暴力破解工具风险高**：很多工具通过反编译修改 `app.asar` 或注入 CDP，容易损坏文件、报毒或者每次客户端官方更新就直接失效。
 
-桌面快捷方式指向上述根目录入口。入口用系统包注册信息启动应用，不写死 `WindowsApps` 下的版本目录。移动整个文件夹后，重新运行安装器更新快捷方式；移动前应完全退出客户端。
+> **ChatGPT API Launcher** 就是为了终结这一切而生！  
+> **无需修改官方客户端的一行代码**，通过本地轻量级透明适配网关，在完整保留原版客户端所有交互、快捷键、历史记录和工具的前提下，让你随心所欲调用任意大模型！
 
-三个入口均保留兼容通道，官方模型不会转发到 API 网关。原生官方工具列表、增量上下文和加密状态保持原协议；仅遇到第三方历史时转换必要字段。退出后恢复临时配置，不改登录文件、语言设置或已保存的聊天正文。API 与 API-only 分别记住模型选择；切换入口不会注销官方账号。入口决定模型目录的来源，没有另设模型隐藏名单；网关提供的 GPT 模型仍是可用的网关模型。
+---
 
-官方模型列表随已安装的客户端版本刷新，不固定在安装启动器时的模型集合。启动器从与当前应用二进制一致的原生内核读取版本；官方入口的模型目录请求保留客户端原参数转发，API 入口同步合并官方与网关目录。原生客户端在启动时加载自定义目录，更新客户端或启动器后需从托盘完全退出并重开一次。
+## ✨ 核心特性与优势
 
-启动时根据模型选择提供方：官方模型使用 `openai` 和官方远程压缩；已登录的网关模型使用 `chatgpt_api_mixed`，保留原生账号认证并使用客户端内置文本压缩。启动器也会通过原生会话 API 双向更正旧对话的提供方，保留原 threadId 和消息。**在同一对话切换官方与网关模型后，目前需要从托盘完全退出并重开，才能保证压缩方式同步切换；模型菜单的即时联动尚未接入。** 完整边界见 [压缩修复记录](docs/compaction-incident-2026-09-28.md)。
+- 🛡️ **纯粹透明，零代码侵入**  
+  不改写 `app.asar`、不反编译、不注入任何代码、不触碰客户端二进制文件。纯绿色本地代理架构，随时可无痕还原，绝不损坏官方程序。
 
-## 目录
+- 🔀 **三大模式，按需随心切换**  
+  提供「官方纯血模式」、「双持混合模式」与「纯 API 自由模式」。不管是官方会员想要偶尔换口味，还是没有官方账号想白嫖原生桌面 UI，都能一键满足。
 
-```text
-ChatGPT.vbs                   官方模型入口
-chatgpt-api.vbs               根据登录状态使用官方与网关模型
-chatgpt-apionly.vbs           网关模型入口
-Launch-ChatGPT.ps1            共用启动、退出恢复与进程管理
-Read-ApiKey.ps1               旧 provider 的取钥匙及按需启动助手
-安装.cmd                      安装入口
-install/                     安装界面、设置保存、依赖准备
-src/                         本地转发器、消息适配、配置与路径管理
-assets/                      图标、无个人信息的模型模板、运行时下载清单
-runtime/                     Node 运行程序
-node_modules/                锁定版本的第三方依赖
-data/                        当前机器的私有数据，不提交 Git
-  .env                       URL 与 API_KEY
-  cache/                     模型目录、推理档位缓存
-  state/                     切换恢复记录、辅助进程身份、锁
-  logs/                      固定文件名的日志
-  backup/                    旧版一次性恢复备份
-  diagnostics/               本机诊断和测试结果
-  testing/                   测试用虚拟配置，不用于客户端
-docs/                        使用与架构说明
-tests/                       默认离线回归测试及显式运行的真实接口测试
-.github/workflows/           Windows 自动检查定义
-scripts/                     生成独立发布包的构建脚本
-release/                     Windows/Linux/macOS 发布包、使用说明与 SHA-256
+- 🌐 **多 API 供应商统一聚合**  
+  支持同时配置多达 32 个 API 来源（如 DeepSeek 官方、硅基流动、OpenRouter、自建 OneAPI/NewAPI、本地 Ollama 等），统一聚合到同一个模型下拉菜单中。来源智能前缀隔离，同名模型清晰标注，绝不串号、绝不串路由。
+
+- 🧠 **真·全协议深度转换引擎**  
+  官方桌面端使用的是内部私有复杂的 Responses 协议。本项目内置双向转换引擎：完美支持 **DeepSeek、Claude、OpenAI 等全系推理模型的深度思维链展开（Reasoning Content）**，原生折叠展开无缝呈现；全面支持本地工具调用（Tool Calling）、图片生成/编辑与原生打断（Interrupt）。
+
+- 📈 **海量上下文自由掌控**  
+  原生支持 500,000 ~ 2,000,000 的超大上下文容量调节，长文档处理与超大代码库问答轻松应对，智能容量感知与缓存，不浪费一次重复探测。
+
+- 🎛️ **开箱即用可视化控制台**  
+  自带极简美观的本地 Web 控制台，点点鼠标就能添加/启停 API 来源、刷新模型列表、调节上下文上限与指定生图模型。密钥本地安全存储，杜绝泄露。
+
+- 📦 **全平台内置绿色运行时**  
+  Windows、macOS (Apple Silicon)、Linux 全部打包自带独立轻量 Node.js 运行时，解压/拖拽即用，**你的电脑不需要配置任何开发环境！**
+
+---
+
+## 🚀 极速上手
+
+### 1. 下载发布包
+
+> [!NOTE]  
+> 请先确保已从 OpenAI 官网安装对应平台的**官方 ChatGPT / Codex 桌面客户端**。
+
+| 平台 | 下载发布包 | 极速安装方式 |
+| :--- | :--- | :--- |
+| **Windows x64** | [ChatGPT-API-Launcher-3.1.5-win-x64.zip](release/3.1.5/ChatGPT-API-Launcher-3.1.5-win-x64.zip) | 完整解压后双击运行 `安装.cmd`，选择程序目录完成安装。 |
+| **macOS (Apple Silicon)** | [ChatGPT-API-Provider-3.1.5-macos-arm64.dmg](release/3.1.5/ChatGPT-API-Provider-3.1.5-macos-arm64.dmg) | 打开 DMG 镜像，将对应的启动入口与控制台 App 拖到“应用程序”文件夹。（详见 [macOS 说明](docs/macos-dmg-readme.md)） |
+| **Linux x64** | [ChatGPT-API-Provider-3.1.5-linux-x64.tar.gz](release/3.1.5/ChatGPT-API-Provider-3.1.5-linux-x64.tar.gz) | 解压压缩包，以桌面用户身份执行 `./install.sh`。（详见 [Linux 说明](docs/linux-readme.md)） |
+| **Linux ARM64** | [ChatGPT-API-Provider-3.1.5-linux-arm64.tar.gz](release/3.1.5/ChatGPT-API-Provider-3.1.5-linux-arm64.tar.gz) | 解压后同样执行 `./install.sh` 即可。 |
+
+### 2. 配置你的 API 来源
+
+安装完成后，打开 **本地控制台**（Windows 双击程序目录中的 `控制台.vbs`）：
+1. 在 **API 来源** 页面点击“添加来源”，填写名称、API Base URL 和 API Key（例如接入 DeepSeek、OpenRouter 或自己的中转站）；
+2. 点击 **保存**，然后点击 **刷新模型目录**，查看所有可用模型是否已被顺利识别；
+3. （可选）在 **模型与上下文** 页面微调上下文上限与图片模型。
+
+### 3. 选择合适入口，开箱畅玩！
+
+根据你的需求，在桌面或程序目录双击对应的启动入口即可开始使用！（详见下方模式说明）
+
+---
+
+## 💡 三大启动模式怎么选？
+
+为了兼顾各种不同的使用场景，本项目精心设计了三个独立的启动入口。**它们完全共享官方客户端的原生功能和历史记录**，你可以根据当前需求随时切换：
+
+```mermaid
+flowchart LR
+    A["你当前的使用场景"] --> B{"是否有官方账号 / 会员额度？"}
+    B -- "有，且这局只想用官方模型" --> C["👑 纯血官方模式<br/>(ChatGPT / chatgpt-official)"]
+    B -- "有，但想混用第三方高性价比模型" --> D["⚡ 双持混合模式<br/>(chatgpt-api)"]
+    B -- "没有，或额度已用光，只用自定义 API" --> E["🚀 纯 API 自由模式<br/>(chatgpt-apionly)"]
 ```
 
-**客户端自己的登录、聊天记录、插件和界面缓存不在 `data/`。** 它们仍由客户端保存在 `CODEX_HOME`（默认 `%USERPROFILE%\.codex`）及 AppData 中。三个入口共用这些数据，不复制登录，不创建平行聊天库。
+| 启动入口 | 适合人群与场景 | 实际运行机制 |
+| :--- | :--- | :--- |
+| **`ChatGPT`** (Win)<br>`chatgpt-official` (Mac) | **官方忠实党**<br>适合只想安心使用 OpenAI 原版服务，不需要任何第三方 API 的时候。 | 完全走官方原生登录与官方通道，保留处理混合历史的兼容逻辑，完全原汁原味。 |
+| **`chatgpt-api`** | **双持党 / 进阶用户**<br>既有官方账号，又想在下拉菜单里随时切换到 DeepSeek、Claude、Gemini、通义千问等各家前沿顶尖模型。 | **智能合并菜单**：下拉列表同时显示官方模型与你添加的全部 API 模型。选官方模型走 OpenAI 官方通道，选自定义模型自动走对应的 API 代理。 |
+| **`chatgpt-apionly`**<br>(Linux: `ChatGPT API`) | **纯 API 党 / 白嫖党 / 效率党**<br>没有官方付费订阅，或者官方额度用尽，只想把官方客户端当作终极原生 UI 跑自己的 API。 | **彻底摆脱官方账号限制**！无论是否登录官方账号，模型目录、对话生成与绘图全部强制使用自定义 API，零门槛尽情使用！ |
 
-源码和维护文档由此目录中的本地 Git 管理，保留原有提交历史。`data/`、依赖、运行二进制与发布归档不提交 Git；发布说明和 `.sha256` 校验文件提交。当前及历史发布包均保存在 [release/](release/README.md)，文档索引见 [docs/](docs/README.md)。
+> [!TIP]
+> 切换不同的启动入口前，请先完全退出 ChatGPT 客户端（Windows 请检查右下角系统托盘是否完全退出）。每个入口都会分别记住你上次选中的模型。
 
-从旧版平铺目录迁移时，若旧入口仍在运行，旧进程正在使用的根目录缓存和 `shim/` 会暂时保留；完全退出后的下一次启动自动迁移并清理。不会中断当前对话。
+---
 
-## 开发与验证
+## 🎛️ 本地可视化控制台
 
-已安装 Node.js 时，在仓库根目录执行：
+控制台随安装包自带，基于 Node 内置轻量服务，**纯本地运行，免安装任何前端环境**。
 
-```powershell
-npm ci --ignore-scripts
+| 平台 | 控制台打开位置 | 默认安装目录 |
+| :--- | :--- | :--- |
+| **Windows** | 安装目录下的 `控制台.vbs` | `%LOCALAPPDATA%\Programs\ChatGPT-API-Launcher` |
+| **macOS** | `chatgpt-console.app`，或程序目录 `控制台.command` | `~/Library/Application Support/chatgpt-apionly` |
+| **Linux** | 安装目录 `控制台.desktop` 或应用菜单的 **ChatGPT API 控制台** | `~/.local/share/chatgpt-api-provider` |
+
+### 控制台使用亮点
+- **多渠道独立隔离**：支持最多 32 个 API 来源，每个来源独立保存、独立开关。一个来源出现网络抖动绝不会拖垮其他可用来源。
+- **智能名称防冲突**：不同来源若有同名模型，会自动附带来源标签（如 `@DeepSeek/deepseek-chat`），路由精准投递，绝不会偷偷串号。
+- **高安全级别**：API Key 仅保存在本机配置文件，前端不回显已保存的明文；服务仅监听本地回环地址（127.0.0.1）并附带随机 Token 校验，避免局域网越权。
+- **多层降级缓存**：每个来源独立缓存 24 小时内的模型列表，偶尔断网也能从本地缓存加载历史模型列表。
+
+---
+
+## 📊 为什么选择本项目？（与同类项目对比）
+
+社区中有一些出色的同类尝试，但各自的定位与设计理念存在明显差异：
+
+| 对比维度 | **本项目 (ChatGPT API Launcher)** | **Codex++** | **OpenCodex** | **CC Switch** |
+| :--- | :--- | :--- | :--- | :--- |
+| **客户端改造程度** | **零侵入、零修改**（纯本地透明网络适配） | 基于 Rust/Tauri，通过 CDP 注入管理 | 本地多协议代理 | 基于 Tauri 的多客户端管理器 |
+| **界面体验** | **100% 官方原版桌面端原生质感** | 定制增强型窗口与界面 | 偏向跨应用服务 | 偏向管理面板与配置切换 |
+| **启动自由度** | **独创三大入口**（官方 / 混合双持 / 纯 API 免登录） | 侧重单一管理入口 | 侧重作为 Provider 后端 | 偏向供应商与提示词切换 |
+| **运行环境要求** | **解压即用**（发布包内置极简独立 Node 运行时） | 需安装对应桌面管理应用 | 需独立配置运行环境 | 需安装独立管理桌面端 |
+| **思维链支持** | **原生级支持**（DeepSeek / o 系列 / Claude 等各家推理模型的思维链原生折叠与展开） | 支持 | 支持 | 视下游客户端而定 |
+| **核心定位** | **为追求原汁原味官方客户端质感的用户提供最纯净、最稳妥的 API 接入方案** | 适合追求丰富扩展、界面深度定制的高级玩家 | 适合需要同时桥接 Claude Code / Grok 等多个客户端的开发者 | 适合需要统一管理 MCP、Skills、Prompt 配置的用户 |
+
+---
+
+## 📐 架构原理
+
+本项目采用高效、低延迟的**本地透明路由网关架构**。启动客户端时，启动脚本仅通过客户端支持的本地端口引导网络流，所有消息在内存中完成无缝转换，不破坏磁盘上的客户端结构：
+
+```mermaid
+flowchart TD
+  A["选择启动入口 (官方 / 混合 / 纯 API)"] --> B["读取本地来源配置 (data/providers.json)"]
+  C["本地可视化控制台"] --> D["保存与管理 API 来源及上下文"]
+  D --> B
+  B --> E["启动时自动聚合多来源模型目录"]
+  E --> F["官方 ChatGPT / Codex 原生桌面端"]
+  F --> G["本地适配网关 (127.0.0.1:8102)"]
+  G -->|官方模型| H["OpenAI 官方服务 (保留官方凭据与原生协议)"]
+  G -->|自定义模型| I["智能协议转换引擎 (Responses ↔ Chat Completion)"]
+  H --> J["OpenAI 官方云端"]
+  I --> K["你的自定义 API 供应商 (DeepSeek / Claude / OneAPI 等)"]
+  F --> L["原生本地工具执行、权限校验与聊天记录"]
+```
+
+- **官方模型**：直接走官方原有协议与身份验证，原汁原味。
+- **自定义模型**：自动将官方 Responses 私有消息转换为标准 OpenAI Chat 协议；同时将思维链、工具调用（Function Calling）、图片生成结果无缝还原给客户端。
+- **数据完全本地**：你的登录凭据、聊天记录继续安全地保存在官方客户端原生数据库中。
+
+---
+
+## ❓ 常见问题与温馨提示 (FAQ)
+
+<details>
+<summary><b>Q1: 使用本工具会导致官方账号封号或损坏客户端吗？</b></summary>
+
+> **完全不会！**  
+> 本项目采用纯绿色外部路由机制，不修改客户端的二进制文件，不篡改 `app.asar`，也不向系统注入外挂脚本。如果你启动的是官方入口，它与普通原版客户端没有任何区别；启动 API 入口时也只是在本地回环网络做格式转换，安全无忧。
+</details>
+
+<details>
+<summary><b>Q2: 为什么在混合模式（chatgpt-api）下，官方额度用光了切 API 模型还是发不出去？</b></summary>
+
+> 这是由于官方客户端的前端逻辑：当官方账号的免费/付费额度耗尽时，官方客户端会在**前端直接禁用输入框**，导致消息根本来不及发送给本地网关就被客户端自己拦下了。  
+> **极速解决方案**：直接关闭客户端，改从 **`chatgpt-apionly`（纯 API 模式）** 启动！该模式完全绕过官方账号状态检测，不受任何官方额度限制。
+</details>
+
+<details>
+<summary><b>Q3: 支持各大推理模型的深度思考（Thinking / 思维链）吗？</b></summary>
+
+> **原生完美支持！**  
+> 本项目自研协议转换引擎对 `reasoning_content`、思维链字段与客户端内部协议做了全量映射。无论是 DeepSeek 系列推理模型、Claude 思考模式、还是 OpenAI o 系列等主流推理模型的深度思考过程，都会在界面中以原生“深度思考”折叠卡片优雅呈现，点击即可展开查看完整严谨的推理脉络！
+</details>
+
+<details>
+<summary><b>Q4: 在控制台修改了配置或刷新了模型，为什么客户端里没有立刻生效？</b></summary>
+
+> 官方客户端的模型下拉菜单是在**程序刚启动时读取并缓存的**。  
+> 因此，在控制台保存修改后，请**完全退出 ChatGPT 客户端**（Windows 用户请务必在右下角任务栏托盘图标右键彻底退出），重新打开对应的启动入口即可看到最新配置生效。
+</details>
+
+<details>
+<summary><b>Q5: 我的 API Key 保存在哪里？安全吗？</b></summary>
+
+> 所有配置（包括 API Key）均仅保存在你本机安装目录下的 `data/providers.json` 中，绝对不会上传到任何第三方云端。控制台服务仅对本地 `127.0.0.1` 开放，并带有专属 Token 鉴权，局域网内的其他设备无法访问。  
+> *提醒：切勿将包含你个人配置的 `data/` 目录随意分享给他人。*
+</details>
+
+---
+
+## 🛠️ 本地开发与构建
+
+如果你想参与代码贡献或自行构建发布包：
+
+```bash
+# 运行完整协议与功能测试
 npm test
+
+# 运行 Windows 平台启动器测试
 npm run test:windows
+
+# 构建 Windows 发布包
+npm run build:release
+
+# 构建 Linux 发布包 (x64 / ARM64)
+python3 scripts/build-linux-release.py --arch all
+
+# 构建 macOS DMG 镜像
+python3 scripts/build-macos-dmg.py
 ```
 
-也可使用 `runtime/node.exe` 运行各 `*-test.mjs`，用 Windows PowerShell 5.1 执行 `tests/launcher-test.ps1`。默认测试使用本地模拟服务器和虚拟配置，不调用真实模型，不读真实聊天记录。
+- **开发依赖**：系统安装 Node.js >= 22.14 即可。
+- **深度参考文档**：
+  - 📖 [项目文档索引](docs/README.md)
+  - 🧩 [路由与架构机制深度解析](docs/architecture.md)
+  - 🔄 [Responses ↔ Chat 消息转换协议详解](docs/message-protocol.md)
+  - ⚙️ [配置与数据存储规范](docs/configuration.md)
+  - 🖥️ [本地控制台规范](docs/console.md)
+  - 🛠️ [打包与维护指南](docs/maintenance.md)
 
-准备好运行依赖后，执行 `npm run build:release` 生成 `release/` 下的 ZIP 和 SHA-256 文件，再执行 `npm run test:release` 验证独立安装、离线依赖、更新保留配置与包完整性。也可用 `scripts/Build-Release.ps1 -OutputDirectory <独立发布目录>` 指定其他发布位置。构建采用程序文件白名单，不打包 `data/`，不会重启或更新当前运行中的安装。
+---
 
-Linux provider 使用 `python scripts/build-linux-release.py --arch all` 构建 `release/` 下的两个 `.tar.gz` 包，也可用 `--output <发布目录>` 指定其他位置（构建机需要 Python 3.11+，安装端不需要 Python）。Node 下载使用 `assets/runtime-linux.json` 中的官方 SHA-256；可将对应归档预置于 `data/cache/` 后离线构建。将包解压到 Linux 文件系统后，用包内 Node 执行 `tests/linux-provider-test.mjs <解压后的发布根目录>`，验证实际安装入口、权限、配置、并发取钥匙、路由、更新和恢复。测试仅使用隔离目录与模拟接口。
+## 📄 免责声明
 
-`python tests/linux-package-test.py <x64归档> <ARM64归档>` 可在构建机核对两个归档的完整清单、当前源文件、SHA-256、执行权限、换行格式及 ELF 架构，不执行异架构二进制。
+- 本项目为独立的第三方开源工具，仅供技术交流与个人学习使用，不分发任何官方客户端软件。
+- “ChatGPT”、“OpenAI” 及相关标识均为其原权利人所有。
+- 请在遵守相关 API 供应商服务条款及所在地法律法规的前提下合规使用本项目。
 
-macOS ARM64 包使用 `python scripts/build-macos-release.py` 构建，版本同样来自 `package.json`，下载使用 `assets/runtime-macos.json` 的固定官方 SHA-256。运行 `python tests/macos-package-test.py release/ChatGPT-API-Provider-3.0.9-macos-arm64.tar.gz` 检查归档与 Mach-O 架构；macOS 主机可用包内 Node 运行 `tests/macos-install-test.mjs <解压后的发布根目录>` 完成隔离安装验证。
+---
 
-在 Mac 构建 DMG 时，先准备上述 provider 归档，再运行 `python3 scripts/build-macos-dmg.py`，使用系统的 Clang、codesign 和 hdiutil 生成单文件映像。`python3 tests/macos-dmg-test.py <DMG>` 验证映像与 App 的文件、权限及代码/资源哈希；`node tests/macos-dmg-gui-test.mjs` 检查图形配置控制逻辑。Windows 构建机可通过 WSL 使用 Zig、rcodesign、HFS+ 和 UDIF 工具交叉构建，工具来源固定在 `assets/macos-dmg-build-tools.json`，构建脚本的对应参数用于传入这些工具路径。DMG 直接复用已经发布的 provider，不改写原 tar.gz；本地 ad-hoc 签名不能替代 Developer ID 或 Apple 公证。
-
-`tests/live-models.mjs`、`tests/native-client-live.mjs`、`tests/official-client-live.mjs`、`tests/media-live.mjs` 是单独运行的真实接口验证，会使用本机配置和账号发起实际请求；原生真实模型测试使用 ephemeral 对话。`tests/native-switch-test.mjs` 则在独立测试目录中运行未修改的原生 app-server、真实本地工具和受控模型端点，验证同一对话的跨模型、跨入口恢复。运行方式、完整功能清单与排除项见 [最新验证记录](docs/model-verification-2026-09-28.md)。
-
-详见 [配置与使用](docs/configuration.md)、[路由与兼容机制](docs/architecture.md)、[消息转换协议](docs/message-protocol.md)、[维护说明](docs/maintenance.md)。
-
-项目是独立的本地工具，不是 OpenAI 官方产品。图标取自用户已安装的应用；第三方品牌与依赖的权利归原权利人。尚未为本项目指定对外发布许可证。
+<div align="center">
+  如果这个项目改善了你的桌面使用体验，欢迎在 GitHub 上点亮一颗 ⭐️ Star 支持一下！
+</div>

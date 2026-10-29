@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
+import { readRequestJson } from './http-fixture.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fixture = path.join(root, 'data/testing', 'entry-scope-' + process.pid);
@@ -33,9 +34,7 @@ function peer(which) {
       res.end(JSON.stringify(which === 'official' ? { models: [officialModel] } : { data: gatewayModels.map(id => ({ id })) }));
       return;
     }
-    let raw = '';
-    for await (const chunk of req) raw += chunk;
-    const body = JSON.parse(raw), output = response(body);
+    const body = await readRequestJson(req), output = response(body);
     records.at(-1).body = body;
     if (body.stream) {
       res.writeHead(200, { 'content-type': 'text/event-stream' });

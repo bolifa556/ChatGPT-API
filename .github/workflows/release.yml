@@ -1,0 +1,162 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '25.8.2'
+          cache: npm
+      - name: Check release version
+        id: version
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          test "$GITHUB_REF_NAME" = "v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - run: npm ci --ignore-scripts
+      - name: Prepare bundled Windows runtime
+        shell: powershell
+        run: |
+          . .\install\Bootstrap-Runtime.ps1
+          Ensure-LauncherRuntime (Get-Location).Path
+      - run: npm test
+      - run: npm run test:windows
+      - run: npm run build:release
+      - run: npm run test:release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: release/${{ steps.version.outputs.version }}/*.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '25.8.2'
+          cache: npm
+      - name: Check release version
+        id: version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          test "$GITHUB_REF_NAME" = "v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: python3 scripts/build-linux-release.py --arch all
+      - name: Verify Linux packages and x64 installation
+        run: |
+          version=$(node -p "require('./package.json').version")
+          python3 tests/linux-package-test.py "release/$version/ChatGPT-API-Provider-$version-linux-x64.tar.gz" "release/$version/ChatGPT-API-Provider-$version-linux-arm64.tar.gz"
+          mkdir -p "$RUNNER_TEMP/linux-release"
+          tar -xzf "release/$version/ChatGPT-API-Provider-$version-linux-x64.tar.gz" -C "$RUNNER_TEMP/linux-release"
+          "$RUNNER_TEMP/linux-release/ChatGPT-API-Provider-$version-linux-x64/payload/runtime/node" tests/linux-provider-test.mjs "$RUNNER_TEMP/linux-release/ChatGPT-API-Provider-$version-linux-x64"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: release/${{ steps.version.outputs.version }}/*.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '25.8.2'
+          cache: npm
+      - name: Check release version
+        id: version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          test "$GITHUB_REF_NAME" = "v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - run: npm ci --ignore-scripts
+      - run: node tests/macos-platform-test.mjs
+      - run: node tests/macos-provider-test.mjs
+      - run: node tests/macos-dmg-gui-test.mjs
+      - run: python3 scripts/build-macos-dmg.py
+      - name: Verify macOS DMG
+        run: |
+          version=$(node -p "require('./package.json').version")
+          python3 tests/macos-dmg-test.py "release/$version/ChatGPT-API-Provider-$version-macos-arm64.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: release/${{ steps.version.outputs.version }}/*.dmg
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  publish:
+    needs: [windows, linux, macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: ${{ runner.temp }}/release-assets
+          merge-multiple: true
+      - name: Prepare release notes and check all four assets
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          version = json.loads(Path('package.json').read_text())['version']
+          assert os.environ['GITHUB_REF_NAME'] == 'v' + version
+          names = [f'ChatGPT-API-Launcher-{version}-win-x64.zip',
+                   f'ChatGPT-API-Provider-{version}-linux-x64.tar.gz',
+                   f'ChatGPT-API-Provider-{version}-linux-arm64.tar.gz',
+                   f'ChatGPT-API-Provider-{version}-macos-arm64.dmg']
+          assets = Path(os.environ['RUNNER_TEMP']) / 'release-assets'
+          assert {p.name for p in assets.iterdir()} == set(names)
+          assert all((assets / name).stat().st_size > 0 for name in names)
+          notes = Path(f'release/{version}/README.md').read_text(encoding='utf-8')
+          repository = os.environ['GH_REPO']
+          for name in names:
+              notes = notes.replace(f']({name})', f'](https://github.com/{repository}/releases/download/v{version}/{name})')
+          notes = notes.replace('](../../README.md)', f'](https://github.com/{repository}/blob/v{version}/README.md)')
+          (Path(os.environ['RUNNER_TEMP']) / 'release-notes.md').write_text(notes, encoding='utf-8')
+          PY
+      - name: Upload and publish release
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" --json isDraft > "$RUNNER_TEMP/existing-release.json" 2>/dev/null; then
+            python3 -c "import json,os; from pathlib import Path; assert json.loads((Path(os.environ['RUNNER_TEMP'])/'existing-release.json').read_text())['isDraft'], 'An already published release will not be overwritten'"
+          else
+            gh release create "$tag" --verify-tag --draft --title "ChatGPT API ${tag#v}" --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
+          gh release upload "$tag" "$RUNNER_TEMP/release-assets/"* --clobber
+          gh release edit "$tag" --draft=false --latest
+          gh release view "$tag" --json url,isDraft,assets

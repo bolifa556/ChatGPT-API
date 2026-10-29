@@ -23,6 +23,10 @@
         } else { $text = $text.TrimEnd() + "`r`n" + $line + "`r`n" }
     }
     Write-Utf8File $path ($text.Trim() + "`r`n")
+    if (($current['BASE_URL'] -ne $baseUrl -or $current['API_KEY'] -cne $apiKey) -and (Test-Path -LiteralPath (Join-Path $packageDir 'data\providers.json'))) {
+        & (Join-Path $packageDir 'runtime\node.exe') (Join-Path $packageDir 'src\settings.mjs') sync-legacy $packageDir
+        if ($LASTEXITCODE -ne 0) { throw 'API 基础设置已保存，但多来源配置未同步，请打开控制台检查。' }
+    }
 }
 
 function Set-DesktopEntries([string]$packageDir, [string]$desktopDir) {

@@ -3,13 +3,36 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import assert from 'node:assert/strict';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
-import { requestSettings, configureProvider, prepareInstallation, Cancelled } from '../macos/dmg/gui.mjs';
+import { requestSettings, configureProvider, prepareInstallation, Cancelled, entryArguments, dialogScript } from '../macos/dmg/gui.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'chatgpt-dmg-gui-test-'));
 const oldHome = process.env.CODEX_HOME;
 try {
+  for (const entryMode of ['official', 'api', 'apionly', 'console']) assert.deepEqual(entryArguments(['--entry', entryMode, '--configure']), { entryMode, args: ['--configure'] });
+  assert.throws(() => entryArguments(['--entry', 'other']), /Unknown/);
+  assert.throws(() => entryArguments(['--entry', 'api', '--entry', 'official']), /Unknown/);
+  const menus = [], dialogs = []; let clipboardReads = 0;
+  const pasteValue = 'inert-pasted-key=$literal';
+  const cocoa = {
+    NSApplication: { sharedApplication: { setActivationPolicy() {}, activateIgnoringOtherApps() {} } },
+    NSApplicationActivationPolicyAccessory: 1, NSEventModifierFlagCommand: 1 << 20, NSPasteboardTypeString: 'text',
+    NSMenu: { get alloc() { return { initWithTitle: title => ({ title, addItem() {} }) }; } },
+    NSMenuItem: { get alloc() { return { get init() { return {}; }, initWithTitleActionKeyEquivalent(title, action, key) { const item = { title, action, key }; menus.push(item); return item; } }; } },
+    NSPasteboard: { generalPasteboard: { stringForType() { clipboardReads++; return pasteValue; } } },
+  };
+  const scope = { $, ObjC: { import() {}, unwrap: value => value }, Application: { currentApplication: () => ({
+    displayDialog(message, options) { dialogs.push(options); return dialogs.length === 1 ? { buttonReturned: '粘贴', textReturned: '' } : { buttonReturned: '确定', textReturned: options.defaultAnswer }; },
+  }) } };
+  function $(value) { return value; }
+  Object.assign(scope.$, cocoa);
+  vm.createContext(scope); vm.runInContext(dialogScript, scope);
+  assert.equal(clipboardReads, 0);
+  assert.equal(JSON.parse(scope.run([JSON.stringify({ kind: 'prompt', hidden: true })])).value, pasteValue);
+  assert.equal(clipboardReads, 1); assert.equal(dialogs[0].hiddenAnswer, true); assert.equal(dialogs[1].defaultAnswer, pasteValue);
+  assert(menus.some(item => item.action === 'paste:' && item.key === 'v' && item.keyEquivalentModifierMask === 1 << 20));
   const current = { BASE_URL: 'https://example.invalid/v1', API_KEY: 'inert-old-key=$literal' };
   const asked = [];
   const result = await requestSettings(current, async input => { asked.push(input); return asked.length === 1 ? 'http://gateway.invalid/v1' : ''; });
@@ -32,7 +55,7 @@ try {
   const auth = path.join(process.env.CODEX_HOME, 'auth.json');
   fs.writeFileSync(auth, '{"inert_native_login":"must-stay-unchanged"}');
   const originalAuth = fs.readFileSync(auth, 'utf8');
-  const sources = ['macos/provider.mjs','macos/platform.mjs','macos/install.mjs','macos/chatgpt-apionly','src/shim.mjs','assets/model-template.json','package-lock.json'];
+  const sources = ['macos/provider.mjs','macos/platform.mjs','macos/native.mjs','macos/install.mjs','macos/chatgpt-apionly','src/shim.mjs','src/transport.mjs','src/response-state.mjs','src/settings.mjs','src/gateway-sources.mjs','src/console.mjs','assets/console/index.html','assets/console/console.css','assets/console/console.js','assets/console/icon.svg','src/repair-thread-providers.mjs','src/model-context.mjs','src/gateway-recovery.mjs','assets/model-template.json','assets/model-contexts.json','package-lock.json'];
   const entries = [];
   for (const relative of [...sources, 'runtime/node']) {
     const bytes = relative === 'runtime/node' ? Buffer.from('fixture runtime\n') : fs.readFileSync(path.join(root, relative));
@@ -41,7 +64,7 @@ try {
     entries.push({ path: relative, bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex'), mode: relative === 'runtime/node' ? 0o755 : 0o644 });
   }
   const manifestFile = path.join(release, 'release.json');
-  const manifest = { schemaVersion: 1, product: 'chatgpt-apionly-provider', version: '3.0.9', platform: 'darwin-arm64', files: entries };
+  const manifest = { schemaVersion: 1, product: 'chatgpt-apionly-provider', version: JSON.parse(fs.readFileSync(path.join(root, 'package.json'))).version, platform: 'darwin-arm64', files: entries };
   fs.writeFileSync(manifestFile, JSON.stringify(manifest));
   const settingsFile = path.join(destination, 'data/.env');
   fs.mkdirSync(path.dirname(settingsFile), { recursive: true }); fs.writeFileSync(settingsFile, 'API_KEY=inert-existing-key\n');
@@ -55,7 +78,9 @@ try {
   assert.equal(fs.readFileSync(settingsFile, 'utf8'), 'API_KEY=inert-existing-key\n');
   assert.equal(fs.readFileSync(path.join(destination, 'my-notes.txt'), 'utf8'), 'keep');
   assert.equal(fs.readFileSync(auth, 'utf8'), originalAuth);
-  assert(!writes.some(file => /\.command(?:\.|$)/i.test(file)), 'GUI installation created a command entry');
+  const consoleEntry = path.join(destination, '控制台.command');
+  assert(fs.readFileSync(consoleEntry, 'utf8').includes(path.join('src', 'console.mjs')), 'Installation lacks a local console entry');
+  assert(!writes.some(file => /\.command(?:\.|$)/i.test(file) && !file.startsWith(consoleEntry)), 'GUI installation created an unexpected command entry');
   const sourceFile = path.join(destination, 'src/shim.mjs');
   const oldMtime = fs.statSync(sourceFile).mtimeMs;
   assert.equal((await prepareInstallation(release, destination)).updated, false);
@@ -67,7 +92,7 @@ try {
   assert.equal(crypto.createHash('sha256').update(fs.readFileSync(sourceFile)).digest('hex'), initialHash);
   assert.equal(fs.readFileSync(settingsFile, 'utf8'), 'API_KEY=inert-existing-key\n');
   await assert.rejects(prepareInstallation(release, path.join(release, 'inside')), /separate program directory/);
-  console.log(JSON.stringify({ passed: true, checks: ['password never included in dialog arguments', 'cancel and environment restoration', 'program install with preserved credentials/data', 'repeat launch avoids program rewrites', 'damaged update rejected before replacing files'], scope: 'GUI controller tests with isolated data; no macOS dialogs, Gatekeeper or native client executed.' }, null, 2));
+  console.log(JSON.stringify({ passed: true, checks: ['chat and console entry argument routing', 'paste menu and user-triggered clipboard flow with a Cocoa mock', 'password never included in dialog arguments', 'cancel and environment restoration', 'program install and console entry with preserved credentials/data', 'repeat launch avoids program rewrites', 'damaged update rejected before replacing files'], scope: 'Isolated controller and simulated Cocoa tests; no macOS dialogs, Gatekeeper or native GUI executed.' }, null, 2));
 } finally {
   if (oldHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = oldHome;
   assert(fixture.startsWith(path.join(os.tmpdir(), 'chatgpt-dmg-gui-test-')));

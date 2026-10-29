@@ -1,4 +1,4 @@
-"""Round-trip a DMG and verify its App, frozen provider and ad-hoc signature."""
+"""Round-trip the DMG and verify chat/console Apps and ad-hoc signatures."""
 import argparse
 import hashlib
 import json
@@ -9,7 +9,6 @@ import shutil
 import struct
 import subprocess
 import sys
-import tarfile
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -67,31 +66,34 @@ def code_directory(file, resources=None, info=None):
     identity = directory[identifier:directory.index(b'\0', identifier)].decode()
     return hashlib.new(algorithm, directory).digest()[:20], identity, pages
 
-def validate_volume(volume):
-    assert {file.name for file in volume.iterdir()} == {'chatgpt-apionly.app', 'Applications', 'README.txt'}
-    link = volume / 'Applications'
-    assert link.is_symlink() and link.readlink().as_posix() == '/Applications'
-    app = volume / 'chatgpt-apionly.app'
+ENTRIES = [('official', 'chatgpt-official'), ('api', 'chatgpt-api'), ('apionly', 'chatgpt-apionly'), ('console', 'chatgpt-console')]
+
+def validate_app(volume, entry, name):
+    app = volume / (name + '.app')
     contents = app / 'Contents'
     info = plistlib.loads((contents / 'Info.plist').read_bytes())
-    assert info['CFBundleIdentifier'] == 'local.chatgpt-api.apionly'
-    assert info['CFBundleExecutable'] == 'chatgpt-apionly'
+    assert info['CFBundleIdentifier'] == 'local.chatgpt-api.' + entry
+    assert info['CFBundleExecutable'] == name
     assert info['CFBundlePackageType'] == 'APPL' and info['CFBundleShortVersionString'] == VERSION
-    launcher = contents / 'MacOS/chatgpt-apionly'
+    privacy_keys = ['NSMicrophoneUsageDescription', 'NSCameraUsageDescription', 'NSAudioCaptureUsageDescription',
+                    'NSAppleEventsUsageDescription', 'NSAppDataUsageDescription',
+                    'NSDesktopFolderUsageDescription', 'NSDocumentsFolderUsageDescription', 'NSDownloadsFolderUsageDescription']
+    assert all(isinstance(info.get(key), str) and info[key].strip() for key in privacy_keys), 'Missing a native feature privacy purpose string'
+    launcher = contents / 'MacOS' / name
     assert launcher.stat().st_mode & 0o111
     resources = contents / 'Resources'
+    assert info['CFBundleIconFile'] == 'ChatGPT.icns' and info['CFBundleIconName'] == 'Icon'
+    assert (resources / 'ChatGPT.icns').read_bytes() == (ROOT / 'assets/ChatGPT.icns').read_bytes()
+    assert (resources / 'Assets.car').read_bytes() == (ROOT / 'assets/macos/Assets.car').read_bytes()
     assert (resources / 'gui.mjs').read_bytes() == (ROOT / 'macos/dmg/gui.mjs').read_bytes()
     metadata = json.loads((resources / 'dmg-build.json').read_text())
     assert metadata['notarized'] is False and metadata['developerID'] is False
     assert metadata['signature'] == 'ad-hoc'
+    assert metadata['entryMode'] == entry and metadata['entry'] == name + '.app'
     assert metadata['launcherSourceSHA256'] == digest(ROOT / 'macos/dmg/launcher.c')
     assert metadata['guiSourceSHA256'] == digest(ROOT / 'macos/dmg/gui.mjs')
     release = resources / 'release'
-    source_archive = ROOT / 'release' / f'ChatGPT-API-Provider-{VERSION}-macos-arm64.tar.gz'
-    assert metadata['providerArchiveSHA256'] == digest(source_archive)
-    with tarfile.open(source_archive, 'r:gz') as source:
-        prefix = source.getmembers()[0].name.split('/')[0]
-        assert (release / 'release.json').read_bytes() == source.extractfile(prefix + '/release.json').read()
+    assert metadata['manifestSHA256'] == digest(release / 'release.json')
     manifest = json.loads((release / 'release.json').read_text())
     assert manifest['product'] == 'chatgpt-apionly-provider' and manifest['platform'] == 'darwin-arm64'
     assert manifest['version'] == VERSION and metadata['version'] == VERSION
@@ -103,12 +105,14 @@ def validate_volume(volume):
         assert not file.is_symlink() and digest(file) == entry['sha256']
         assert not set(file.relative_to(app).parts) & {'data', '.env', 'auth.json', '.codex', '.git', 'tests'}
         assert file.stat().st_mode & 0o777 == entry['mode'], 'Executable permission mismatch: ' + entry['path']
+        if entry['path'].split('/')[0] != 'runtime':
+            assert file.read_bytes() == (ROOT / entry['path']).read_bytes(), 'Payload is not the current source: ' + entry['path']
     node = release / 'payload/runtime/node'
     assert node.read_bytes()[:4] == b'\xcf\xfa\xed\xfe'
     envelope_file = contents / '_CodeSignature/CodeResources'
     envelope = plistlib.loads(envelope_file.read_bytes())
     sealed = set(envelope['files2'])
-    required_seals = {'Resources/gui.mjs', 'Resources/dmg-build.json', 'Resources/release/release.json'}
+    required_seals = {'Resources/gui.mjs', 'Resources/dmg-build.json', 'Resources/release/release.json', 'Resources/ChatGPT.icns', 'Resources/Assets.car'}
     required_seals |= {'Resources/release/payload/' + entry['path'] for entry in manifest['files']}
     assert required_seals <= sealed, 'Required App resources are not sealed'
     for relative, record in envelope['files2'].items():
@@ -129,12 +133,20 @@ def validate_volume(volume):
     _, identifier, pages = code_directory(launcher, envelope_file, contents / 'Info.plist')
     assert identifier == info['CFBundleIdentifier']
     assert (volume / 'README.txt').read_bytes() == (ROOT / 'docs/macos-dmg-readme.md').read_bytes()
-    return len(manifest['files']), pages
+    return {'entry': name + '.app', 'entryMode': metadata['entryMode'], 'programFiles': len(manifest['files']), 'privacyUsageKeys': privacy_keys,
+            'signedLauncherPagesVerified': pages, 'manifestSHA256': metadata['manifestSHA256']}
+
+def validate_volume(volume):
+    assert {file.name for file in volume.iterdir()} == {name + '.app' for _, name in ENTRIES} | {'Applications', 'README.txt'}
+    link = volume / 'Applications'
+    assert link.is_symlink() and link.readlink().as_posix() == '/Applications'
+    results = [validate_app(volume, entry, name) for entry, name in ENTRIES]
+    assert len({item['manifestSHA256'] for item in results}) == 1, 'Entries have different provider programs'
+    assert (volume / 'README.txt').read_bytes() == (ROOT / 'docs/macos-dmg-readme.md').read_bytes()
+    return results
 
 def check(args):
     archive = args.archive.resolve()
-    checksum = digest(archive)
-    assert checksum == Path(str(archive) + '.sha256').read_text().split()[0]
     with archive.open('rb') as stream:
         stream.seek(-512, 2); assert stream.read(4) == b'koly', 'Not a UDIF image'
     with tempfile.TemporaryDirectory(prefix='chatgpt-dmg-test-') as temporary:
@@ -146,7 +158,8 @@ def check(args):
             run(['/usr/bin/hdiutil', 'attach', '-readonly', '-nobrowse', '-mountpoint', volume, archive])
             try:
                 result = validate_volume(volume)
-                run(['/usr/bin/codesign', '--verify', '--strict', volume / 'chatgpt-apionly.app'])
+                for _, name in ENTRIES:
+                    run(['/usr/bin/codesign', '--verify', '--strict', volume / (name + '.app')])
             finally:
                 run(['/usr/bin/hdiutil', 'detach', volume])
         else:
@@ -157,9 +170,8 @@ def check(args):
             run([dmgtool, 'extract', archive, raw])
             run([hfsplus, raw, 'extractall', '/', volume])
             result = validate_volume(volume)
-    return {'passed': True, 'archive': str(archive), 'sha256': checksum, 'providerFilesUnchanged': result[0],
-            'signedLauncherPagesVerified': result[1], 'hostPlatform': sys.platform, 'notarized': False,
-            'scope': 'DMG filesystem round-trip, App structure, resource/code hashes and frozen payload; Gatekeeper approval and GUI not executed.'}
+    return {'passed': True, 'archive': str(archive), 'bytes': archive.stat().st_size, 'entries': result, 'hostPlatform': sys.platform, 'notarized': False,
+            'scope': 'Three chat Apps and a console App, current payload, official Mac icon resources and signature hashes; Gatekeeper approval and native GUI not executed.'}
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

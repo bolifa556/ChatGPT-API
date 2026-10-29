@@ -1,0 +1,24 @@
+{
+  "verifiedAt": "2026-10-17",
+  "models": {
+    "gpt-6.1-sol": { "tokens": 872000, "source": "native-model-catalog:0.162.0-alpha.17.2" },
+    "gpt-6-astra": { "tokens": 872000, "source": "native-model-catalog:0.162.0-alpha.17.2" },
+    "gpt-6-luna": { "tokens": 872000, "source": "native-model-catalog:0.162.0-alpha.17.2" },
+    "gpt-5.6-terra": { "tokens": 872000, "source": "native-model-catalog:0.162.0-alpha.17.2" },
+    "qwen3.8-max": { "tokens": 1000000, "source": "https://help.aliyun.com/zh/model-studio/text-generation-model/" },
+    "qwen3.8-max-0902": { "tokens": 1000000, "source": "https://help.aliyun.com/zh/model-studio/text-generation-model/" },
+    "qwen3.8-flash": { "tokens": 1000000, "source": "https://help.aliyun.com/en/model-studio/qwen3-8-flash" },
+    "deepseek-v4-pro": { "tokens": 1000000, "source": "https://help.aliyun.com/zh/model-studio/text-generation-model/" },
+    "deepseek-v4-flash": { "tokens": 1000000, "source": "https://help.aliyun.com/zh/model-studio/text-generation-model/" },
+    "deepseek-v4.1-flash": { "tokens": 1000000, "source": "https://www.alibabacloud.com/help/zh/model-studio/deepseek-v4-1-flash" },
+    "glm-5.2": { "tokens": 1000000, "source": "https://www.alibabacloud.com/help/zh/model-studio/glm" },
+    "glm-5.3": { "tokens": 1048576, "source": "https://www.alibabacloud.com/help/zh/model-studio/glm-5-3" },
+    "kimi-k2.7-code": { "tokens": 256000, "source": "https://help.aliyun.com/zh/model-studio/text-generation-model/" },
+    "MiniMax-M2.5": { "tokens": 192000, "source": "https://www.alibabacloud.com/help/en/model-studio/text-generation-model" }
+  },
+  "aliases": {
+    "词元计划/deepseek-flash": "deepseek-v4-flash",
+    "词元计划/deepseek-flash-2": "deepseek-v4.1-flash",
+    "词元计划/glm-5.3-flash": "glm-5.3"
+  }
+}

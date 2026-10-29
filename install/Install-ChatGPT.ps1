@@ -80,7 +80,7 @@ $form.AcceptButton = $installButton
 $envPath = Get-LauncherDataPath $packageDir '.env'
 if (Test-Path -LiteralPath $envPath) {
     try {
-        $existing = Get-EnvValues $envPath
+        $existing = Get-UserApiSettings $packageDir
         $urlBox.Text = [string]$existing['BASE_URL']
         $keyBox.Text = [string]$existing['API_KEY']
     } catch {

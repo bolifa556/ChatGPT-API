@@ -1,4 +1,4 @@
-import { request } from 'undici';
+import { requestWithAbort as request, releaseResponseBody, RESPONSE_TIMEOUTS, writeChunk } from './transport.mjs';
 
 const fail = (message, code, status = 400) => Object.assign(new Error(message), { code, status });
 const ok = status => status >= 200 && status < 300;
@@ -34,6 +34,8 @@ export function imageCandidates(models, env, operation, requested) {
     return [model];
   }
   const candidates = models.filter(m => imageCapabilities(m)[operation === 'edits' ? 'editing' : 'generation']);
+  const exact = candidates.find(model => model.id === requested);
+  if (exact?._providerId && exact._providerId !== 'default') return [exact];
   return [...candidates.filter(m => m.id === requested || leaf(m.id) === leaf(requested || '')),
     ...candidates.filter(m => m.id !== requested && leaf(m.id) !== leaf(requested || ''))];
 }
@@ -124,29 +126,31 @@ async function nativeImageResponse(data, dispatcher, signal) {
 // Image calls are independent of the conversational model menu and adapters.
 // Fallback is allowed only after a definitive rejection, never after accepted
 // output, an ambiguous network failure, or a content-policy rejection.
-export async function forwardImages({ req,res,url,body,operation,env,hasLogin,allowGateway = true,getModels,headersFor,targetUrl,officialDispatcher,gatewayDispatcher,imageDispatcher,decodeBody,resolveFile,signal,log }) {
+export async function forwardImages({ req,res,url,body,operation,env,hasLogin,allowGateway = true,getModels,headersFor,targetUrl,officialDispatcher,gatewayDispatcher,imageDispatcher,decodeBody,resolveFile,resolveGateway,signal,log }) {
   let original; try { original = JSON.parse(body.toString('utf8')); } catch { throw fail('Images requests must contain JSON.', 'invalid_image_request'); }
   if (!original || Array.isArray(original) || typeof original !== 'object') throw fail('Invalid Images request.', 'invalid_image_request');
   let officialFailure;
-  const forward = async (which, model, outgoing = { body, contentType: req.headers['content-type'] || 'application/json' }) => {
-    const headers = headersFor(req.headers, which); headers['content-type'] = outgoing.contentType;
+  const forward = async (which, model, outgoing = { body, contentType: req.headers['content-type'] || 'application/json' }, gateway) => {
+    const headers = headersFor(req.headers, which, gateway?.profile); headers['content-type'] = outgoing.contentType;
     if (which === 'gateway') delete headers['x-openai-internal-codex-responses-lite'];
-    const upstream = await request(targetUrl(which, url), { method: 'POST', body: outgoing.body, headers, dispatcher: which === 'official' ? officialDispatcher : gatewayDispatcher, signal, headersTimeout: 120000, bodyTimeout: 300000 });
-    log(which + ' images operation=' + operation + ' model=' + model + ' status=' + upstream.statusCode);
-    if (which === 'official' && ok(upstream.statusCode)) {
-      res.writeHead(upstream.statusCode, responseHeaders(upstream.headers));
-      for await (const chunk of upstream.body) { if (res.destroyed) break; res.write(chunk); }
-      res.end(); return { completed: true };
-    }
-    const raw = await boundedBody(upstream.body);
-    const decoded = decodeBody(raw, upstream.headers['content-encoding'] || '');
-    let data; try { data = JSON.parse(decoded.toString('utf8')); } catch {}
-    if (which === 'gateway' && ok(upstream.statusCode)) {
-      const normalized = await nativeImageResponse(data, imageDispatcher, signal);
-      res.writeHead(upstream.statusCode, responseHeaders(upstream.headers, normalized.changed));
-      res.end(normalized.changed ? JSON.stringify(normalized.data) : raw); return { completed: true };
-    }
-    return { status: upstream.statusCode,headers: upstream.headers,raw,data };
+    const upstream = await request(targetUrl(which, url, gateway), { method: 'POST', body: outgoing.body, headers, dispatcher: which === 'official' ? officialDispatcher : gateway?.dispatcher || gatewayDispatcher, signal, ...RESPONSE_TIMEOUTS });
+    try {
+      log(which + ' images operation=' + operation + ' model=' + model + ' status=' + upstream.statusCode);
+      if (which === 'official' && ok(upstream.statusCode)) {
+        res.writeHead(upstream.statusCode, responseHeaders(upstream.headers));
+        for await (const chunk of upstream.body) { if (res.destroyed) break; await writeChunk(res, chunk); }
+        res.end(); return { completed: true };
+      }
+      const raw = await boundedBody(upstream.body);
+      const decoded = decodeBody(raw, upstream.headers['content-encoding'] || '');
+      let data; try { data = JSON.parse(decoded.toString('utf8')); } catch {}
+      if (which === 'gateway' && ok(upstream.statusCode)) {
+        const normalized = await nativeImageResponse(data, imageDispatcher, signal);
+        res.writeHead(upstream.statusCode, responseHeaders(upstream.headers, normalized.changed));
+        res.end(normalized.changed ? JSON.stringify(normalized.data) : raw); return { completed: true };
+      }
+      return { status: upstream.statusCode,headers: upstream.headers,raw,data };
+    } finally { releaseResponseBody(upstream.body); }
   };
   if (hasLogin) {
     const result = await forward('official', original.model);
@@ -161,8 +165,9 @@ export async function forwardImages({ req,res,url,body,operation,env,hasLogin,al
   if (!candidates.length) throw fail((officialFailure ? 'Official image model is unavailable (HTTP ' + officialFailure.status + '). ' : '') + 'This custom API provides no model for image ' + (operation === 'edits' ? 'editing' : 'generation') + '. Add an image model to the API; IMAGE_MODEL / IMAGE_EDIT_MODEL can select an alias.', 'no_gateway_image_model');
   let last;
   for (const model of candidates) {
-    const outgoing = await gatewayBody(original, model, operation, env, imageDispatcher, signal, resolveFile);
-    const result = await forward('gateway', model.id, outgoing);
+    const gateway = resolveGateway?.(model);
+    const outgoing = await gatewayBody(original, gateway ? { ...model, id: gateway.model } : model, operation, gateway?.env || env, imageDispatcher, signal, resolveFile);
+    const result = await forward('gateway', model.id, outgoing, gateway);
     if (result.completed) return;
     last = { ...result,model: model.id };
     if (!imageModelUnavailable(result.status, result.data)) break;

@@ -33,7 +33,7 @@ async function install() {
     if (![0o644, 0o755].includes(entry.mode)) throw new Error('Invalid release permissions.');
     copies.push({ target, bytes, mode: entry.mode });
   }
-  for (const required of ['runtime/node','linux/provider.mjs','linux/chatgpt-api','src/shim.mjs','assets/model-template.json','package-lock.json']) if (!seen.has(required)) throw new Error('Incomplete release: ' + required);
+  for (const required of ['runtime/node','linux/provider.mjs','linux/console','linux/settings.mjs','linux/chatgpt-api','src/shim.mjs','src/transport.mjs','src/response-state.mjs','src/settings.mjs','src/gateway-sources.mjs','src/console.mjs','assets/console/index.html','assets/console/console.css','assets/console/console.js','assets/console/icon.svg','src/model-context.mjs','src/gateway-recovery.mjs','assets/model-template.json','assets/model-contexts.json','package-lock.json']) if (!seen.has(required)) throw new Error('Incomplete release: ' + required);
   const ctx = context(destination);
   // Verification finishes before stopping or replacing any installed program.
   await stopRouter(ctx);
@@ -50,6 +50,10 @@ async function install() {
   const entry = ['[Desktop Entry]','Type=Application','Name=ChatGPT API','Comment=ChatGPT with a custom API provider',
     'Exec=' + desktopQuote(path.join(destination, 'linux/chatgpt-api')), 'Icon=applications-development','Terminal=false','Categories=Development;', 'StartupNotify=true',''].join('\n');
   atomic(path.join(applications, 'chatgpt-api-provider.desktop'), entry, 0o644);
+  const consoleEntry = ['[Desktop Entry]', 'Type=Application', 'Name=ChatGPT API 控制台', 'Comment=Manage API sources and model context',
+    'Exec=' + desktopQuote(path.join(destination, 'linux/console')), 'Icon=' + path.join(destination, 'assets/console/icon.svg'), 'Terminal=false', 'Categories=Development;', ''].join('\n');
+  atomic(path.join(destination, '控制台.desktop'), consoleEntry, 0o755);
+  atomic(path.join(applications, 'chatgpt-api-console.desktop'), consoleEntry, 0o644);
   console.log(JSON.stringify({ installed: destination, version: manifest.version, platform: manifest.platform, gatewayModels: result.models, desktopEntry: path.join(applications, 'chatgpt-api-provider.desktop') }, null, 2));
   console.log('Open ChatGPT API from the applications menu. The release extraction directory can now be removed.');
 }

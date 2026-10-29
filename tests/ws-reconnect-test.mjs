@@ -1,3 +1,4 @@
+import { readRequestJson } from './http-fixture.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
@@ -64,8 +65,7 @@ async function waitForHealth(base, child) {
 try {
   const gatewayPort = await listen(http.createServer(async (req, res) => {
     if (req.url.endsWith('/models')) { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ data: [{ id: 'Other/test-model' }] })); return; }
-    let text = ''; for await (const chunk of req) text += chunk;
-    const body = JSON.parse(text), response = completed(body);
+    const body = await readRequestJson(req), response = completed(body);
     records.push({ route: 'gateway', body });
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     res.end('data: ' + JSON.stringify({ type: 'response.created', response: { ...response, status: 'in_progress', output: [] } }) + '\n\ndata: ' + JSON.stringify({ type: 'response.completed', response }) + '\n\n');

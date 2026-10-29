@@ -7,6 +7,8 @@ export function decodedStream(body, encoding = '') {
   if (!decoders[encoding]) throw new Error('Unsupported upstream compression');
   const decoder = decoders[encoding]();
   body.on('error', error => decoder.destroy(error));
+  // Leaving a completed SSE iterator must also release a compressed upstream.
+  decoder.once('close', () => { if (!body.destroyed) body.destroy(); });
   return body.pipe(decoder);
 }
 export async function* ssePackets(stream) {

@@ -1,4 +1,4 @@
-﻿$script:LauncherRootKeys = @('openai_base_url', 'model_provider', 'model_catalog_json', 'model', 'model_reasoning_effort')
+﻿$script:LauncherRootKeys = @('openai_base_url', 'model_provider', 'model_catalog_json', 'model', 'model_reasoning_effort', 'model_context_window', 'model_auto_compact_token_limit')
 $script:LauncherTables = @('model_providers.chatgpt_api_launcher', 'model_providers.chatgpt_api_launcher.auth', 'model_providers.chatgpt_api_mixed', 'model_providers.chatgpt_api_mixed.auth', 'model_providers.smr', 'model_providers.smr.auth')
 function Get-CodexHome {
     if ($env:CODEX_HOME) { return $env:CODEX_HOME }
@@ -121,6 +121,19 @@ function Read-LauncherState([string]$packageDir) {
     if (Test-Path -LiteralPath $path) { return ([System.IO.File]::ReadAllText($path) | ConvertFrom-Json) }
     return $null
 }
+function Restore-LauncherRootLine([string]$content, [string]$key, [string]$line, [string]$original) {
+    if (-not $line -or (Get-RootLine $content $key)) { return Set-RootLine $content $key $line }
+    $head = Get-RootHead $content
+    $oldHead = Get-RootHead $original
+    $pattern = '(?m)^[ \t]*' + [regex]::Escape($key) + '[ \t]*=[^\r\n]*(?:\r?\n|$)'
+    $old = [regex]::Match($oldHead, $pattern)
+    if (-not $old.Success) { return Set-RootLine $content $key $line }
+    foreach ($next in [regex]::Matches($oldHead.Substring($old.Index + $old.Length), '(?m)^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*=')) {
+        $position = [regex]::Match($head, '(?m)^[ \t]*' + [regex]::Escape($next.Groups[1].Value) + '[ \t]*=')
+        if ($position.Success) { return $content.Insert($position.Index, $line) }
+    }
+    return $content.Insert($head.Length, $line)
+}
 function Restore-LauncherConfig([string]$packageDir, [string]$configPath) {
     $state = Read-LauncherState $packageDir
     if (-not $state -or -not $state.active) { return }
@@ -135,7 +148,7 @@ function Restore-LauncherConfig([string]$packageDir, [string]$configPath) {
     }
     if ($current -ceq $state.applied) { $restored = [string]$state.original } else {
         $restored = $current
-        foreach ($key in $script:LauncherRootKeys) { $restored = Set-RootLine $restored $key (Get-RootLine $state.original $key) }
+        foreach ($key in $script:LauncherRootKeys) { $restored = Restore-LauncherRootLine $restored $key (Get-RootLine $state.original $key) $state.original }
         foreach ($table in $script:LauncherTables) { $restored = Set-TableText $restored $table (Get-TableText $state.original $table) }
         $restored = $restored.TrimEnd() + [regex]::Match($state.original, '[\r\n\t ]*\z').Value
     }
@@ -181,6 +194,11 @@ function Apply-LauncherConfig([string]$packageDir, [string]$configPath, [string]
     # conversations to a custom provider merely because the API entry is used.
     $provider = if ($entryMode -eq 'official' -or ($mode -eq 'mixed' -and $officialIds -ccontains $selected)) { 'openai' } elseif ($mode -eq 'mixed') { 'chatgpt_api_mixed' } else { 'chatgpt_api_launcher' }
     $content = Set-RootString $content 'model_provider' $provider
+    if ($provider -ne 'openai') {
+        # Model-specific catalog limits must not be overridden by a global GPT window.
+        $content = Set-RootLine $content 'model_context_window' $null
+        $content = Set-RootLine $content 'model_auto_compact_token_limit' $null
+    }
     $state = [ordered]@{ version = 2; active = $true; mode = $mode; entryMode = $entryMode; configPath = $configPath; original = $original; applied = $content; startedAt = [DateTime]::UtcNow.ToString('o'); lastApiModel = $(if ($entryMode -eq 'api') { $selected } else { $previous.lastApiModel }); lastApiEffort = $(if ($entryMode -eq 'api') { Get-RootString $original 'model_reasoning_effort' } else { $previous.lastApiEffort }); lastApiOnlyModel = $(if ($entryMode -eq 'apionly') { $selected } else { $previous.lastApiOnlyModel }); lastApiOnlyEffort = $(if ($entryMode -eq 'apionly') { Get-RootString $original 'model_reasoning_effort' } else { $previous.lastApiOnlyEffort }) }
     # Journal first, so a crash while switching can be recovered by either entry.
     Write-Utf8File (Get-LauncherDataPath $packageDir 'launcher-state.json') ($state | ConvertTo-Json -Depth 8)

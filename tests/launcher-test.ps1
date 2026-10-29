@@ -35,6 +35,8 @@ try {
 } finally { Set-Item Function:Get-NativeRepairCli $nativeResolver; Remove-Item Function:Invoke-FixtureNativeVersion }
 $config=Join-Path $fixture 'config.toml'
 $baseline="model = `"gpt-6-sol`"`r`nmodel_reasoning_effort = `"ultra`"`r`n[app]`r`nlocaleOverride = `"zh-CN`"`r`nshowMax = true`r`n"
+$baseline=Set-RootLine $baseline 'model_context_window' "model_context_window = 500000`r`n"
+$baseline=Set-RootLine $baseline 'model_auto_compact_token_limit' "model_auto_compact_token_limit = 400000`r`n"
 $baseline=Set-LauncherProvider $baseline 'chatgpt_api_launcher' 'http://127.0.0.1:8102/v1' $fixture $false
 $models=@{models=@(@{slug='gpt-6-sol'},@{slug='Example/model'})}
 $catalog=Get-LauncherDataPath $fixture 'models-smr.json'
@@ -49,9 +51,10 @@ foreach($mode in @('mixed','gateway')) {
     $applied=[IO.File]::ReadAllText($config)
     Assert ((Get-RootString $applied 'model_catalog_json') -eq $catalog) 'Catalog path must be data/cache.'
     $provider=Get-RootString $applied 'model_provider'
-    if($mode -eq 'gateway'){Assert ($provider -eq 'chatgpt_api_launcher') 'No-login provider was not selected.'}
+    if($mode -eq 'gateway'){Assert ($provider -eq 'chatgpt_api_launcher') 'No-login provider was not selected.'; Assert (-not (Get-RootLine $applied 'model_context_window')) 'Global context override bypassed per-model capacity.'; Assert (-not (Get-RootLine $applied 'model_auto_compact_token_limit')) 'Global compaction threshold bypassed native defaults.'}
     else{
         Assert ($provider -eq 'openai') 'An official initial model must retain the official provider even in the API entry.'
+        Assert ((Get-RootLine $applied 'model_context_window').Contains('500000')) 'Official model context setting changed.'
         Assert ((Get-TableText $applied 'model_providers.chatgpt_api_mixed').Contains('requires_openai_auth = true')) 'Mixed entry lost native account authentication.'
         Assert (-not (Get-TableText $applied 'model_providers.chatgpt_api_mixed.auth')) 'OAuth provider must not also use an API-key auth helper.'
     }

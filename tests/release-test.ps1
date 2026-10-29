@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $package = [IO.File]::ReadAllText((Join-Path $root 'package.json')) | ConvertFrom-Json
 $releaseName = 'ChatGPT-API-Launcher-' + $package.version + '-win-x64'
-if (-not $Archive) { $Archive = Join-Path $root ('release\' + $releaseName + '.zip') }
+if (-not $Archive) { $Archive = Join-Path $root ('release\' + $package.version + '\' + $releaseName + '.zip') }
 if (-not (Test-Path -LiteralPath $Archive)) { throw 'Build a release first, or pass -Archive with an existing ZIP.' }
 function Assert($condition, [string]$message) { if (-not $condition) { throw $message } }
 function Assert-Fails([scriptblock]$action, [string]$message) {

@@ -47,11 +47,10 @@ export class NonGptAdapter {
       if (t.type === 'namespace') return this.tools(t.tools || [], [namespace, t.name].filter(Boolean).join('.'));
       if (t.type === 'custom') {
         this.stats.customTools++;
-        let description = 'Original tool: ' + [namespace, t.name].filter(Boolean).join('.') + '\n' + (t.description || '');
-        description += '\nCompatibility interface: put the raw tool input (source code or patch text) into the input string. Do not JSON-wrap the source inside that string.';
-        if (t.format?.type === 'grammar') description += '\nOriginal input grammar:\n' + (t.format.definition || '');
+        let description = t.description || '';
+        if (t.format?.type === 'grammar' && t.format.definition) description += (description ? '\n' : '') + t.format.definition;
         return [{ type: 'function', name: this.register(t.name, namespace, true), description,
-          parameters: { type: 'object', properties: { input: { type: 'string', description: 'Exact raw tool input; not a JSON object encoded as text.' } }, required: ['input'], additionalProperties: false } }];
+          parameters: { type: 'object', properties: { input: { type: 'string' } }, required: ['input'], additionalProperties: false } }];
       }
       if (t.type === 'function' && namespace) {
         this.stats.namespaceTools++;
