@@ -96,20 +96,16 @@ try {
   assert(!menu().some(model => /qwen-image/.test(model.slug)));
   checks.push('Configure preserves image model aliases and edit format; image-only models stay out of the chat menu');
 
-  const clientDir = path.join(fixture, 'mockbin'); fs.mkdirSync(clientDir);
-  const client = path.join(clientDir, 'chatgpt');
-  fs.writeFileSync(client, '#!/bin/sh\nprintf "%s\\n" "$CODEX_HOME" > "$CHATGPT_TEST_MARKER"\n', { mode: 0o755 });
-  const marker = path.join(fixture, 'client-started.txt');
+  // LaunchServices behavior is covered by macos-entries-test.mjs with an
+  // isolated .app and opener; installation does not launch a fake shell client.
   fs.writeFileSync(configFile, fs.readFileSync(configFile, 'utf8').replace(/^model = .*$/m, 'model = "Vendor/model" # keep this choice'));
   models.push('Vendor/new-model');
-  await cli('launch', { CHATGPT_API_CLIENT: client, CHATGPT_TEST_MARKER: marker });
-  for (let i = 0; i < 30 && !fs.existsSync(marker); i++) await delay(50);
-  assert.equal(fs.readFileSync(marker, 'utf8').trim(), native);
+  await cli('configure');
   assert(fs.readFileSync(configFile, 'utf8').includes('model = "Vendor/model"'));
   assert(menu().some(model => model.slug === 'Vendor/new-model'));
   const newModel = await fetch('http://127.0.0.1:' + port + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'Vendor/new-model', input: 'new' }) });
   assert.equal(newModel.status, 200); await newModel.text();
-  checks.push('Launch refreshes the menu and live router together, then opens the configured client with the same CODEX_HOME');
+  checks.push('Reconfiguration refreshes the menu and live router together while retaining the selected model');
 
   const payload = path.join(release, 'payload/src/shim.mjs'), originalPayload = fs.readFileSync(payload);
   const installedHash = crypto.createHash('sha256').update(fs.readFileSync(path.join(installed, 'src/shim.mjs'))).digest('hex');
