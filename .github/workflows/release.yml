@@ -42,8 +42,8 @@ jobs:
       - run: npm test
       - run: python scripts/ci-run.py powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/launcher-test.ps1
       - run: python scripts/ci-run.py powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/gateway-recovery-test.ps1
-      - run: npm run build:release
-      - run: npm run test:release
+      - run: python scripts/ci-run.py powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-Release.ps1
+      - run: python scripts/ci-run.py powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/release-test.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: release-windows
