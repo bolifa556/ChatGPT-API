@@ -4,6 +4,9 @@ import sys
 
 
 def main():
+    # Hosted Windows Python may use an ANSI code page for redirected output.
+    # Preserve Unicode diagnostics instead of failing while printing the error.
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     result = subprocess.run(sys.argv[1:], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     output = result.stdout.decode('utf-8', errors='replace')
     print(output, end='', flush=True)
