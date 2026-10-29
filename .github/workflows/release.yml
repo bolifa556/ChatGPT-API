@@ -104,11 +104,11 @@ jobs:
       - run: python3 scripts/ci-run.py node tests/macos-platform-test.mjs
       - run: python3 scripts/ci-run.py node tests/macos-provider-test.mjs
       - run: python3 scripts/ci-run.py node tests/macos-dmg-gui-test.mjs
-      - run: python3 scripts/build-macos-dmg.py
+      - run: python3 scripts/ci-run.py python3 scripts/build-macos-dmg.py
       - name: Verify macOS DMG
         run: |
           version=$(node -p "require('./package.json').version")
-          python3 tests/macos-dmg-test.py "release/$version/ChatGPT-API-Provider-$version-macos-arm64.dmg"
+          python3 scripts/ci-run.py python3 tests/macos-dmg-test.py "release/$version/ChatGPT-API-Provider-$version-macos-arm64.dmg"
       - uses: actions/upload-artifact@v4
         with:
           name: release-macos

@@ -52,17 +52,17 @@ jobs:
       - run: python3 scripts/ci-run.py node tests/macos-platform-test.mjs
       - run: python3 scripts/ci-run.py node tests/macos-provider-test.mjs
       - run: python3 scripts/ci-run.py node tests/macos-dmg-gui-test.mjs
-      - run: python3 scripts/build-macos-release.py
+      - run: python3 scripts/ci-run.py python3 scripts/build-macos-release.py
       - name: Verify macOS API-only release
         shell: bash
         run: |
           version=$(node -p "require('./package.json').version")
           bundle="ChatGPT-API-Provider-$version-macos-arm64"
-          python3 tests/macos-package-test.py "data/build/macos-provider/$bundle.tar.gz"
+          python3 scripts/ci-run.py python3 tests/macos-package-test.py "data/build/macos-provider/$bundle.tar.gz"
           if [ "$(uname -m)" = arm64 ]; then
             mkdir -p "$RUNNER_TEMP/macos-release"
             tar -xzf "data/build/macos-provider/$bundle.tar.gz" -C "$RUNNER_TEMP/macos-release"
-            "$RUNNER_TEMP/macos-release/$bundle/payload/runtime/node" tests/macos-install-test.mjs "$RUNNER_TEMP/macos-release/$bundle"
+            python3 scripts/ci-run.py "$RUNNER_TEMP/macos-release/$bundle/payload/runtime/node" tests/macos-install-test.mjs "$RUNNER_TEMP/macos-release/$bundle"
           else
             echo "The native installer test requires an ARM64 runner; archive and POSIX provider checks completed."
           fi
@@ -70,5 +70,5 @@ jobs:
         shell: bash
         run: |
           version=$(node -p "require('./package.json').version")
-          python3 scripts/build-macos-dmg.py
-          python3 tests/macos-dmg-test.py "release/$version/ChatGPT-API-Provider-$version-macos-arm64.dmg"
+          python3 scripts/ci-run.py python3 scripts/build-macos-dmg.py
+          python3 scripts/ci-run.py python3 tests/macos-dmg-test.py "release/$version/ChatGPT-API-Provider-$version-macos-arm64.dmg"
