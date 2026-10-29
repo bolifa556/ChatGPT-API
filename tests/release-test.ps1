@@ -11,6 +11,30 @@ function Assert-Fails([scriptblock]$action, [string]$message) {
     try { & $action | Out-Null } catch { $failed = $true }
     Assert $failed $message
 }
+# Read the actual Shell Link StringData. WScript's COM getter can convert a
+# correctly stored Unicode argument through the runner's ANSI code page.
+function Get-ShortcutStoredArguments([string]$file) {
+    $stream = [IO.File]::OpenRead($file)
+    $reader = New-Object IO.BinaryReader($stream)
+    try {
+        if ($stream.Length -lt 76 -or $reader.ReadUInt32() -ne 76) { throw 'Invalid Shell Link header.' }
+        $stream.Position = 20
+        $flags = $reader.ReadUInt32()
+        $stream.Position = 76
+        if ($flags -band 1) { $size = $reader.ReadUInt16(); $stream.Position += $size }
+        if ($flags -band 2) { $start = $stream.Position; $size = $reader.ReadUInt32(); $stream.Position = $start + $size }
+        $encoding = if ($flags -band 128) { [Text.Encoding]::Unicode } else { [Text.Encoding]::Default }
+        foreach ($field in @(4,8,16,32)) {
+            if (-not ($flags -band $field)) { continue }
+            $count = [int]$reader.ReadUInt16()
+            $length = if ($flags -band 128) { $count * 2 } else { $count }
+            if ($stream.Position + $length -gt $stream.Length) { throw 'Truncated Shell Link StringData.' }
+            $value = $encoding.GetString($reader.ReadBytes($length))
+            if ($field -eq 32) { return $value }
+        }
+        return ''
+    } finally { $reader.Dispose(); $stream.Dispose() }
+}
 function Get-NativeConfigHashes {
     $homePath = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
     $values = @{}
@@ -67,9 +91,10 @@ try {
     Set-DesktopEntries $installed $fakeDesktop
     $shell = New-Object -ComObject WScript.Shell
     foreach ($entry in @('ChatGPT','chatgpt-api','chatgpt-apionly')) {
-        $link = $shell.CreateShortcut((Join-Path $fakeDesktop ($entry + '.lnk')))
+        $shortcutFile = Join-Path $fakeDesktop ($entry + '.lnk')
+        $storedArguments = Get-ShortcutStoredArguments $shortcutFile
         $expectedEntry = Join-Path $installed ($entry + '.vbs')
-        Assert ($link.Arguments.IndexOf($expectedEntry, [StringComparison]::OrdinalIgnoreCase) -ge 0) ('Shortcut does not target the installed entry. Expected: ' + $expectedEntry + '; actual arguments: ' + $link.Arguments)
+        Assert ($storedArguments.IndexOf($expectedEntry, [StringComparison]::OrdinalIgnoreCase) -ge 0) ('Shortcut does not target the installed entry. Expected: ' + $expectedEntry + '; stored arguments: ' + $storedArguments)
     }
     $null = Copy-ReleasePayload $release $destination
     Assert ([IO.File]::ReadAllText($envFile) -ceq $originalSettings) 'Update changed existing settings.'
