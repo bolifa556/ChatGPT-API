@@ -61,7 +61,11 @@ try {
   const config = fs.readFileSync(configFile, 'utf8');
   assert(config.includes('requires_openai_auth = false')); assert(config.includes('model_provider = "chatgpt_api_launcher"'));
   assert(config.includes('localeOverride = "zh-CN"')); assert(config.includes('[model_providers.unrelated]'));
-  assert(!config.includes('powershell')); assert(!config.includes('openai_base_url'));
+  assert(!config.includes('powershell'));
+  // Native image requests share the local bridge, even in API-only mode.
+  assert(config.includes('openai_base_url = "http://127.0.0.1:' + port + '/v1"'));
+  const route = await (await fetch('http://127.0.0.1:' + port + '/healthz')).json();
+  assert.equal(route.entryMode, 'apionly'); assert.equal(route.mode, 'gateway'); assert.equal(route.officialModels, 0);
   assert.equal(fs.statSync(path.join(installed, 'data/.env')).mode & 0o777, 0o600);
   assert.equal(fs.statSync(path.join(installed, 'data')).mode & 0o777, 0o700);
   assert(fs.statSync(path.join(installed, 'macos/chatgpt-apionly')).mode & 0o100);
