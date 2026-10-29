@@ -1,5 +1,9 @@
 name: Checks
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
 jobs:
   windows:
     runs-on: windows-latest
@@ -11,7 +15,8 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
       - run: npm test
-      - run: npm run test:windows
+      - run: python scripts/ci-run.py powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/launcher-test.ps1
+      - run: python scripts/ci-run.py powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/gateway-recovery-test.ps1
   linux:
     runs-on: ubuntu-latest
     steps:
@@ -41,9 +46,9 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci --ignore-scripts
-      - run: node tests/macos-platform-test.mjs
-      - run: node tests/macos-provider-test.mjs
-      - run: node tests/macos-dmg-gui-test.mjs
+      - run: python3 scripts/ci-run.py node tests/macos-platform-test.mjs
+      - run: python3 scripts/ci-run.py node tests/macos-provider-test.mjs
+      - run: python3 scripts/ci-run.py node tests/macos-dmg-gui-test.mjs
       - run: python3 scripts/build-macos-release.py
       - name: Verify macOS API-only release
         shell: bash
