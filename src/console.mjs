@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { GatewaySources } from './gateway-sources.mjs';
 import { readEnvFile, readSettings, publicSettings, saveSettings, settingsRevision, atomicPrivate, overrideKey, redact } from './settings.mjs';
 import { rememberContexts, contextKey, applyContext } from './model-context.mjs';
-import { imageOnlyModel, imageCapabilities } from './image-compat.mjs';
+import { imageOnlyModel, imageCapabilities, automaticImageCandidates } from './image-compat.mjs';
 
 const moduleRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const readJson = (file, fallback = null) => { try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { return fallback; } };
@@ -82,7 +82,12 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
     try {
       pool.loadCached(readJson(path.join(root, 'data/cache/catalog-state.json'), {}));
       const statuses = pool.saved.statuses || [];
+      const imageModels = pool.models.map(model => {
+        const profile = pool.profile(model._providerId);
+        return [profile.imageModel, profile.imageEditModel].includes(model._upstreamId) ? { ...model, type: 'image' } : model;
+      });
       return { version, configurationSaved: fs.existsSync(path.join(root, 'data/providers.json')), settings: publicSettings(settings), models: models(pool), runtime: await runtime(),
+        automaticImageModels: automaticImageCandidates(imageModels, 'generations', 'gpt-image-2').map(model => model.id),
         sources: settings.providers.map(profile => {
           const cached = pool.sources.find(item => item.id === profile.id);
           const { fingerprint, ...status } = statuses.find(item => item.id === profile.id && item.fingerprint === pool.identity(profile)) || { ready: false, cached: Boolean(cached), models: cached?.models.length || 0 };

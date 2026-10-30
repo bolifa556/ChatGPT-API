@@ -28,7 +28,7 @@
 
 新增来源 ID 由控制台生成，以 `p_` 开头；不要手工更改已使用的 ID。单模型上限的键是 `[来源ID, 原始模型ID]` 的 JSON 字符串。`preferredProviderId` 用于自动图片候选优先顺序，不是将所有聊天自动路由到该来源。
 
-`defaultImageModel` 独立保存默认生图模型，格式为 `{ "providerId": "default", "modelId": "实际图片模型ID" }`；`null` 表示自动选择，不改变 `preferredProviderId`。旧配置尚无此字段时，可从原优先来源的 `imageModel` 迁移；显式取消默认后不会再次恢复旧值。来源的 `imageModel` 仍可补充目录中未识别的图片别名。
+`defaultImageModel` 独立保存手动指定的默认生图模型，格式为 `{ "providerId": "default", "modelId": "实际图片模型ID" }`；`null` 表示自动选择，控制台会直接勾选路由实际采用的“默认生图（自动）”，无需手动选择或保存，不改变 `preferredProviderId`。旧配置尚无此字段时，可从原优先来源的 `imageModel` 迁移；恢复自动后不会再次启用旧值。来源的 `imageModel` 仍可补充目录中未识别的图片别名。
 
 API 地址会补齐 `/v1`，不接受内嵌密码、查询参数或片段。保存的 Key 不在控制台状态接口中回传，空 Key 更新表示保留原值；控制台默认显示密码圆点，点击眼睛时通过经过认证且校验来源与修订号的独立接口查看明文，不改写配置。URL / Key 变更后不能使用旧凭据的目录缓存。
 

@@ -62,13 +62,19 @@ function bindSourceTitle(card, provider) {
     input.focus(); input.select();
   };
 }
+function imageDefault() {
+  if (draft.defaultImageModel) return draft.defaultImageModel;
+  const model = (data.automaticImageModels || []).map(id => data.models.find(item => item.id === id))
+    .find(model => model && draft.providers.some(provider => provider.id === model.providerId && provider.enabled));
+  return model ? { providerId: model.providerId, modelId: model.name } : null;
+}
 function renderImageDefault() {
-  const selected = draft.defaultImageModel, provider = draft.providers.find(item => item.id === selected?.providerId);
-  const imageCount = data.models.filter(model => model.image?.generation && draft.providers.some(item => item.id === model.providerId && item.enabled)).length;
+  const selected = imageDefault(), provider = draft.providers.find(item => item.id === selected?.providerId);
   $('#image-default-summary').innerHTML = selected
-    ? '<span>默认生图：<strong>' + escape(selected.modelId) + '</strong>（' + escape(provider?.name || '来源已移除') + '）</span><button id="clear-image-default" class="quiet-action" type="button">取消默认</button>'
-    : '<span>' + (imageCount ? '未设置默认生图模型，按入口及接口能力自动选择。可在图片模型行勾选“默认生图”。' : '当前目录未识别到生图模型。刷新目录后，可在图片模型行设置默认。') + '</span>';
-  if (selected) $('#clear-image-default').onclick = () => { draft.defaultImageModel = null; changed(); renderModels(); };
+    ? '<span>默认生图：<strong>' + escape(selected.modelId) + '</strong>（' + escape(provider?.name || '来源已移除') + (draft.defaultImageModel ? '' : ' · 自动') + '）</span>'
+      + (draft.defaultImageModel ? '<button id="clear-image-default" class="quiet-action" type="button">恢复自动</button>' : '')
+    : '<span>当前目录未识别到生图模型。启动 API 入口或刷新模型目录后，会自动选好默认模型。</span>';
+  if (draft.defaultImageModel) $('#clear-image-default').onclick = () => { draft.defaultImageModel = null; changed(); renderModels(); };
 }
 function bindKey(card, provider) {
   const input = card.querySelector('[data-field=apiKey]'), button = card.querySelector('.reveal');
@@ -142,6 +148,7 @@ function updateCounts() {
 }
 function renderModels() {
   if (!data) return;
+  const defaultImage = imageDefault();
   const search = $('#model-search').value.toLowerCase(), source = $('#model-source-filter').value;
   const models = data.models.filter(model => draft.providers.some(provider => provider.id === model.providerId && provider.enabled) && (!source || model.providerId === source) && (model.name + (draft.providers.find(provider => provider.id === model.providerId)?.name || model.providerName)).toLowerCase().includes(search));
   $('#filtered-count').textContent = models.length + ' 个模型'; $('#models-empty').hidden = models.length > 0;
@@ -150,9 +157,10 @@ function renderModels() {
     const actual = Math.min(Number(override) || model.capacity || model.fallbackCapacity || model.limit, model.capacity || Infinity, Number(draft.contextLimit));
     const providerName = draft.providers.find(provider => provider.id === model.providerId)?.name || model.providerName;
     if (model.kind === 'image') {
-      const selected = draft.defaultImageModel?.providerId === model.providerId && draft.defaultImageModel.modelId === model.name;
+      const selected = defaultImage?.providerId === model.providerId && defaultImage.modelId === model.name;
+      const automatic = selected && !draft.defaultImageModel;
       const control = model.image?.generation
-        ? '<label class="image-default-choice' + (selected ? ' selected' : '') + '"><input type="checkbox" class="image-default" data-id="' + escape(model.id) + '" ' + (selected ? 'checked ' : '') + 'aria-label="' + escape(model.name + ' · ' + providerName + ' 默认生图') + '"><span>默认生图</span></label>'
+        ? '<label class="image-default-choice' + (selected ? ' selected' : '') + '"><input type="checkbox" class="image-default" data-id="' + escape(model.id) + '" ' + (selected ? 'checked ' : '') + (automatic ? 'disabled ' : '') + 'aria-label="' + escape(model.name + ' · ' + providerName + ' 默认生图') + '"><span>默认生图' + (automatic ? '（自动）' : '') + '</span></label>'
         : '<span class="model-note">仅图片编辑</span>';
       return '<tr class="image-model-row"><td><strong>' + escape(model.name) + '</strong><span class="model-kind">图片</span></td><td>' + escape(providerName) + '</td><td></td><td></td><td>' + control + '</td></tr>';
     }

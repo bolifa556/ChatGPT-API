@@ -32,6 +32,14 @@ function requestedImage(models, requested, nativeDefault) {
   if (matches.length > 1) throw fail('The image model exists at multiple API sources; specify its full source-qualified ID: ' + requested, 'ambiguous_image_model');
   return matches[0] || null;
 }
+export function automaticImageCandidates(models, operation, requested) {
+  const capability = operation === 'edits' ? 'editing' : 'generation';
+  const candidates = models.filter(m => imageCapabilities(m)[capability]);
+  const exact = candidates.find(model => model.id === requested);
+  if (exact?._providerId && exact._providerId !== 'default') return [exact];
+  return [...candidates.filter(m => m.id === requested || leaf(m.id) === leaf(requested || '')),
+    ...candidates.filter(m => m.id !== requested && leaf(m.id) !== leaf(requested || ''))];
+}
 export function imageCandidates(models, env, operation, requested, { nativeDefault = false } = {}) {
   const capability = operation === 'edits' ? 'editing' : 'generation';
   const explicit = requestedImage(models, requested, nativeDefault);
@@ -49,11 +57,7 @@ export function imageCandidates(models, env, operation, requested, { nativeDefau
     if (!caps.known || caps[capability]) return [model];
     if (operation !== 'edits' || env.IMAGE_EDIT_MODEL) throw fail('Configured image model does not advertise ' + operation + ': ' + configured, 'no_gateway_image_model');
   }
-  const candidates = models.filter(m => imageCapabilities(m)[capability]);
-  const exact = candidates.find(model => model.id === requested);
-  if (exact?._providerId && exact._providerId !== 'default') return [exact];
-  return [...candidates.filter(m => m.id === requested || leaf(m.id) === leaf(requested || '')),
-    ...candidates.filter(m => m.id !== requested && leaf(m.id) !== leaf(requested || ''))];
+  return automaticImageCandidates(models, operation, requested);
 }
 export function imageModelUnavailable(status, data) {
   if (ok(status) || data?.data?.length) return false;

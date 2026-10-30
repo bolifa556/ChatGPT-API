@@ -124,6 +124,15 @@ try {
   assert.equal(state.models.find(model => model.name === 'qwen-image').image.generation, true);
   assert.equal(state.models.find(model => model.name === 'qwen-image').image.editing, true);
   assert.equal(state.models.find(model => model.name === models[0]).image.known, false);
+  assert.equal(state.settings.defaultImageModel, null);
+  assert.deepEqual(state.automaticImageModels, ['qwen-image', '@p_bbbbbbbb/qwen-image']);
+  const automaticNativeImage = await fetch('http://127.0.0.1:' + port + '/v1/images/generations', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-codex-image-turn-id': 'first-use-automatic-image' },
+    body: JSON.stringify({ model: 'gpt-image-2', prompt: 'First-use image without opening image settings' }),
+  });
+  assert.equal(automaticNativeImage.status, 200); assert.equal(records.at(-1).source, 'a');
+  assert.equal(records.at(-1).body.model, state.automaticImageModels[0]);
+  checks.push('First-use native image generation needs no manual default; the console displays the same automatic model and independent source candidates');
   const revealBody = { providerId: 'p_bbbbbbbb', revision: state.settings.revision };
   assert.equal((await fetch(new URL('/api/keys/reveal', consoleUrl), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(revealBody) })).status, 401);
   assert.equal((await request('keys/reveal', revealBody, { origin: 'https://untrusted.invalid' })).status, 403);
@@ -148,6 +157,7 @@ try {
   const defaultImage = { providerId: 'p_bbbbbbbb', modelId: 'qwen-image' };
   state = await (await request('settings', { ...state.settings, defaultImageModel: defaultImage })).json();
   assert.deepEqual(state.settings.defaultImageModel, defaultImage);
+  assert.equal(state.automaticImageModels[0], 'qwen-image', 'Manual selection must preserve the automatic fallback independently');
   assert.equal(state.settings.preferredProviderId, preferredBeforeImage);
   assert.equal(readSettings(fixture).providers[0].apiKey, keys.a); assert.equal(readSettings(fixture).providers[1].apiKey, keys.b);
   await fetch('http://127.0.0.1:' + port + '/readyz');
