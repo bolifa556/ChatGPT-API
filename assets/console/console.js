@@ -47,7 +47,7 @@ function bindSourceTitle(card, provider) {
     form.onsubmit = event => {
       event.preventDefault(); const name = input.value.trim();
       input.setCustomValidity(name ? '' : '请输入来源名称。'); if (!input.reportValidity()) return;
-      if (provider.name !== name) { provider.name = name; changed(); renderSourceFilters(); renderModels(); renderImageSettings(); }
+      if (provider.name !== name) { provider.name = name; changed(); renderSourceFilters(); renderModels(); }
       card.querySelector('[data-field=baseUrl]').setAttribute('aria-label', 'API 地址 · ' + name);
       card.querySelector('[data-field=apiKey]').setAttribute('aria-label', 'API Key · ' + name);
       const reveal = card.querySelector('.reveal'), visible = card.querySelector('[data-field=apiKey]').type === 'text';
@@ -62,31 +62,13 @@ function bindSourceTitle(card, provider) {
     input.focus(); input.select();
   };
 }
-function imageField(provider, name, label, operation) {
-  const choices = data.models.filter(model => model.providerId === provider.id && model.image?.[operation]);
-  const listId = name + '-' + provider.id;
-  const loaded = data.models.some(model => model.providerId === provider.id);
-  const automatic = choices.length ? '自动选择（' + choices.length + ' 个可选模型）' : loaded ? '自动选择（未识别到图片模型）' : '自动选择（目录未加载）';
-  const placeholder = name === 'imageEditModel' && draft.defaultImageModel?.providerId === provider.id ? '沿用默认生图模型（如支持编辑）' : automatic;
-  return '<label class="field"><span>' + label + '<small class="optional">可选</small></span><input data-field="' + name + '" type="text" autocomplete="off" list="' + listId + '" value="' + escape(provider[name] || '') + '" placeholder="' + placeholder + '" aria-label="' + escape(label + ' · ' + provider.name) + '"><datalist id="' + listId + '">' + choices.map(model => '<option value="' + escape(model.name) + '"></option>').join('') + '</datalist></label>';
-}
-function renderImageSettings() {
-  $('#image-settings').innerHTML = draft.providers.map(provider => '<div class="image-source-settings" data-id="' + provider.id + '"><strong>' + escape(provider.name) + '</strong><div class="field-grid">'
-    + imageField(provider, 'imageModel', '补充生图模型 ID', 'generation') + imageField(provider, 'imageEditModel', '指定图片编辑模型 ID', 'editing')
-    + '<label class="field"><span>图片编辑格式</span><select data-field="imageEditFormat"><option value="json" ' + (provider.imageEditFormat !== 'multipart' ? 'selected' : '') + '>JSON</option><option value="multipart" ' + (provider.imageEditFormat === 'multipart' ? 'selected' : '') + '>Multipart</option></select></label></div></div>').join('');
-  for (const section of document.querySelectorAll('.image-source-settings')) section.oninput = event => {
-    const input = event.target, provider = draft.providers.find(item => item.id === section.dataset.id);
-    if (!input.dataset.field || !provider) return;
-    provider[input.dataset.field] = input.value; changed();
-  };
-}
 function renderImageDefault() {
   const selected = draft.defaultImageModel, provider = draft.providers.find(item => item.id === selected?.providerId);
   const imageCount = data.models.filter(model => model.image?.generation && draft.providers.some(item => item.id === model.providerId && item.enabled)).length;
   $('#image-default-summary').innerHTML = selected
     ? '<span>默认生图：<strong>' + escape(selected.modelId) + '</strong>（' + escape(provider?.name || '来源已移除') + '）</span><button id="clear-image-default" class="quiet-action" type="button">取消默认</button>'
     : '<span>' + (imageCount ? '未设置默认生图模型，按入口及接口能力自动选择。可在图片模型行勾选“默认生图”。' : '当前目录未识别到生图模型。刷新目录后，可在图片模型行设置默认。') + '</span>';
-  if (selected) $('#clear-image-default').onclick = () => { draft.defaultImageModel = null; changed(); renderModels(); renderImageSettings(); };
+  if (selected) $('#clear-image-default').onclick = () => { draft.defaultImageModel = null; changed(); renderModels(); };
 }
 function bindKey(card, provider) {
   const input = card.querySelector('[data-field=apiKey]'), button = card.querySelector('.reveal');
@@ -139,7 +121,7 @@ function renderSources() {
       provider[name] = input.type === 'checkbox' ? input.checked : input.value;
       if (name === 'enabled') {
         if (!provider.enabled && draft.defaultImageModel?.providerId === provider.id) draft.defaultImageModel = null;
-        renderModels(); renderImageSettings();
+        renderModels();
       }
       changed(); updateCounts();
     });
@@ -149,7 +131,7 @@ function renderSources() {
       for (const key of Object.keys(draft.contextOverrides)) if (JSON.parse(key)[0] === provider.id) delete draft.contextOverrides[key];
       if (draft.preferredProviderId === provider.id) draft.preferredProviderId = draft.providers.find(item => item.enabled)?.id || '';
       if (draft.defaultImageModel?.providerId === provider.id) draft.defaultImageModel = null;
-      changed(); renderSources(); renderSourceFilters(); renderModels(); renderImageSettings(); updateCounts();
+      changed(); renderSources(); renderSourceFilters(); renderModels(); updateCounts();
     };
     bindSourceTitle(card, provider); bindKey(card, provider);
   }
@@ -184,7 +166,7 @@ function renderModels() {
   for (const input of document.querySelectorAll('.image-default')) input.onchange = () => {
     const model = models.find(item => item.id === input.dataset.id);
     draft.defaultImageModel = input.checked ? { providerId: model.providerId, modelId: model.name } : null;
-    changed(); renderModels(); renderImageSettings();
+    changed(); renderModels();
     [...document.querySelectorAll('.image-default')].find(item => item.dataset.id === model.id)?.focus();
   };
   renderImageDefault();
@@ -195,7 +177,7 @@ function render(result) {
   $('#notice').hidden = !result.configurationSaved || !result.runtime.restartRequired;
   $('#notice').textContent = '设置已保存。完全退出并重新打开 ChatGPT 后，加载新的 API 来源、模型菜单和上下文设置。';
   renderSourceFilters();
-  renderSources(); renderModels(); renderImageSettings(); updateCounts(); updateSavebar();
+  renderSources(); renderModels(); updateCounts(); updateSavebar();
 }
 function view(name) {
   for (const button of document.querySelectorAll('[data-view]')) button.classList.toggle('active', button.dataset.view === name);
@@ -210,7 +192,7 @@ $('#add-source').onclick = () => {
   if (!draft) return;
   const id = 'p_' + crypto.randomUUID().replaceAll('-', '').slice(0, 12);
   draft.providers.push({ id, name: 'API 来源 ' + (draft.providers.length + 1), baseUrl: '', apiKey: '', enabled: true, imageModel: '', imageEditModel: '', imageEditFormat: 'json' });
-  changed(); renderSources(); renderSourceFilters(); renderImageSettings(); updateCounts(); $('.source-card:last-child [data-field=baseUrl]').focus();
+  changed(); renderSources(); renderSourceFilters(); updateCounts(); $('.source-card:last-child [data-field=baseUrl]').focus();
 };
 $('#context-limit').oninput = event => { draft.contextLimit = Number(event.target.value); changed(); updateCounts(); renderModels(); };
 $('#model-search').oninput = renderModels; $('#model-source-filter').onchange = renderModels;

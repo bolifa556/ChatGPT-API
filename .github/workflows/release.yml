@@ -161,11 +161,24 @@ jobs:
       - name: Upload and publish release
         run: |
           tag="$GITHUB_REF_NAME"
-          if gh release view "$tag" --json isDraft > "$RUNNER_TEMP/existing-release.json" 2>/dev/null; then
-            python3 -c "import json,os; from pathlib import Path; assert json.loads((Path(os.environ['RUNNER_TEMP'])/'existing-release.json').read_text())['isDraft'], 'An already published release will not be overwritten'"
+          if gh api "repos/$GH_REPO/releases/tags/$tag" > "$RUNNER_TEMP/existing-release.json" 2>/dev/null; then
+            python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          existing = json.loads((Path(os.environ['RUNNER_TEMP']) / 'existing-release.json').read_text())
+          if not existing['draft']:
+              # Replacement is restricted to the explicitly recorded release and original assets.
+              manifest = Path('.github/release-replacement.json')
+              assert manifest.is_file(), 'A published release requires an explicit replacement manifest'
+              replacement = json.loads(manifest.read_text(encoding='utf-8'))
+              assert replacement['tag'] == os.environ['GITHUB_REF_NAME'] == existing['tag_name'], 'Replacement tag mismatch'
+              assert replacement['releaseId'] == existing['id'], 'Replacement release ID mismatch'
+              assert sorted(replacement['assetIds']) == sorted(asset['id'] for asset in existing['assets']), 'Published assets changed since replacement was requested'
+              assert not existing.get('immutable', False), 'An immutable release cannot be replaced'
+          PY
           else
             gh release create "$tag" --verify-tag --draft --title "ChatGPT API ${tag#v}" --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
           gh release upload "$tag" "$RUNNER_TEMP/release-assets/"* --clobber
-          gh release edit "$tag" --draft=false --latest
+          gh release edit "$tag" --draft=false --latest --title "ChatGPT API ${tag#v}" --notes-file "$RUNNER_TEMP/release-notes.md"
           gh release view "$tag" --json url,isDraft,assets
