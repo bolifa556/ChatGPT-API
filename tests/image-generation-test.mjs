@@ -65,7 +65,7 @@ async function start(mode, options = {}) {
 async function send(router, operation = 'generations', extra = {}, routePrefix = '/v1', token = 'mock-api-key') {
   const payload = { ...nativeBody,...extra };
   const response = await fetch(router.base + routePrefix + '/images/' + operation, {
-    method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token, 'chatgpt-account-id': 'must-not-leak', 'openai-organization': 'must-not-leak', 'x-codex-image-turn-id': 'original-turn-id' },
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token, 'chatgpt-account-id': 'must-not-leak', 'openai-organization': 'must-not-leak', 'x-codex-image-turn-id': 'original-turn-id', 'x-openai-actor-authorization': 'chatgpt-api-local' },
     body: JSON.stringify(payload), signal: AbortSignal.timeout(10000),
   });
   return { status: response.status,headers: response.headers,raw: await response.text() };
@@ -83,6 +83,7 @@ try {
   assert.equal(result.status, 200); assert.equal(result.raw, JSON.stringify(nativeResult)); assert.equal(count('gateway'), beforeGateway);
   assert.equal(records.at(-1).raw, JSON.stringify(nativeBody)); assert.equal(records.at(-1).headers.authorization, 'Bearer mock-native-oauth');
   assert.equal(records.at(-1).path, '/backend-api/codex/images/generations'); assert.equal(result.headers.get('x-native-image-peer'), 'official');
+  assert.equal(records.at(-1).headers['x-openai-actor-authorization'], undefined);
   checks.push('Official image model bypasses chat-menu allowlist; original body, output, headers and image metadata pass unchanged');
   result = await send(mixed, 'edits', { images: [{ image_url: dataUrl }] }, '');
   assert.equal(result.status, 200); assert.equal(records.at(-1).path, '/backend-api/codex/images/edits'); assert.deepEqual(records.at(-1).body.images, [{ image_url: dataUrl }]);
@@ -104,6 +105,7 @@ try {
   assert.equal(records.at(-1).body.prompt, nativeBody.prompt); assert.equal(records.at(-1).headers.authorization, 'Bearer mock-api-key');
   for (const name of ['chatgpt-account-id','openai-organization','openai-project']) assert.equal(records.at(-1).headers[name], undefined);
   assert.equal(records.at(-1).headers['x-codex-image-turn-id'], 'original-turn-id');
+  assert.equal(records.at(-1).headers['x-openai-actor-authorization'], undefined);
   assert.equal(records.at(-1).body.input, undefined); assert.equal(records.at(-1).body.messages, undefined);
   checks.push('Definitively unavailable official model falls back to any capability-advertised API image alias; OAuth and account headers never reach API');
   const menu = JSON.parse(fs.readFileSync(path.join(mixed.dir, 'data/cache/models-smr.json'))).models;
@@ -116,6 +118,18 @@ try {
   const noLogin = await start('mixed', { login: false }); result = await send(noLogin, 'edits', { images: [{ image_url: dataUrl }] });
   assert.equal(result.status, 200); assert.equal(count('official'), beforeOfficial); assert.deepEqual(records.at(-1).body.images, [{ image_url: dataUrl }]);
   checks.push('Provider-only ignores saved official credentials; missing sign-in also uses API directly, for generation and editing');
+
+  gatewayModels.push({ id: 'qwen-image' });
+  const defaultMixed = await start('mixed', { settings: { IMAGE_MODEL: '绘图/任意别名' } });
+  const beforeDefaultOfficial = count('official');
+  result = await send(defaultMixed);
+  assert.equal(result.status, 200); assert.equal(records.at(-1).body.model, '绘图/任意别名');
+  assert.equal(count('official'), beforeDefaultOfficial);
+  result = await send(defaultMixed, 'generations', { model: 'qwen-image' });
+  assert.equal(result.status, 200); assert.equal(records.at(-1).body.model, 'qwen-image');
+  assert.equal(count('official'), beforeDefaultOfficial); assert.equal(records.at(-1).body.prompt, nativeBody.prompt);
+  gatewayModels.pop();
+  checks.push('A selected API image default is honored in signed-in mixed mode; an explicitly requested API image model overrides it without an official detour or prompt rewrite');
 
   const apiOnlyEntry = await start('mixed', { entryMode: 'apionly', nativeAccount: true });
   beforeOfficial = count('official');
@@ -181,11 +195,19 @@ try {
   gatewayStatus = 200; gatewayData = { created: 1780000001, data: [{ unexpected: 'invalid output' }] };
   const beforeMalformed = count('gateway'); result = await send(mixed); assert.equal(result.status, 502); assert.equal(JSON.parse(result.raw).error.code, 'invalid_upstream_image_response'); assert.equal(count('gateway'), beforeMalformed + 1);
   checks.push('Accepted but malformed API image output reports its protocol error without generating again on another model');
-  assert.deepEqual(imageCandidates([{ id: 'qwen/qwen-image' },{ id: 'generic', supported_endpoints: ['/v1/images/edits'] }], {}, 'edits', 'gpt-image-2').map(m => m.id), ['qwen/qwen-image','generic']);
-  assert.equal(imageCandidates([{ id: 'vision-chat', output_modalities: ['text'], capabilities: ['vision'] }], {}, 'generations', 'gpt-image-2').length, 0);
+  assert.deepEqual(imageCandidates([{ id: 'qwen/qwen-image' },{ id: 'generic', supported_endpoints: ['/v1/images/edits'] }], {}, 'edits', 'gpt-image-2', { nativeDefault: true }).map(m => m.id), ['qwen/qwen-image','generic']);
+  assert.equal(imageCandidates([{ id: 'vision-chat', output_modalities: ['text'], capabilities: ['vision'] }], {}, 'generations', 'gpt-image-2', { nativeDefault: true }).length, 0);
   assert.equal(imageModelUnavailable(200, { error: { code: 'model_not_found' } }), false);
   assert.equal(imageModelUnavailable(404, { data: [{ b64_json: png }] }), false);
   checks.push('Vision-only chat models are never mistaken for image generators; accepted output is never retried');
+  const selection = [{ id: 'gpt-image-2' }, { id: 'qwen-image', capabilities: ['image_generation'] }, { id: 'only-edit', capabilities: ['image_edit'] }];
+  const configured = { IMAGE_MODEL: 'qwen-image' };
+  assert.equal(imageCandidates(selection, configured, 'generations', 'gpt-image-2', { nativeDefault: true })[0].id, 'qwen-image');
+  assert.equal(imageCandidates(selection, configured, 'generations', 'gpt-image-2')[0].id, 'gpt-image-2');
+  assert.equal(imageCandidates(selection, configured, 'edits', 'gpt-image-2', { nativeDefault: true })[0].id, 'gpt-image-2');
+  assert.throws(() => imageCandidates(selection, configured, 'generations', 'missing-image'), error => error.code === 'no_gateway_image_model');
+  assert.throws(() => imageCandidates(selection, configured, 'generations', 'only-edit'), error => error.code === 'unsupported_image_operation');
+  checks.push('Native automatic image requests honor the default; explicit Images API model IDs win, and a generation-only default never disables available edit models');
   const report = { passed: true,checks };
   fs.mkdirSync(path.join(root, 'data/diagnostics'), { recursive: true }); fs.writeFileSync(path.join(root, 'data/diagnostics/image-generation-results.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));

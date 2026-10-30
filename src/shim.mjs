@@ -270,8 +270,10 @@ function headersFor(incoming, target, profile) {
     headers[k] = v;
   }
   if (target !== 'official') headers['accept-encoding'] = 'identity';
+  if (headers['x-openai-actor-authorization'] === 'chatgpt-api-local') delete headers['x-openai-actor-authorization'];
   if (target === 'gateway') {
     headers.authorization = 'Bearer ' + (profile?.apiKey || env.API_KEY);
+    delete headers['x-openai-actor-authorization'];
     delete headers['chatgpt-account-id']; delete headers['openai-organization']; delete headers['openai-project'];
   } else {
     const a = auth();
@@ -296,9 +298,11 @@ function clientEvent(event, model, gateway) {
   return gateway && gateway.model !== model && event.response?.model ? { ...event, response: { ...event.response, model } } : event;
 }
 function imageSettings() {
-  const profile = sources.profile(sources.settings.preferredProviderId);
+  const selected = sources.settings.defaultImageModel;
+  const profile = sources.profile(selected?.providerId || sources.settings.preferredProviderId);
   const id = name => profile?.id === 'default' ? name : '@' + profile?.id + '/' + name;
-  return { ...env, IMAGE_MODEL: profile?.imageModel ? id(profile.imageModel) : '',
+  // An image default never changes the primary chat source or its credentials.
+  return { ...env, IMAGE_MODEL: selected ? (selected.providerId === 'default' ? selected.modelId : '@' + selected.providerId + '/' + selected.modelId) : '',
     IMAGE_EDIT_MODEL: profile?.imageEditModel ? id(profile.imageEditModel) : '' };
 }
 function decodeBody(body, encoding = '') {
@@ -400,7 +404,9 @@ async function handleHttp(req, res) {
         hasLogin: hasOfficialAuth(req.headers), allowGateway: gatewayEnabled,
         getModels: async () => catalog.gatewayModels.map(model => {
           const profile = sources.profile(model._providerId || 'default'), original = model._upstreamId || model.id;
-          return profile && [profile.imageModel, profile.imageEditModel].includes(original) ? { ...model, type: 'image' } : model;
+          const selected = sources.settings.defaultImageModel;
+          return profile && ([profile.imageModel, profile.imageEditModel].includes(original)
+            || selected?.providerId === profile.id && selected.modelId === original) ? { ...model, type: 'image' } : model;
         }),
         resolveGateway: model => {
           const selected = sources.target(model.id, catalog.gatewayModels);

@@ -59,7 +59,19 @@ export function normalizeSettings(value, previous, { allowEmpty = false } = {}) 
   }
   const preferredProviderId = providers.some(provider => provider.id === value.preferredProviderId && provider.enabled)
     ? value.preferredProviderId : providers.find(provider => provider.enabled)?.id || providers[0]?.id || 'default';
-  return { version: 1, providers, preferredProviderId, contextLimit, contextOverrides };
+  const legacy = providers.find(provider => provider.id === preferredProviderId);
+  const selectedImage = Object.hasOwn(value, 'defaultImageModel') ? value.defaultImageModel
+    : previous && Object.hasOwn(previous, 'defaultImageModel') ? previous.defaultImageModel
+    : legacy?.imageModel ? { providerId: legacy.id, modelId: legacy.imageModel } : null;
+  let defaultImageModel = null;
+  if (selectedImage != null) {
+    if (typeof selectedImage !== 'object' || Array.isArray(selectedImage) || !ids.has(selectedImage.providerId)
+      || typeof selectedImage.modelId !== 'string' || !selectedImage.modelId.trim() || selectedImage.modelId.length > 500 || /[\r\n\0]/.test(selectedImage.modelId)) {
+      throw new Error('默认生图模型无效，请从模型列表重新选择。');
+    }
+    defaultImageModel = { providerId: selectedImage.providerId, modelId: selectedImage.modelId.trim() };
+  }
+  return { version: 1, providers, preferredProviderId, defaultImageModel, contextLimit, contextOverrides };
 }
 export function readSettings(root, env = readEnvFile(path.join(root, 'data/.env'))) {
   const file = settingsPath(root);

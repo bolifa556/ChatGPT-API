@@ -66,7 +66,7 @@ function Get-LauncherRouteMode([ValidateSet('official','api','apionly')][string]
 function Set-LauncherProvider([string]$content, [string]$id, [string]$baseUrl, [string]$packageDir, [bool]$websocket) {
     $nl = [Environment]::NewLine
     $table = 'model_providers.' + $id
-    $body = @(('[' + $table + ']'), 'name = "Custom API"', ('base_url = ' + (Quote-TomlString $baseUrl)), 'wire_api = "responses"', 'requires_openai_auth = false', ('supports_websockets = ' + $websocket.ToString().ToLowerInvariant()), '') -join $nl
+    $body = @(('[' + $table + ']'), 'name = "Custom API"', ('base_url = ' + (Quote-TomlString $baseUrl)), 'wire_api = "responses"', 'requires_openai_auth = false', 'http_headers = { "x-openai-actor-authorization" = "chatgpt-api-local" }', ('supports_websockets = ' + $websocket.ToString().ToLowerInvariant()), '') -join $nl
     $command = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $argsText = ConvertTo-Json -InputObject @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $packageDir 'Read-ApiKey.ps1')) -Compress
     $auth = @(('[' + $table + '.auth]'), ('command = ' + (Quote-TomlString $command)), ('args = ' + $argsText), 'timeout_ms = 30000', 'refresh_interval_ms = 0', '') -join $nl

@@ -47,7 +47,8 @@ const reserve = http.createServer(); await new Promise(resolve => reserve.listen
 fs.writeFileSync(path.join(fixture, 'data/.env'), 'BASE_URL=' + upstream + '/a/v1\nAPI_KEY=' + keys.a + '\nSHIM_PORT=' + port + '\nIMAGE_MODEL=legacy-image-alias\n');
 fs.writeFileSync(path.join(fixture, 'data/state/route-state.json'), JSON.stringify({ entryMode: 'apionly', mode: 'gateway' }));
 const initial = readSettings(fixture), key = overrideKey('p_bbbbbbbb', models[0]);
-saveSettings(fixture, { ...publicSettings(initial), contextLimit: 100000, contextOverrides: { [key]: 64000 }, providers: [
+assert.deepEqual(initial.defaultImageModel, { providerId: 'default', modelId: 'legacy-image-alias' });
+saveSettings(fixture, { ...publicSettings(initial), defaultImageModel: null, contextLimit: 100000, contextOverrides: { [key]: 64000 }, providers: [
   { ...initial.providers[0], apiKey: '', imageModel: '' }, { id: 'p_bbbbbbbb', name: 'Source B', baseUrl: upstream + '/b', apiKey: keys.b, enabled: true },
 ] });
 assert.equal(readSettings(fixture).providers[0].apiKey, keys.a);
@@ -120,12 +121,51 @@ try {
   let state = await (await request('state')).json();
   assert(!JSON.stringify(state).includes(keys.a)); assert(!JSON.stringify(state).includes(keys.b));
   assert.equal(state.models.length, 6); assert(state.models.find(model => model.id === alias).effective === 60800);
+  assert.equal(state.models.find(model => model.name === 'qwen-image').image.generation, true);
+  assert.equal(state.models.find(model => model.name === 'qwen-image').image.editing, true);
+  assert.equal(state.models.find(model => model.name === models[0]).image.known, false);
+  const revealBody = { providerId: 'p_bbbbbbbb', revision: state.settings.revision };
+  assert.equal((await fetch(new URL('/api/keys/reveal', consoleUrl), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(revealBody) })).status, 401);
+  assert.equal((await request('keys/reveal', revealBody, { origin: 'https://untrusted.invalid' })).status, 403);
+  assert.equal((await request('keys/reveal', { ...revealBody, providerId: 'p_missing' })).status, 404);
+  assert.equal((await request('keys/reveal', { ...revealBody, revision: 'stale' })).status, 409);
+  const settingsBeforeReveal = fs.readFileSync(path.join(fixture, 'data/providers.json'));
+  const revealed = await request('keys/reveal', revealBody);
+  assert.equal(revealed.status, 200); assert.equal(revealed.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(await revealed.json(), { apiKey: keys.b });
+  assert.deepEqual(fs.readFileSync(path.join(fixture, 'data/providers.json')), settingsBeforeReveal);
+  const afterReveal = await (await request('state')).json();
+  assert(!JSON.stringify(afterReveal).includes(keys.a)); assert(!JSON.stringify(afterReveal).includes(keys.b));
+  checks.push('Saved keys are revealed one source at a time only after authenticated same-origin requests; ordinary state stays redacted and revealing never writes settings');
   const reuse = await startConsole({ root: fixture, open: false }); assert(reuse.reused);
   const settings = { ...state.settings, contextLimit: 90000 }; settings.providers[1].name = 'Renamed source';
   const saved = await request('settings', settings); assert.equal(saved.status, 200); assert.equal(readSettings(fixture).providers[1].apiKey, keys.b);
+  assert.equal((await request('keys/reveal', revealBody)).status, 409, 'An outdated console must not reveal a changed source without refreshing');
   assert.equal((await request('settings', settings)).status, 409);
   state = await (await request('refresh', {})).json(); assert.equal(state.models.length, 6);
   assert.equal(state.settings.providers[1].name, 'Renamed source');
+  const preferredBeforeImage = state.settings.preferredProviderId;
+  const defaultImage = { providerId: 'p_bbbbbbbb', modelId: 'qwen-image' };
+  state = await (await request('settings', { ...state.settings, defaultImageModel: defaultImage })).json();
+  assert.deepEqual(state.settings.defaultImageModel, defaultImage);
+  assert.equal(state.settings.preferredProviderId, preferredBeforeImage);
+  assert.equal(readSettings(fixture).providers[0].apiKey, keys.a); assert.equal(readSettings(fixture).providers[1].apiKey, keys.b);
+  await fetch('http://127.0.0.1:' + port + '/readyz');
+  const imageRequest = (model, native = false) => fetch('http://127.0.0.1:' + port + '/v1/images/generations', {
+    method: 'POST', headers: { 'content-type': 'application/json', ...(native ? { 'x-codex-image-turn-id': 'fixture-native-image' } : {}) },
+    body: JSON.stringify({ ...(model ? { model } : {}), prompt: 'Unchanged fixture image prompt' }),
+  });
+  assert.equal((await imageRequest()).status, 200); assert.equal(records.at(-1).source, 'b'); assert.equal(records.at(-1).body.model, 'qwen-image');
+  assert.equal((await imageRequest('gpt-image-2', true)).status, 200); assert.equal(records.at(-1).source, 'b');
+  assert.equal((await imageRequest('qwen-image')).status, 200); assert.equal(records.at(-1).source, 'a');
+  assert.equal(records.at(-1).body.prompt, 'Unchanged fixture image prompt');
+  await wsTurn(models[0]); assert.equal(records.at(-1).source, 'a');
+  state = await (await request('settings', { ...state.settings, defaultImageModel: null })).json();
+  assert.equal(state.settings.defaultImageModel, null);
+  assert.equal((await request('settings', { ...state.settings, defaultImageModel: { providerId: 'p_missing', modelId: 'qwen-image' } })).status, 400);
+  await fetch('http://127.0.0.1:' + port + '/readyz');
+  assert.equal((await imageRequest()).status, 200); assert.equal(records.at(-1).source, 'a');
+  checks.push('An independent default image model persists across API sources, leaves chat/key preference unchanged, yields to explicit image IDs and clears back to automatic selection');
   checks.push('Console authentication, origin checks, key redaction, blank-key preservation and concurrent edit protection');
   const page = await (await fetch(consoleUrl)).text(); assert(page.includes('API 来源')); assert(!page.includes(keys.a));
   const script = await fetch(new URL('/console.js', consoleUrl)); assert(script.ok); assert(script.headers.get('content-security-policy').includes("frame-ancestors 'none'"));

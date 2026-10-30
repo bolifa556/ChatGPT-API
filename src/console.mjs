@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { GatewaySources } from './gateway-sources.mjs';
 import { readEnvFile, readSettings, publicSettings, saveSettings, settingsRevision, atomicPrivate, overrideKey, redact } from './settings.mjs';
 import { rememberContexts, contextKey, applyContext } from './model-context.mjs';
-import { imageOnlyModel } from './image-compat.mjs';
+import { imageOnlyModel, imageCapabilities } from './image-compat.mjs';
 
 const moduleRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const readJson = (file, fallback = null) => { try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { return fallback; } };
@@ -25,6 +25,7 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
   root = path.resolve(root);
   let env = readEnvFile(path.join(root, 'data/.env'));
   const version = readJson(path.join(root, 'package.json'), { version: '3.1.5' }).version;
+  const buildId = crypto.createHash('sha256').update(fs.readFileSync(fileURLToPath(import.meta.url))).digest('hex');
   const identity = crypto.createHash('sha256').update(root).digest('hex');
   const stateFile = path.join(root, 'data/state/console.json');
   const previous = readJson(stateFile);
@@ -32,7 +33,7 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
     try {
       const response = await fetch('http://127.0.0.1:' + Number(previous.port) + '/api/ping', { headers: { authorization: 'Bearer ' + previous.token }, signal: AbortSignal.timeout(700) });
       const state = await response.json();
-      if (state.service === 'chatgpt-api-console' && state.identity === identity && state.version === version) {
+      if (state.service === 'chatgpt-api-console' && state.identity === identity && state.version === version && state.buildId === buildId) {
         const url = 'http://127.0.0.1:' + previous.port + '/#' + previous.token;
         if (open) opener(url);
         return { reused: true, url, close: async () => {} };
@@ -62,8 +63,13 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
     }
     return pool.models.map(model => {
       const profile = pool.profile(model._providerId), record = capacities.get(profile.id)?.entries[contextKey(profile.baseUrl, model._upstreamId)];
+      const selected = settings.defaultImageModel;
+      const configuredImage = [profile.imageModel, profile.imageEditModel].includes(model._upstreamId)
+        || selected?.providerId === profile.id && selected.modelId === model._upstreamId;
+      const image = imageCapabilities(configuredImage ? { ...model, type: 'image' } : model);
       const key = overrideKey(profile.id, model._upstreamId), resolved = applyContext({ ...template }, record, { limit: settings.contextLimit, override: settings.contextOverrides[key] });
-      return { id: model.id, name: model._upstreamId, providerId: profile.id, providerName: profile.name, overrideKey: key, kind: imageOnlyModel(model) ? 'image' : 'chat',
+      return { id: model.id, name: model._upstreamId, providerId: profile.id, providerName: profile.name, overrideKey: key, kind: image.known ? 'image' : 'chat',
+        image,
         capacity: record?.capacity || null, capacitySource: record?.source || 'unreported', fallbackCapacity: template.context_window, limit: resolved.context_window,
         effectivePercent: resolved.effective_context_window_percent ?? 95,
         effective: Math.floor(resolved.context_window * (resolved.effective_context_window_percent ?? 95) / 100) };
@@ -94,8 +100,18 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
     try {
       if (url.pathname.startsWith('/api/')) {
         if (req.headers.authorization !== 'Bearer ' + token) return json(res, 401, { error: '控制台连接已失效，请重新打开控制台。' });
-        if (req.method === 'GET' && url.pathname === '/api/ping') return json(res, 200, { service: 'chatgpt-api-console', version, identity });
+        if (req.method === 'GET' && url.pathname === '/api/ping') return json(res, 200, { service: 'chatgpt-api-console', version, identity, buildId });
         if (req.method === 'GET' && url.pathname === '/api/state') return json(res, 200, await state());
+        if (req.method === 'POST' && url.pathname === '/api/keys/reveal') {
+          if (!String(req.headers['content-type']).startsWith('application/json')) return json(res, 415, { error: '需要 JSON 请求。' });
+          const value = await requestBody(req);
+          env = readEnvFile(path.join(root, 'data/.env'));
+          const current = readSettings(root, env);
+          if (!value || value.revision !== settingsRevision(current)) return json(res, 409, { error: 'API 设置已更新，请刷新控制台后查看 Key。' });
+          const profile = current.providers.find(provider => provider.id === value.providerId);
+          if (!profile) return json(res, 404, { error: '此 API 来源已不存在，请刷新控制台。' });
+          return json(res, 200, { apiKey: profile.apiKey });
+        }
         if (req.method === 'POST' && url.pathname === '/api/settings') {
           if (!String(req.headers['content-type']).startsWith('application/json')) return json(res, 415, { error: '需要 JSON 配置。' });
           const value = await requestBody(req);

@@ -190,9 +190,10 @@ export function applyConfig(ctx, selection = { entryMode: 'apionly', mode: 'gate
   const base = 'http://127.0.0.1:' + settings.SHIM_PORT + '/v1';
   const tables = ['chatgpt_api_launcher', 'chatgpt_api_mixed', ...(getTable(original, 'model_providers.smr') ? ['smr'] : [])];
   const tableNames = tables.flatMap(id => ['model_providers.' + id, 'model_providers.' + id + '.auth']);
+  const imageHeader = signedIn ? '' : 'http_headers = { "x-openai-actor-authorization" = "chatgpt-api-local" }\n';
   for (const id of tables) {
     const table = 'model_providers.' + id;
-    const body = `[${table}]\nname = "ChatGPT API compatibility"\nbase_url = ${JSON.stringify(base)}\nwire_api = "responses"\nrequires_openai_auth = ${signedIn}\nsupports_websockets = ${signedIn}\n\n`;
+    const body = `[${table}]\nname = "ChatGPT API compatibility"\nbase_url = ${JSON.stringify(base)}\nwire_api = "responses"\nrequires_openai_auth = ${signedIn}\n${imageHeader}supports_websockets = ${signedIn}\n\n`;
     const auth = signedIn ? '' : `[${table}.auth]\ncommand = ${JSON.stringify(ctx.node)}\nargs = ${JSON.stringify([path.join(ctx.root, 'macos/provider.mjs'), 'auth'])}\ntimeout_ms = 45000\nrefresh_interval_ms = 0\n\n`;
     text = setTable(setTable(text, table + '.auth', auth), table, body);
   }

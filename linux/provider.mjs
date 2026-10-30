@@ -169,7 +169,7 @@ export function applyConfig(ctx) {
   let original = ''; try { original = fs.readFileSync(ctx.config, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   let text = original, selected = rootString(text, 'model'); if (!ids.includes(selected)) selected = ids[0];
   const table = 'model_providers.' + providerId;
-  const body = `[${table}]\nname = "ChatGPT API Provider"\nbase_url = "http://127.0.0.1:${settings.SHIM_PORT}/v1"\nwire_api = "responses"\nrequires_openai_auth = false\nsupports_websockets = false\n\n`;
+  const body = `[${table}]\nname = "ChatGPT API Provider"\nbase_url = "http://127.0.0.1:${settings.SHIM_PORT}/v1"\nwire_api = "responses"\nrequires_openai_auth = false\nhttp_headers = { "x-openai-actor-authorization" = "chatgpt-api-local" }\nsupports_websockets = false\n\n`;
   const auth = `[${table}.auth]\ncommand = ${JSON.stringify(ctx.node)}\nargs = ${JSON.stringify([path.join(ctx.root, 'linux/provider.mjs'), 'auth'])}\ntimeout_ms = 45000\nrefresh_interval_ms = 0\n\n`;
   text = setTable(setTable(text, table + '.auth', auth), table, body);
   const values = { model_provider: providerId, model_catalog_json: path.join(ctx.data, 'cache/models-gateway.json'), model: selected, model_context_window: null, model_auto_compact_token_limit: null };

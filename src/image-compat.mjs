@@ -24,16 +24,32 @@ export function imageOnlyModel(model) {
   if (outputs.includes('text') || model.supported_endpoints?.some(e => /chat|responses/i.test(e))) return false;
   return imageCapabilities(model).known;
 }
-export function imageCandidates(models, env, operation, requested) {
+function requestedImage(models, requested, nativeDefault) {
+  if (!requested || requested === 'auto' || nativeDefault && requested === 'gpt-image-2') return null;
+  const exact = models.find(model => model.id === requested);
+  if (exact) return exact;
+  const matches = models.filter(model => model._upstreamId === requested || leaf(model.id) === requested);
+  if (matches.length > 1) throw fail('The image model exists at multiple API sources; specify its full source-qualified ID: ' + requested, 'ambiguous_image_model');
+  return matches[0] || null;
+}
+export function imageCandidates(models, env, operation, requested, { nativeDefault = false } = {}) {
+  const capability = operation === 'edits' ? 'editing' : 'generation';
+  const explicit = requestedImage(models, requested, nativeDefault);
+  if (explicit) {
+    const caps = imageCapabilities(explicit);
+    if (caps.known && !caps[capability]) throw fail('Selected image model does not advertise ' + operation + ': ' + explicit.id, 'unsupported_image_operation');
+    return [explicit];
+  }
+  if (requested && requested !== 'auto' && !(nativeDefault && requested === 'gpt-image-2')) throw fail('Selected image model is not provided by this API: ' + requested, 'no_gateway_image_model');
   const configured = operation === 'edits' ? env.IMAGE_EDIT_MODEL || env.IMAGE_MODEL : env.IMAGE_MODEL;
   if (configured) {
     const model = models.find(m => m.id === configured);
     if (!model) throw fail('Configured image model is not provided by this API: ' + configured, 'no_gateway_image_model');
     const caps = imageCapabilities(model);
-    if (caps.known && !caps[operation === 'edits' ? 'editing' : 'generation']) throw fail('Configured image model does not advertise ' + operation + ': ' + configured, 'no_gateway_image_model');
-    return [model];
+    if (!caps.known || caps[capability]) return [model];
+    if (operation !== 'edits' || env.IMAGE_EDIT_MODEL) throw fail('Configured image model does not advertise ' + operation + ': ' + configured, 'no_gateway_image_model');
   }
-  const candidates = models.filter(m => imageCapabilities(m)[operation === 'edits' ? 'editing' : 'generation']);
+  const candidates = models.filter(m => imageCapabilities(m)[capability]);
   const exact = candidates.find(model => model.id === requested);
   if (exact?._providerId && exact._providerId !== 'default') return [exact];
   return [...candidates.filter(m => m.id === requested || leaf(m.id) === leaf(requested || '')),
@@ -129,6 +145,13 @@ async function nativeImageResponse(data, dispatcher, signal) {
 export async function forwardImages({ req,res,url,body,operation,env,hasLogin,allowGateway = true,getModels,headersFor,targetUrl,officialDispatcher,gatewayDispatcher,imageDispatcher,decodeBody,resolveFile,resolveGateway,signal,log }) {
   let original; try { original = JSON.parse(body.toString('utf8')); } catch { throw fail('Images requests must contain JSON.', 'invalid_image_request'); }
   if (!original || Array.isArray(original) || typeof original !== 'object') throw fail('Invalid Images request.', 'invalid_image_request');
+  // The current native image tool has no model argument and always supplies
+  // gpt-image-2. Its turn header distinguishes that default from an explicit
+  // model selected by an ordinary Images API caller. Never inspect the prompt.
+  const nativeDefault = Boolean(req.headers['x-codex-image-turn-id']) && original.model === 'gpt-image-2';
+  const models = allowGateway ? await getModels() : [];
+  const chosen = allowGateway && (requestedImage(models, original.model, nativeDefault)
+    || (operation === 'edits' ? env.IMAGE_EDIT_MODEL || env.IMAGE_MODEL : env.IMAGE_MODEL));
   let officialFailure;
   const forward = async (which, model, outgoing = { body, contentType: req.headers['content-type'] || 'application/json' }, gateway) => {
     const headers = headersFor(req.headers, which, gateway?.profile); headers['content-type'] = outgoing.contentType;
@@ -152,7 +175,7 @@ export async function forwardImages({ req,res,url,body,operation,env,hasLogin,al
       return { status: upstream.statusCode,headers: upstream.headers,raw,data };
     } finally { releaseResponseBody(upstream.body); }
   };
-  if (hasLogin) {
+  if (hasLogin && !chosen) {
     const result = await forward('official', original.model);
     if (result.completed) return;
     if (!allowGateway || !imageModelUnavailable(result.status, result.data)) { res.writeHead(result.status, responseHeaders(result.headers)); res.end(result.raw); return; }
@@ -160,7 +183,7 @@ export async function forwardImages({ req,res,url,body,operation,env,hasLogin,al
   }
   if (!allowGateway) throw fail('The official entry requires ChatGPT sign-in for image generation and editing.', 'official_sign_in_required', 401);
   let candidates;
-  try { candidates = imageCandidates(await getModels(), env, operation, original.model); }
+  try { candidates = imageCandidates(models, env, operation, original.model, { nativeDefault }); }
   catch (e) { if (officialFailure) e.message = 'Official image model is unavailable (HTTP ' + officialFailure.status + '). ' + e.message; throw e; }
   if (!candidates.length) throw fail((officialFailure ? 'Official image model is unavailable (HTTP ' + officialFailure.status + '). ' : '') + 'This custom API provides no model for image ' + (operation === 'edits' ? 'editing' : 'generation') + '. Add an image model to the API; IMAGE_MODEL / IMAGE_EDIT_MODEL can select an alias.', 'no_gateway_image_model');
   let last;
