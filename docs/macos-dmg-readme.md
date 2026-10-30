@@ -1,4 +1,4 @@
-# ChatGPT API 3.1.6 — macOS
+# ChatGPT API 3.1.7 — macOS
 
 Apple Silicon / ARM64 单文件 DMG，包含三个聊天入口与一个控制台 App。需要先安装官方 `ChatGPT.app`，本包不包含或修改官方客户端。
 
@@ -14,7 +14,7 @@ Apple Silicon / ARM64 单文件 DMG，包含三个聊天入口与一个控制台
 ## 安装
 
 1. 完全退出官方客户端（Command-Q）。
-2. 打开 `ChatGPT-API-Provider-3.1.6-macos-arm64.dmg`。
+2. 打开 `ChatGPT-API-Provider-3.1.7-macos-arm64.dmg`。
 3. 将需要的 App 拖入“应用程序”。
 4. API 入口首次填写 URL 和 Key，支持 Command+V 和“粘贴”按钮；官方入口无需 API Key。
 5. 日常从相应入口启动；切换入口前完全退出客户端。
