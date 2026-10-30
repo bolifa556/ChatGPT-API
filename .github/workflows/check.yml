@@ -20,6 +20,7 @@ jobs:
       - run: npm test
       - run: python scripts/ci-run.py powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/launcher-test.ps1
       - run: python scripts/ci-run.py powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/gateway-recovery-test.ps1
+      - run: python scripts/ci-run.py powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/install-deferred-test.ps1
   linux:
     runs-on: ubuntu-latest
     steps:
@@ -50,6 +51,7 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
       - run: python3 scripts/ci-run.py node tests/macos-platform-test.mjs
+      - run: python3 scripts/ci-run.py node tests/install-deferred-test.mjs
       - run: python3 scripts/ci-run.py node tests/macos-provider-test.mjs
       - run: python3 scripts/ci-run.py node tests/macos-dmg-gui-test.mjs
       - run: python3 scripts/ci-run.py node tests/macos-entries-test.mjs

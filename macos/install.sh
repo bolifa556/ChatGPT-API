@@ -25,4 +25,6 @@ if [ "$(id -u)" = 0 ]; then
   echo 'Install as your desktop user, without sudo.' >&2
   exit 1
 fi
-exec "$ROOT/payload/runtime/node" "$ROOT/setup/install.mjs" "$ROOT" "${1:-$HOME/Library/Application Support/chatgpt-apionly}"
+DESTINATION="$HOME/Library/Application Support/chatgpt-apionly"
+if [ "$#" -gt 0 ] && [ "$1" != "--skip-api" ]; then DESTINATION="$1"; shift; fi
+exec "$ROOT/payload/runtime/node" "$ROOT/setup/install.mjs" "$ROOT" "$DESTINATION" "$@"

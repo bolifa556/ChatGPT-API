@@ -69,6 +69,7 @@ function Copy-ReleasePayload([string]$releaseRoot, [string]$destination) {
     foreach ($required in @('Launch-ChatGPT.ps1','ChatGPT.vbs','chatgpt-api.vbs','chatgpt-apionly.vbs','Read-ApiKey.ps1','控制台.vbs','src/settings.mjs','src/gateway-sources.mjs','src/console.mjs','assets/console/index.html','install/Install-ChatGPT.ps1','src/shim.mjs','src/transport.mjs','src/response-state.mjs','src/model-context.mjs','src/gateway-recovery.mjs','src/Api-Settings.ps1','assets/model-contexts.json','runtime/node.exe','package-lock.json')) {
         if (-not $seen.ContainsKey($required)) { throw ('发布包缺少文件：' + $required) }
     }
+    if (-not $seen.ContainsKey('install/Installer-UI.ps1')) { throw '发布包缺少安装界面组件。' }
     # Validate every source and destination before overwriting any installed file.
     if (@(Get-ReleaseBlockingProcesses $destination).Count) {
         throw '请先从托盘完全退出 ChatGPT，并等待该目录的启动器退出，再安装或更新。'

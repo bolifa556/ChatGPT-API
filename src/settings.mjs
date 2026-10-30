@@ -75,6 +75,17 @@ export function userApiSettings(root, env = readEnvFile(path.join(root, 'data/.e
   const profile = settings.providers.find(item => item.id === settings.preferredProviderId && item.enabled);
   return profile ? { ...env, BASE_URL: profile.baseUrl, API_KEY: profile.apiKey } : { ...env };
 }
+export function initializeDeferredSettings(root) {
+  const file = path.join(root, 'data/.env');
+  if (!fs.existsSync(file)) atomicPrivate(file, 'BASE_URL=\nAPI_KEY=\nSHIM_HOST=127.0.0.1\nSHIM_PORT=8102\nGATEWAY_TRANSPORT=direct\n');
+}
+export function requireApiConfiguration(root, env = readEnvFile(path.join(root, 'data/.env'))) {
+  const settings = readSettings(root, env);
+  if (!settings.providers.some(profile => profile.enabled && profile.baseUrl && profile.apiKey)) {
+    throw Object.assign(new Error('尚未配置 API。请打开“ChatGPT API 控制台”填写 API 地址和 Key，保存后重新打开 API 入口。'), { code: 'api_not_configured' });
+  }
+  return settings;
+}
 export function saveSettings(root, value, env) {
   const previous = readSettings(root, env);
   if (value.revision && value.revision !== settingsRevision(previous)) throw Object.assign(new Error('配置已被另一个窗口修改，请重新载入后再保存。'), { status: 409 });

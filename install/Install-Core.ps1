@@ -29,6 +29,13 @@
     }
 }
 
+function Initialize-DeferredLauncherSettings([string]$packageDir) {
+    $file = Get-LauncherDataPath $packageDir '.env'
+    if (-not (Test-Path -LiteralPath $file)) {
+        Write-Utf8File $file (@('BASE_URL=','API_KEY=','SHIM_HOST=127.0.0.1','SHIM_PORT=8102','GATEWAY_TRANSPORT=direct','') -join [Environment]::NewLine)
+    }
+}
+
 function Initialize-UnicodeShortcuts {
     if ('ChatGPTApi.NativeShortcuts' -as [type]) { return }
     Add-Type -TypeDefinition @'

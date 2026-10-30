@@ -3,6 +3,8 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { context, atomic, configure, stopRouter, requireClosedClient } from '../payload/linux/provider.mjs';
+import { requestSettings } from '../payload/linux/settings.mjs';
+import { userApiSettings } from '../payload/src/settings.mjs';
 
 function noLinks(file) {
   for (let current = path.resolve(file); current !== path.dirname(current); current = path.dirname(current)) {
@@ -16,7 +18,8 @@ function relativeFile(root, relative) {
 const desktopQuote = value => '"' + value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('`', '\\`').replaceAll('$', '\\$').replaceAll('%', '%%') + '"';
 async function install() {
   if (process.platform !== 'linux' || process.getuid() === 0) throw new Error('Install as your Linux desktop user, without sudo.');
-  const [releaseArg, destinationArg] = process.argv.slice(2);
+  const [releaseArg, destinationArg, ...flags] = process.argv.slice(2);
+  if (flags.some(flag => flag !== '--skip-api')) throw new Error('Unknown installation option.');
   if (!releaseArg || !destinationArg || !path.isAbsolute(destinationArg) || /[\r\n\0]/.test(destinationArg)) throw new Error('Provide an absolute installation directory without line breaks.');
   const release = path.resolve(releaseArg), destination = path.resolve(destinationArg), payload = path.join(release, 'payload');
   if (destination === '/' || destination === os.homedir() || destination === release || destination.startsWith(release + '/') || release.startsWith(destination + '/')) throw new Error('Choose a separate program directory, outside the extracted release.');
@@ -35,6 +38,12 @@ async function install() {
   }
   for (const required of ['runtime/node','linux/provider.mjs','linux/console','linux/settings.mjs','linux/chatgpt-api','src/shim.mjs','src/transport.mjs','src/response-state.mjs','src/settings.mjs','src/gateway-sources.mjs','src/console.mjs','assets/console/index.html','assets/console/console.css','assets/console/console.js','assets/console/icon.svg','src/model-context.mjs','src/gateway-recovery.mjs','assets/model-template.json','assets/model-contexts.json','package-lock.json']) if (!seen.has(required)) throw new Error('Incomplete release: ' + required);
   const ctx = context(destination);
+  const current = flags.includes('--skip-api') ? {} : userApiSettings(destination);
+  let choice = flags.includes('--skip-api') ? { skip: true } : null;
+  if (!choice && !((process.env.CHATGPT_API_BASE_URL || current.BASE_URL) && (process.env.CHATGPT_API_KEY || current.API_KEY))) {
+    choice = await requestSettings(current, { installation: true });
+    if (!choice) return;
+  }
   // Verification finishes before stopping or replacing any installed program.
   await stopRouter(ctx);
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
@@ -45,7 +54,15 @@ async function install() {
     finally { try { fs.unlinkSync(temporary); } catch {} }
   }
   fs.mkdirSync(ctx.data, { recursive: true, mode: 0o700 }); fs.chmodSync(ctx.data, 0o700);
-  const result = await configure(ctx);
+  let result;
+  const previous = { base: process.env.CHATGPT_API_BASE_URL, key: process.env.CHATGPT_API_KEY };
+  try {
+    if (choice && !choice.skip) { process.env.CHATGPT_API_BASE_URL = choice.base; process.env.CHATGPT_API_KEY = choice.key; }
+    result = await configure(ctx, false, !choice?.skip, { skipApi: Boolean(choice?.skip) });
+  } finally {
+    if (previous.base === undefined) delete process.env.CHATGPT_API_BASE_URL; else process.env.CHATGPT_API_BASE_URL = previous.base;
+    if (previous.key === undefined) delete process.env.CHATGPT_API_KEY; else process.env.CHATGPT_API_KEY = previous.key;
+  }
   const applications = path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local/share'), 'applications');
   const entry = ['[Desktop Entry]','Type=Application','Name=ChatGPT API','Comment=ChatGPT with a custom API provider',
     'Exec=' + desktopQuote(path.join(destination, 'linux/chatgpt-api')), 'Icon=applications-development','Terminal=false','Categories=Development;', 'StartupNotify=true',''].join('\n');
@@ -54,7 +71,8 @@ async function install() {
     'Exec=' + desktopQuote(path.join(destination, 'linux/console')), 'Icon=' + path.join(destination, 'assets/console/icon.svg'), 'Terminal=false', 'Categories=Development;', ''].join('\n');
   atomic(path.join(destination, '控制台.desktop'), consoleEntry, 0o755);
   atomic(path.join(applications, 'chatgpt-api-console.desktop'), consoleEntry, 0o644);
-  console.log(JSON.stringify({ installed: destination, version: manifest.version, platform: manifest.platform, gatewayModels: result.models, desktopEntry: path.join(applications, 'chatgpt-api-provider.desktop') }, null, 2));
+  console.log(JSON.stringify({ installed: destination, version: manifest.version, platform: manifest.platform, gatewayModels: result.models, configurationDeferred: Boolean(result.deferred), desktopEntry: path.join(applications, 'chatgpt-api-provider.desktop') }, null, 2));
+  if (result.deferred) console.log('安装完成，已跳过 API 配置。请通过 ChatGPT API 控制台添加 API 后启动。');
   console.log('Open ChatGPT API from the applications menu. The release extraction directory can now be removed.');
 }
 install().catch(error => { const key = process.env.CHATGPT_API_KEY; console.error(key ? error.message.replaceAll(key, '[redacted]') : error.message); process.exitCode = 1; });

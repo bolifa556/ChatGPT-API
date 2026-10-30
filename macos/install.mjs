@@ -5,6 +5,8 @@ import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { context, atomic, configure, stopRouter, requireClosedClient } from './provider.mjs';
 import { launcherText } from './platform.mjs';
+import readline from 'node:readline/promises';
+import { userApiSettings } from '../src/settings.mjs';
 
 function noLinks(file) {
   for (let current = path.resolve(file); current !== path.dirname(current); current = path.dirname(current)) {
@@ -49,7 +51,8 @@ export function verifyRelease(release, destination, architecture = process.arch)
 }
 export async function install() {
   if (process.platform !== 'darwin' || process.getuid() === 0) throw new Error('Install as your macOS desktop user, without sudo.');
-  const [releaseArg, destinationArg] = process.argv.slice(2);
+  const [releaseArg, destinationArg, ...flags] = process.argv.slice(2);
+  if (flags.some(flag => flag !== '--skip-api')) throw new Error('Unknown installation option.');
   if (!releaseArg || !destinationArg || !path.isAbsolute(destinationArg) || /[\r\n\0]/.test(destinationArg)) throw new Error('Provide an absolute installation directory without line breaks.');
   const release = canonicalPath(releaseArg), destination = canonicalPath(destinationArg);
   if (destination === path.parse(destination).root || destination === canonicalPath(os.homedir()) || destination === release
@@ -57,6 +60,16 @@ export async function install() {
   noLinks(destination); noLinks(release); requireClosedClient();
   const { manifest, copies } = verifyRelease(release, destination);
   const ctx = context(destination);
+  const current = flags.includes('--skip-api') ? {} : userApiSettings(destination);
+  let skipApi = flags.includes('--skip-api');
+  if (!skipApi && !((process.env.CHATGPT_API_BASE_URL || current.BASE_URL) && (process.env.CHATGPT_API_KEY || current.API_KEY))) {
+    if (!process.stdin.isTTY) skipApi = true;
+    else {
+      const reader = readline.createInterface({ input: process.stdin, output: process.stderr });
+      try { skipApi = (await reader.question('\nChatGPT API 安装\n1  配置 API\n2  跳过，稍后配置\n选择 [2]: ')).trim() !== '1'; }
+      finally { reader.close(); }
+    }
+  }
   // Complete verification before stopping or replacing installed programs.
   await stopRouter(ctx);
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
@@ -67,10 +80,11 @@ export async function install() {
     finally { try { fs.unlinkSync(temporary); } catch {} }
   }
   fs.mkdirSync(ctx.data, { recursive: true, mode: 0o700 }); fs.chmodSync(ctx.data, 0o700);
-  const result = await configure(ctx);
+  const result = await configure(ctx, false, !skipApi, { skipApi });
   const desktopEntry = path.join(os.homedir(), 'Desktop/chatgpt-apionly.command');
   atomic(desktopEntry, launcherText(ctx), 0o755); fs.chmodSync(desktopEntry, 0o755);
-  console.log(JSON.stringify({ installed: destination, version: manifest.version, platform: manifest.platform, gatewayModels: result.models, desktopEntry }, null, 2));
+  console.log(JSON.stringify({ installed: destination, version: manifest.version, platform: manifest.platform, gatewayModels: result.models, configurationDeferred: Boolean(result.deferred), desktopEntry }, null, 2));
+  if (result.deferred) console.log('安装完成，已跳过 API 配置。请通过 ChatGPT API 控制台添加 API 后启动。');
   console.log('Open chatgpt-apionly.command from your desktop. The release extraction directory can now be removed.');
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

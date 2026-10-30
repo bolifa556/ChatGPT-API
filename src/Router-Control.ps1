@@ -38,14 +38,16 @@ function Get-LauncherRouterSelection([string]$packageDir, [string]$routeMode = '
     return [pscustomobject]@{ mode = $routeMode; entryMode = $entryMode }
 }
 function Ensure-LocalRouter([string]$packageDir, [string]$routeMode = '', [string]$entryMode = '') {
-    $settings=Get-EnvValues (Get-LauncherDataPath $packageDir '.env')
-    $baseUrl=Normalize-BaseUrl ([string]$settings['BASE_URL'])
-    $key=[string]$settings['API_KEY'];if(-not $key){throw 'API_KEY is missing.'}
-    $port=if($settings['SHIM_PORT']){[int]$settings['SHIM_PORT']}else{8102}
-    $url='http://127.0.0.1:'+ $port +'/healthz'
     $selection = Get-LauncherRouterSelection $packageDir $routeMode $entryMode
     $mode = $selection.mode
     $entryMode = $selection.entryMode
+    $envFile = Get-LauncherDataPath $packageDir '.env'
+    $settings = if (Test-Path -LiteralPath $envFile) { Get-EnvValues $envFile } else { @{} }
+    if ($entryMode -ne 'official') { Assert-LauncherApiConfigured $packageDir }
+    $baseUrl = if ($settings['BASE_URL']) { Normalize-BaseUrl ([string]$settings['BASE_URL']) } else { '' }
+    $key=[string]$settings['API_KEY']
+    $port=if($settings['SHIM_PORT']){[int]$settings['SHIM_PORT']}else{8102}
+    $url='http://127.0.0.1:'+ $port +'/healthz'
     $sha=[Security.Cryptography.SHA256]::Create()
     try{$sourceId=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($baseUrl+"`n"+$key)))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
     $buildId=Get-RouterBuildId $packageDir

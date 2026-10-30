@@ -35,7 +35,7 @@ try {
         '安装.cmd','控制台.vbs','ChatGPT.vbs','chatgpt-api.vbs','chatgpt-apionly.vbs','Launch-ChatGPT.ps1','Read-ApiKey.ps1',
         'package.json','package-lock.json','runtime/node.exe',
         'assets/ChatGPT.ico','assets/model-template.json','assets/reasoning-levels.json','assets/model-contexts.json','assets/console/index.html','assets/console/console.css','assets/console/console.js','assets/console/icon.svg','assets/runtime.json',
-        'install/Install-ChatGPT.ps1','install/Install-Core.ps1','install/Bootstrap-Runtime.ps1',
+        'install/Install-ChatGPT.ps1','install/Install-Core.ps1','install/Installer-UI.ps1','install/Bootstrap-Runtime.ps1',
         'src/Common.ps1','src/Package-Paths.ps1','src/Launcher-State.ps1','src/Router-Control.ps1','src/Api-Settings.ps1',
         'src/shim.mjs','src/transport.mjs','src/response-state.mjs','src/settings.mjs','src/gateway-sources.mjs','src/console.mjs','src/chat-compat.mjs','src/history-compat.mjs','src/non-gpt-compat.mjs','src/sse.mjs','src/image-compat.mjs',
         'src/repair-thread-providers.mjs','src/model-context.mjs','src/gateway-recovery.mjs'
@@ -58,7 +58,7 @@ try {
     if (-not $licenseText.Contains('Node.js') -or -not $licenseText.Contains('Permission is hereby granted')) { throw 'Invalid Node.js license text.' }
     Copy-Item -LiteralPath $license -Destination (Join-Path $payload 'runtime\LICENSE.txt')
     [void][IO.Directory]::CreateDirectory((Join-Path $bundle 'setup'))
-    foreach ($file in @('Install-Release.ps1','Release-Core.ps1')) {
+    foreach ($file in @('Install-Release.ps1','Release-Core.ps1','Installer-UI.ps1')) {
         Copy-Item -LiteralPath (Join-Path $root ('install\' + $file)) -Destination (Join-Path $bundle ('setup\' + $file))
     }
     Copy-Item -LiteralPath (Join-Path $root 'install\Release-Install.cmd') -Destination (Join-Path $bundle '安装.cmd')

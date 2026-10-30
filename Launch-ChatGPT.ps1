@@ -79,6 +79,8 @@ try {
         & (Join-Path $env:WINDIR 'explorer.exe') "shell:AppsFolder\$appId"
         exit 0
     }
+    if ($Mode -ne 'official') { Assert-LauncherApiConfigured $packageDir }
+    Initialize-DeferredLauncherSettings $packageDir
     Restore-LauncherConfig $packageDir $configPath
     Recover-OldOverrides
     Stop-Helpers
@@ -96,7 +98,7 @@ try {
     }
     $settings = Get-EnvValues (Get-LauncherDataPath $packageDir '.env')
     $apiKey = [string]$settings['API_KEY']
-    $baseUrl = Normalize-BaseUrl ([string]$settings['BASE_URL'])
+    $baseUrl = if ($settings['BASE_URL']) { Normalize-BaseUrl ([string]$settings['BASE_URL']) } else { '' }
     $shimPort = if ($settings['SHIM_PORT']) { [int]$settings['SHIM_PORT'] } else { 8102 }
     $shimBase = 'http://127.0.0.1:' + $shimPort + '/v1'
     Apply-LauncherConfig $packageDir $configPath $authMode $shimBase $baseUrl $Mode

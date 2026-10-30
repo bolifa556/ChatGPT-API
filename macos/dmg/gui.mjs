@@ -31,6 +31,56 @@ function run(argv) {
   var app = Application.currentApplication();
   app.includeStandardAdditions = true;
   try {
+    if (input.kind === "settings") {
+      var alert = $.NSAlert.alloc.init;
+      alert.messageText = "API 设置";
+      alert.informativeText = input.allowSkip ? "可现在填写，也可安装后通过控制台配置。" : "保存 API 地址和 Key。";
+      alert.alertStyle = $.NSAlertStyleInformational;
+      var content = $.NSView.alloc.initWithFrame($.NSMakeRect(0, 0, 460, 178));
+      function label(text, y) {
+        var view = $.NSTextField.labelWithString(text);
+        view.frame = $.NSMakeRect(0, y, 460, 20);
+        view.font = $.NSFont.systemFontOfSize(13);
+        content.addSubview(view);
+        return view;
+      }
+      label("API 地址", 150);
+      var urlField = $.NSTextField.alloc.initWithFrame($.NSMakeRect(0, 116, 460, 28));
+      urlField.stringValue = input.base || "";
+      urlField.placeholderString = "https://api.example.com/v1";
+      content.addSubview(urlField);
+      label("API Key", 78);
+      var keyField = $.NSSecureTextField.alloc.initWithFrame($.NSMakeRect(0, 44, 460, 28));
+      keyField.placeholderString = input.hasKey ? "已保存，留空不变" : "输入 API Key";
+      content.addSubview(keyField);
+      var hint = label("Key 仅保存在本机。", 8);
+      hint.textColor = $.NSColor.secondaryLabelColor;
+      alert.accessoryView = content;
+      var actions = ["save"];
+      var saveButton = alert.addButtonWithTitle(input.allowSkip ? "保存并继续" : "保存");
+      saveButton.keyEquivalent = "\r";
+      if (input.allowSkip) { alert.addButtonWithTitle("跳过，稍后配置"); actions.push("skip"); }
+      alert.addButtonWithTitle("粘贴 Key"); actions.push("paste");
+      var cancelButton = alert.addButtonWithTitle("取消"); actions.push("cancel");
+      cancelButton.keyEquivalent = "\u001b";
+      alert.window.initialFirstResponder = input.base ? keyField : urlField;
+      while (true) {
+        var action = actions[Number(alert.runModal) - 1000];
+        if (action === "skip") return JSON.stringify({ value: { skip: true } });
+        if (action === "cancel" || !action) return JSON.stringify({ cancelled: true });
+        if (action === "paste") {
+          var clip = ObjC.unwrap($.NSPasteboard.generalPasteboard.stringForType($.NSPasteboardTypeString));
+          if (typeof clip === "string") keyField.stringValue = clip;
+          continue;
+        }
+        var base = ObjC.unwrap(urlField.stringValue).trim(), secret = ObjC.unwrap(keyField.stringValue).trim();
+        if (!/^https?:\/\/\S+$/i.test(base) || (!secret && !input.hasKey) || /[\r\n]/.test(secret)) {
+          alert.informativeText = "请填写有效的 API 地址和 Key，或选择稍后配置。";
+          continue;
+        }
+        return JSON.stringify({ value: { base: base, key: secret } });
+      }
+    }
     if (input.kind === "prompt") {
       var value = input.value || "";
       while (true) {
@@ -48,7 +98,7 @@ function run(argv) {
         value = typeof pasted === "string" ? pasted : result.textReturned;
       }
     }
-    app.displayAlert(title, { message: input.message, as: "critical", buttons: ["好"] });
+    app.displayAlert(title, { message: input.message, as: input.kind === "info" ? "informational" : "critical", buttons: ["好"] });
     return JSON.stringify({ ok: true });
   } catch (error) {
     if (error.errorNumber === -128 || String(error).indexOf("(-128)") >= 0) return JSON.stringify({ cancelled: true });
@@ -120,6 +170,14 @@ export async function requestSettings(current, ask = dialog, entryMode = 'apionl
   const answer = await ask({ kind: 'prompt', title, message: current.API_KEY ? '请输入 API Key（Command+V 或“粘贴”按钮）；留空保留原密钥' : '请输入 API Key（Command+V 或“粘贴”按钮）', hidden: true });
   return { base, key: answer || current.API_KEY || '' };
 }
+export async function requestInstallationSettings(current, ask = dialog, allowSkip = true) {
+  const result = await ask({ kind: 'settings', title: 'ChatGPT API 安装', base: current.BASE_URL || '', hasKey: Boolean(current.API_KEY), allowSkip });
+  if (result?.skip && allowSkip) return { skip: true };
+  if (!result || result.skip) throw new Cancelled();
+  const key = result.key?.trim() || current.API_KEY || '';
+  if (!key || /[\r\n\0]/.test(key)) throw new Error('请输入有效的 API Key。');
+  return { base: result.base, key };
+}
 export async function recoverSettings(ctx, provider, ask = dialog, entryMode = 'apionly') {
   let values;
   try { values = await requestSettings(provider.userSettings(ctx), ask, entryMode, true); }
@@ -128,6 +186,7 @@ export async function recoverSettings(ctx, provider, ask = dialog, entryMode = '
   return true;
 }
 export async function configureProvider(ctx, provider, values) {
+  if (values.skip) return provider.configure(ctx, false, false, { skipApi: true });
   const names = ['CHATGPT_API_BASE_URL','CHATGPT_API_KEY'];
   const saved = Object.fromEntries(names.map(name => [name, process.env[name]]));
   try {
@@ -144,7 +203,8 @@ export async function main(args = process.argv.slice(2)) {
   if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('This app requires an Apple Silicon Mac.');
   const selected = entryArguments(args); args = selected.args;
   const resources = path.dirname(fileURLToPath(import.meta.url));
-  const { ctx, provider } = await prepareInstallation(path.join(resources, 'release'), defaultInstallDirectory());
+  const installed = await prepareInstallation(path.join(resources, 'release'), defaultInstallDirectory());
+  const { ctx, provider } = installed;
   process.env.CHATGPT_API_ROOT = ctx.root;
   if (selected.entryMode === 'console') {
     const { startConsole } = await import(pathToFileURL(path.join(ctx.root, 'src/console.mjs')).href);
@@ -152,9 +212,17 @@ export async function main(args = process.argv.slice(2)) {
   }
   const current = provider.userSettings(ctx);
   if (selected.entryMode !== 'official' && (!current.BASE_URL || !current.API_KEY || args.includes('--configure'))) {
+    if (!installed.updated && !args.includes('--configure')) {
+      const { requireApiConfiguration } = await import(pathToFileURL(path.join(ctx.root, 'src/settings.mjs')).href);
+      requireApiConfiguration(ctx.root);
+    }
     provider.requireClosedClient();
-    const values = await requestSettings(current, dialog, selected.entryMode);
+    const values = await requestInstallationSettings(current, dialog, installed.updated);
     await configureProvider(ctx, provider, values);
+    if (values.skip) {
+      await dialog({ kind: 'info', title: '安装完成', message: '程序已安装。可稍后打开 ChatGPT API 控制台添加 API；官方入口不需要 API 配置。' });
+      return;
+    }
   }
   await provider.main(['launch', '--entry', selected.entryMode, ...args.filter(arg => arg !== '--configure')], {
     recoverGateway: () => recoverSettings(ctx, provider, dialog, selected.entryMode),

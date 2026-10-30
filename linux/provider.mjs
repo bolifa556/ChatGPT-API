@@ -8,8 +8,8 @@ import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { prepareWithRecovery, updateEnv, restoreRootLine } from '../src/gateway-recovery.mjs';
-import { requestSettings } from './settings.mjs';
-import { syncLegacySettings, userApiSettings } from '../src/settings.mjs';
+import { requestSettings, showError } from './settings.mjs';
+import { syncLegacySettings, userApiSettings, initializeDeferredSettings, requireApiConfiguration } from '../src/settings.mjs';
 
 const run = promisify(execFile), delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 export const providerId = 'chatgpt_api_launcher';
@@ -93,8 +93,8 @@ function buildId(ctx) {
   }
   return hash.digest('hex');
 }
-export async function health(ctx, settings = settingsChecked(readSettings(ctx))) {
-  try { return await (await fetch('http://127.0.0.1:' + settings.SHIM_PORT + '/healthz', { signal: AbortSignal.timeout(1200) })).json(); } catch { return null; }
+export async function health(ctx, settings = readSettings(ctx)) {
+  try { return await (await fetch('http://127.0.0.1:' + (settings.SHIM_PORT || 8102) + '/healthz', { signal: AbortSignal.timeout(1200) })).json(); } catch { return null; }
 }
 export async function stopRouter(ctx) {
   const record = readJson(statePath(ctx, 'router'));
@@ -200,8 +200,9 @@ async function prompt(label, hidden = false) {
   try { return await new Promise((resolve, reject) => { reader.once('SIGINT', () => reject(new Error('Configuration cancelled.'))); reader.question(hidden ? '' : label, resolve); }); }
   finally { reader.close(); if (hidden) process.stderr.write('\n'); }
 }
-export async function configure(ctx, askExisting = false, apply = true) {
+export async function configure(ctx, askExisting = false, apply = true, { skipApi = false } = {}) {
   requireClosedClient();
+  if (skipApi) { initializeDeferredSettings(ctx.root); return { models: 0, deferred: true }; }
   const current = userApiSettings(ctx.root, readSettings(ctx));
   let base = process.env.CHATGPT_API_BASE_URL || current.BASE_URL, key = process.env.CHATGPT_API_KEY || current.API_KEY;
   if (!base || askExisting && !process.env.CHATGPT_API_BASE_URL && process.stdin.isTTY) base = (await prompt('API base URL' + (base ? ' [' + base + ']' : '') + ': ')).trim() || base;
@@ -229,6 +230,7 @@ export async function main(args = process.argv.slice(2)) {
   if (command === 'stop' || command === 'restore') { requireClosedClient(); await locked(ctx, () => stopRouter(ctx)); if (command === 'restore') restoreConfig(ctx); console.log('Provider ' + (command === 'restore' ? 'configuration restored.' : 'router stopped.')); return; }
   if (command === 'status') { console.log(JSON.stringify(await health(ctx), null, 2)); return; }
   if (command !== 'launch') throw new Error('Usage: chatgpt-api [launch | configure | status | stop | restore]');
+  requireApiConfiguration(ctx.root, readSettings(ctx));
   const client = clientExecutable(), running = runningClients().length > 0;
   if (running && rootString(fs.readFileSync(ctx.config, 'utf8'), 'model_provider') !== providerId) throw new Error('Fully quit the current ChatGPT instance before opening the API provider.');
   await prepareWithRecovery(() => ensureRouter(ctx, !running), running ? null : async () => {
@@ -247,5 +249,9 @@ export async function main(args = process.argv.slice(2)) {
   await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); }); child.unref();
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  main().catch(error => { const key = readSettings(context()).API_KEY; process.stderr.write((key ? error.message.replaceAll(key, '[redacted]') : error.message) + '\n'); process.exitCode = 1; });
+  main().catch(async error => {
+    const key = readSettings(context()).API_KEY, message = key ? error.message.replaceAll(key, '[redacted]') : error.message;
+    if (error.code === 'api_not_configured' && (!process.argv[2] || process.argv[2] === 'launch')) await showError(message);
+    process.stderr.write(message + '\n'); process.exitCode = 1;
+  });
 }

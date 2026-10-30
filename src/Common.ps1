@@ -29,7 +29,8 @@ function Get-ExistingOfficialProxy {
 }
 
 function Get-UserApiSettings([string]$packageDir) {
-    $values = Get-EnvValues (Join-Path $packageDir 'data\.env')
+    $envFile = Join-Path $packageDir 'data\.env'
+    $values = if (Test-Path -LiteralPath $envFile) { Get-EnvValues $envFile } else { @{} }
     $file = Join-Path $packageDir 'data\providers.json'
     if (Test-Path -LiteralPath $file) {
         $saved = [IO.File]::ReadAllText($file) | ConvertFrom-Json
@@ -37,6 +38,12 @@ function Get-UserApiSettings([string]$packageDir) {
         if ($provider) { $values['BASE_URL'] = [string]$provider.baseUrl; $values['API_KEY'] = [string]$provider.apiKey }
     }
     return $values
+}
+function Assert-LauncherApiConfigured([string]$packageDir) {
+    $values = Get-UserApiSettings $packageDir
+    if (-not $values['BASE_URL'] -or -not $values['API_KEY']) {
+        throw '尚未配置 API。请打开安装目录中的“控制台”，填写 API 地址和 Key，保存后重新打开 API 入口。'
+    }
 }
 
 function Normalize-BaseUrl([string]$value) {

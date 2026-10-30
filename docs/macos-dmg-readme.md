@@ -1,4 +1,4 @@
-# ChatGPT API 3.1.5 — macOS
+# ChatGPT API 3.1.6 — macOS
 
 Apple Silicon / ARM64 单文件 DMG，包含三个聊天入口与一个控制台 App。需要先安装官方 `ChatGPT.app`，本包不包含或修改官方客户端。
 
@@ -14,7 +14,7 @@ Apple Silicon / ARM64 单文件 DMG，包含三个聊天入口与一个控制台
 ## 安装
 
 1. 完全退出官方客户端（Command-Q）。
-2. 打开 `ChatGPT-API-Provider-3.1.5-macos-arm64.dmg`。
+2. 打开 `ChatGPT-API-Provider-3.1.6-macos-arm64.dmg`。
 3. 将需要的 App 拖入“应用程序”。
 4. API 入口首次填写 URL 和 Key，支持 Command+V 和“粘贴”按钮；官方入口无需 API Key。
 5. 日常从相应入口启动；切换入口前完全退出客户端。
@@ -58,3 +58,5 @@ Apple Silicon / ARM64 单文件 DMG，包含三个聊天入口与一个控制台
 - 浏览器扩展、部分插件或在线工具仍可能需要官方身份；API Key 不能替代账号权限。模型或原生客户端缺少的能力不做模拟。
 - 不新增提示词或聊天正文，不添加网络重试，不改变系统代理或 TUN。
 - 自动验证覆盖打包、签名资源、配置与消息路由；真实 Mac 的图形窗口、TCC、Keychain 与 Gatekeeper 需实机确认，不能据隔离测试宣称全部正常。
+
+安装时可选择“跳过，稍后配置”，保留已有 API 设置；首次空配置安装不请求模型目录。API 入口在未配置时给出明确提示，可稍后打开控制台填写。Linux 终端安装另可使用 ./install.sh --skip-api。Windows / macOS 的官方入口不要求填写 API。

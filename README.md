@@ -7,7 +7,7 @@
 支持接入 **DeepSeek** · **Claude** · **Gemini** · **OpenAI 全系/中转** · **本地 Ollama / vLLM** 与任意兼容 API  
 **原版丝滑体验 · 零修改客户端 · 三种灵活模式 · 深度思考与生图全面适配**
 
-[![Version](https://img.shields.io/badge/Release-v3.1.5-blue.svg)](release/README.md)
+[![Version](https://img.shields.io/badge/Release-v3.1.6-blue.svg)](release/README.md)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-brightgreen.svg)](#-极速上手)
 [![Zero Intrusion](https://img.shields.io/badge/Security-Zero%20Intrusion%20(No%20Patching)-success.svg)](#-核心特性与优势)
 [![Node Runtime](https://img.shields.io/badge/Runtime-Built--in%20Node.js-orange.svg)](#-极速上手)
@@ -65,12 +65,15 @@
 
 | 平台 | 下载发布包 | 极速安装方式 |
 | :--- | :--- | :--- |
-| **Windows x64** | [ChatGPT-API-Launcher-3.1.5-win-x64.zip](release/3.1.5/ChatGPT-API-Launcher-3.1.5-win-x64.zip) | 完整解压后双击运行 `安装.cmd`，选择程序目录完成安装。 |
-| **macOS (Apple Silicon)** | [ChatGPT-API-Provider-3.1.5-macos-arm64.dmg](release/3.1.5/ChatGPT-API-Provider-3.1.5-macos-arm64.dmg) | 打开 DMG 镜像，将对应的启动入口与控制台 App 拖到“应用程序”文件夹。（详见 [macOS 说明](docs/macos-dmg-readme.md)） |
-| **Linux x64** | [ChatGPT-API-Provider-3.1.5-linux-x64.tar.gz](release/3.1.5/ChatGPT-API-Provider-3.1.5-linux-x64.tar.gz) | 解压压缩包，以桌面用户身份执行 `./install.sh`。（详见 [Linux 说明](docs/linux-readme.md)） |
-| **Linux ARM64** | [ChatGPT-API-Provider-3.1.5-linux-arm64.tar.gz](release/3.1.5/ChatGPT-API-Provider-3.1.5-linux-arm64.tar.gz) | 解压后同样执行 `./install.sh` 即可。 |
+| **Windows x64** | [ChatGPT-API-Launcher-3.1.6-win-x64.zip](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.1.6/ChatGPT-API-Launcher-3.1.6-win-x64.zip) | 完整解压后双击运行 `安装.cmd`，选择程序目录完成安装。 |
+| **macOS (Apple Silicon)** | [ChatGPT-API-Provider-3.1.6-macos-arm64.dmg](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.1.6/ChatGPT-API-Provider-3.1.6-macos-arm64.dmg) | 打开 DMG 镜像，将对应的启动入口与控制台 App 拖到“应用程序”文件夹。（详见 [macOS 说明](docs/macos-dmg-readme.md)） |
+| **Linux x64** | [ChatGPT-API-Provider-3.1.6-linux-x64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.1.6/ChatGPT-API-Provider-3.1.6-linux-x64.tar.gz) | 解压压缩包，以桌面用户身份执行 `./install.sh`。（详见 [Linux 说明](docs/linux-readme.md)） |
+| **Linux ARM64** | [ChatGPT-API-Provider-3.1.6-linux-arm64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.1.6/ChatGPT-API-Provider-3.1.6-linux-arm64.tar.gz) | 解压后同样执行 `./install.sh` 即可。 |
 
 ### 2. 配置你的 API 来源
+
+> [!TIP]
+> 安装时可以选择 **“跳过，稍后配置”**，先完成安装；已有 URL 和 Key 不会被覆盖。未配置 API 就打开 API 入口时，会提示通过控制台填写。Windows / macOS 的官方入口无需填写 API。
 
 安装完成后，打开 **本地控制台**（Windows 双击程序目录中的 `控制台.vbs`）：
 1. 在 **API 来源** 页面点击“添加来源”，填写名称、API Base URL 和 API Key（例如接入 DeepSeek、OpenRouter 或自己的中转站）；
@@ -164,27 +167,73 @@ flowchart TD
 
 ---
 
+## ⚠️ 当前局限与兼容边界
+
+> [!IMPORTANT]
+> 本项目负责消息格式转换，**不能保证所有对话、模型和官方功能在不同入口间完全互通**。使用前请留意以下边界。
+
+<details>
+<summary><b>🔄 用自己的 API 聊过，再从官方入口打开，能接着聊吗？</b></summary>
+
+> **部分旧对话可能无法继续发送、恢复或压缩，不能保证无缝切回。**  
+> 自定义模型的消息、工具记录和对话 provider 状态，可能与官方模型当前要求不同。本项目的 **`ChatGPT / chatgpt-official` 兼容入口** 会处理必要的历史格式，但仍有兼容边界；直接打开未经过本项目兼容层的原版客户端，也不会获得这部分处理。
+>
+> **遇到无法继续时**：优先从原 API 入口使用原模型继续；如果仍然失败，建议新建官方对话，并由你自行补充需要的上下文。不要将“共享聊天列表”理解为任意历史都能跨入口续聊。
+</details>
+
+<details>
+<summary><b>🗜️ 换模型后，压缩和上下文一定能同步吗？</b></summary>
+
+> **不一定。** 官方 / API 模型切换后，部分原生 provider 与压缩方式需要 **完全退出并重新打开入口** 才能同步。官方加密思考和加密压缩块不能被其他厂商模型解密；缺少可读历史时会明确报错，不会偷偷编造摘要或丢弃上下文。
+>
+> 模型菜单和上下文设置也在重开后加载，用量浮窗随客户端新一轮统计刷新。设置更大的窗口不会增加上游模型的实际容量。
+</details>
+
+<details>
+<summary><b>🌐 只有 API Key，能使用全部浏览器、插件和语音功能吗？</b></summary>
+
+> **不能保证。** 纯 API 模式只改变模型请求的来源，不能替代原生浏览器扩展、部分在线工具、插件或语音服务要求的 **官方身份、平台权限与网络连接**。例如 Edge / Chrome 控制若依赖官方身份接口，仅填写模型 API Key 不能补齐这项身份。
+</details>
+
+<details>
+<summary><b>🧩 模型没有的能力，适配层会自动补上吗？</b></summary>
+
+> **不会。** 工具调用、识图、结构化输出、思考强度、生图及 Fast 服务档位，仍取决于实际模型和 API。没有对应图片模型时会报错；部分 Chat 接口不能表达的附件或历史项目也会明确拒绝。模型自己生成的错误参数、代码和回答，不由转换层重新编写。
+>
+> API 还需符合当前适配器支持的接口形态；“OpenAI 兼容”不代表该服务的所有端点和扩展都已经逐一验证。
+</details>
+
+<details>
+<summary><b>🖥️ 三个平台的支持范围完全一样吗？</b></summary>
+
+> **以原生客户端各平台实际提供的功能为准。** Linux 仅提供自定义 provider 入口。macOS 安装包没有 Apple Developer ID 和 Apple 公证，首次打开仍需按系统正常流程允许；包体、逻辑和签名检查通过，不等于真实机器上的麦克风、自动化、屏幕录制等权限已经获得授权。
+>
+> Windows / macOS 启动期间还会临时接管同一 `CODEX_HOME` 的路由配置，同时运行的其他 CLI 可能读到这些设置；切换入口前请完全退出客户端。
+</details>
+
+---
+
 ## ❓ 常见问题与温馨提示 (FAQ)
 
 <details>
 <summary><b>Q1: 使用本工具会导致官方账号封号或损坏客户端吗？</b></summary>
 
-> **完全不会！**  
-> 本项目采用纯绿色外部路由机制，不修改客户端的二进制文件，不篡改 `app.asar`，也不向系统注入外挂脚本。如果你启动的是官方入口，它与普通原版客户端没有任何区别；启动 API 入口时也只是在本地回环网络做格式转换，安全无忧。
+> **不修改官方客户端，但无法承诺账号风控结果。**  
+> 本项目不改写客户端二进制、`app.asar` 或聊天正文。官方入口仍遵循官方账号与服务规则，API 入口也受各供应商规则约束；消息适配不能替官方或供应商作账号安全保证。
 </details>
 
 <details>
 <summary><b>Q2: 为什么在混合模式（chatgpt-api）下，官方额度用光了切 API 模型还是发不出去？</b></summary>
 
 > 这是由于官方客户端的前端逻辑：当官方账号的免费/付费额度耗尽时，官方客户端会在**前端直接禁用输入框**，导致消息根本来不及发送给本地网关就被客户端自己拦下了。  
-> **极速解决方案**：直接关闭客户端，改从 **`chatgpt-apionly`（纯 API 模式）** 启动！该模式完全绕过官方账号状态检测，不受任何官方额度限制。
+> **极速解决方案**：直接关闭客户端，改从 **`chatgpt-apionly`（纯 API 模式）** 启动！该模式的模型请求使用 API 额度。**这不代表已经修复混合模式中的原地即时切换**；旧对话仍可能遇到上方列出的历史与压缩兼容限制。
 </details>
 
 <details>
 <summary><b>Q3: 支持各大推理模型的深度思考（Thinking / 思维链）吗？</b></summary>
 
-> **原生完美支持！**  
-> 本项目自研协议转换引擎对 `reasoning_content`、思维链字段与客户端内部协议做了全量映射。无论是 DeepSeek 系列推理模型、Claude 思考模式、还是 OpenAI o 系列等主流推理模型的深度思考过程，都会在界面中以原生“深度思考”折叠卡片优雅呈现，点击即可展开查看完整严谨的推理脉络！
+> **支持上游实际返回、且原生界面能够表达的思考信息。**  
+> 适配器会映射 `reasoning_content` 等字段，但不能保证每个供应商都公开完整思考过程，也不能解密官方的私有思考内容。显示形式、可用档位和跨模型保留范围，以模型、接口及客户端的实际支持为准。
 </details>
 
 <details>
@@ -197,8 +246,9 @@ flowchart TD
 <details>
 <summary><b>Q5: 我的 API Key 保存在哪里？安全吗？</b></summary>
 
-> 所有配置（包括 API Key）均仅保存在你本机安装目录下的 `data/providers.json` 中，绝对不会上传到任何第三方云端。控制台服务仅对本地 `127.0.0.1` 开放，并带有专属 Token 鉴权，局域网内的其他设备无法访问。  
-> *提醒：切勿将包含你个人配置的 `data/` 目录随意分享给他人。*
+> 配置保存在本机安装目录的 `data/providers.json` 和兼容配置 `data/.env` 中，**Key 目前以明文保存，未接入系统钥匙串**。控制台只监听 `127.0.0.1`，使用随机 Token、Host 和 Origin 校验，前端不回显已保存的明文 Key。
+>
+> **模型请求仍会发送到你选择的服务**：对应 API Key 会用于该服务的认证。分享时请使用原始发布包，切勿附带自己的 `data/` 目录。
 </details>
 
 ---

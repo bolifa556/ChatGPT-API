@@ -1,4 +1,4 @@
-# ChatGPT API 3.1.5 — macOS
+# ChatGPT API 3.1.6 — macOS
 
 macOS 只发布 Apple Silicon 单文件 DMG，包含：
 
@@ -10,3 +10,5 @@ macOS 只发布 Apple Silicon 单文件 DMG，包含：
 先安装官方客户端，再将 App 拖到“应用程序”。本包附带运行时，不包含官方客户端；使用 ad-hoc 签名，首次需按系统正常流程允许。更新保留程序目录的 `data/`，配置保存后需退出重开客户端。
 
 完整步骤、数据位置和限制见 [DMG 使用说明](macos-dmg-readme.md)，控制台见 [设置说明](console.md)，平台测试范围见 [macOS 隔离测试](macos-testing.md)。
+
+安装时可选择“跳过，稍后配置”，保留已有 API 设置；首次空配置安装不请求模型目录。API 入口在未配置时给出明确提示，可稍后打开控制台填写。Linux 终端安装另可使用 ./install.sh --skip-api。Windows / macOS 的官方入口不要求填写 API。

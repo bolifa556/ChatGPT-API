@@ -1,4 +1,4 @@
-ChatGPT API 3.1.5 — Windows x64
+ChatGPT API 3.1.6 — Windows x64
 
 安装
 1. 安装官方 ChatGPT/Codex 桌面客户端。
@@ -46,3 +46,5 @@ data/providers.json 保存多来源、明文 Key 和上下文；data/.env 保留
 包内：安装.cmd、使用说明.txt、setup、payload、内部逐文件安装清单 release.json。
 各版本独立存放于 release/<版本>/，没有独立下载校验文件。
 本项目为第三方工具，不含官方客户端安装程序，品牌与依赖权利归原权利人。
+
+安装时可选择“跳过，稍后配置”，保留已有 API 设置；首次空配置安装不请求模型目录。API 入口在未配置时给出明确提示，可稍后打开控制台填写。Linux 终端安装另可使用 ./install.sh --skip-api。Windows / macOS 的官方入口不要求填写 API。

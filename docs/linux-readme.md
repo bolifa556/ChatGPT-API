@@ -1,11 +1,11 @@
-# ChatGPT API 3.1.5 — Linux
+# ChatGPT API 3.1.6 — Linux
 
 Linux 包提供自定义 API provider 和本地控制台，模型与图片请求只使用自定义 API。消息与工具格式转换复用共用适配器，不管理官方订阅登录。
 
 ## 安装
 
 1. 安装对应发行版与架构的官方 ChatGPT 桌面客户端。
-2. 完全退出客户端，解压 `ChatGPT-API-Provider-3.1.5-linux-x64.tar.gz` 或 ARM64 包。
+2. 完全退出客户端，解压 `ChatGPT-API-Provider-3.1.6-linux-x64.tar.gz` 或 ARM64 包。
 3. 以桌面用户运行 `./install.sh`，不要使用 sudo。默认安装到 `~/.local/share/chatgpt-api-provider`，也可传入独立的绝对路径。
 4. 输入 API URL 和 Key。安装后从应用菜单打开 **ChatGPT API**。
 
@@ -46,3 +46,5 @@ Linux 包提供自定义 API provider 和本地控制台，模型与图片请求
 - Linux 客户端本身未提供的功能不在本包支持范围。ARM64 包的结构与权限可检查，实机执行范围以发布验证说明为准。
 
 更多说明见源码中的 `README.md`；归档内的本说明可直接阅读，源码文档见 `docs/console.md`、`docs/configuration.md` 和 `docs/message-protocol.md`。
+
+安装时可选择“跳过，稍后配置”，保留已有 API 设置；首次空配置安装不请求模型目录。API 入口在未配置时给出明确提示，可稍后打开控制台填写。Linux 终端安装另可使用 ./install.sh --skip-api。Windows / macOS 的官方入口不要求填写 API。

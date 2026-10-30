@@ -117,7 +117,7 @@ try {
     await new Promise(resolve => reserve.close(resolve));
     const base = 'http://127.0.0.1:' + port, gatewayBase = 'http://127.0.0.1:' + gatewayPort + '/v1';
     fs.writeFileSync(path.join(dir, 'data/.env'), [
-      'BASE_URL=' + gatewayBase, 'API_KEY=mock-api-key', 'SHIM_PORT=' + port,
+      'BASE_URL=' + (scenario.entryMode === 'official' ? '' : gatewayBase), 'API_KEY=' + (scenario.entryMode === 'official' ? '' : 'mock-api-key'), 'SHIM_PORT=' + port,
       'OFFICIAL_BASE=http://127.0.0.1:' + officialPort + '/backend-api/codex',
     ].join('\n'));
     fs.writeFileSync(path.join(dir, 'data/state/route-state.json'), JSON.stringify({

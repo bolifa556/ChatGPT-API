@@ -11,7 +11,7 @@ import { processIdentity, alive, runningClients, requireClosedClient, clientExec
 import { hasChatGPTLogin, nativeVersion } from './native.mjs';
 import { repairThreadProviders } from '../src/repair-thread-providers.mjs';
 import { prepareWithRecovery, updateEnv, restoreRootLine } from '../src/gateway-recovery.mjs';
-import { syncLegacySettings, userApiSettings } from '../src/settings.mjs';
+import { syncLegacySettings, userApiSettings, initializeDeferredSettings, requireApiConfiguration } from '../src/settings.mjs';
 export { requireClosedClient } from './platform.mjs';
 
 const run = promisify(execFile), delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -230,8 +230,9 @@ async function prompt(label, hidden = false) {
   try { return await new Promise((resolve, reject) => { reader.once('SIGINT', () => reject(new Error('Configuration cancelled.'))); reader.question(hidden ? '' : label, resolve); }); }
   finally { reader.close(); if (hidden) process.stderr.write('\n'); }
 }
-export async function configure(ctx, askExisting = false, apply = true) {
+export async function configure(ctx, askExisting = false, apply = true, { skipApi = false } = {}) {
   requireClosedClient();
+  if (skipApi) { initializeDeferredSettings(ctx.root); return { models: 0, deferred: true }; }
   const current = userSettings(ctx);
   let base = process.env.CHATGPT_API_BASE_URL || current.BASE_URL, key = process.env.CHATGPT_API_KEY || current.API_KEY;
   if (!base || askExisting && !process.env.CHATGPT_API_BASE_URL && process.stdin.isTTY) base = (await prompt('API base URL' + (base ? ' [' + base + ']' : '') + ': ')).trim() || base;
@@ -247,16 +248,18 @@ export async function configure(ctx, askExisting = false, apply = true) {
 }
 
 export async function launchEntry(ctx, entryMode, args = [], options = {}) {
-  const client = options.client || clientExecutable(), cli = options.cli === undefined ? nativeCli(client) : options.cli;
   const clients = options.runningClients || runningClients;
   const launchClient = options.launchClient || startNativeClient;
-  let child, sessionId, reused = false, selection;
+  let client, cli, child, sessionId, reused = false, selection;
   await locked(ctx, async () => {
     const active = readJson(statePath(ctx, 'config'));
     if (clients().length || active?.active && alive(active.owner)) {
       if (!active?.active || active.configPath !== ctx.config || active.entryMode !== entryMode) throw new Error('Fully quit ChatGPT before switching launcher entries.');
       reused = true; return;
     }
+    if (entryMode !== 'official') requireApiConfiguration(ctx.root, readSettings(ctx));
+    client = options.client || clientExecutable();
+    cli = options.cli === undefined ? nativeCli(client) : options.cli;
     restoreConfig(ctx);
     selection = await entrySelection(ctx, entryMode, { cli, ...options });
     await prepareWithRecovery(() => ensureRouter(ctx, true, selection), entryMode === 'official' ? null : options.recoverGateway);
@@ -278,6 +281,7 @@ export async function launchEntry(ctx, entryMode, args = [], options = {}) {
     }
   }, 'launch-lock');
   if (reused) {
+    client = options.client || clientExecutable();
     child = await launchClient(client, args, ctx.home, { wait: false }); child.unref();
     return { reused: true };
   }

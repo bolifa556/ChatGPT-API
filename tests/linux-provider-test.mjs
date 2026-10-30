@@ -147,6 +147,27 @@ try {
   assert(restored.includes('model_context_window = 500000')); assert(restored.includes('model_auto_compact_token_limit = 400000'));
   checks.push('Updates preserve settings and user files; restore returns managed keys while retaining later preference edits');
 
+
+  const skipped = path.join(fixture, 'deferred installation');
+  const skippedNative = path.join(fixture, 'deferred-native');
+  fs.mkdirSync(skippedNative);
+  const skippedConfig = path.join(skippedNative, 'config.toml');
+  fs.writeFileSync(skippedConfig, 'model = "keep-native"\n[app]\nlocaleOverride = "zh-CN"\n');
+  const originalSkippedConfig = fs.readFileSync(skippedConfig);
+  const skipEnv = { CODEX_HOME: skippedNative, CHATGPT_API_KEY: '', CHATGPT_API_BASE_URL: '', DISPLAY: '', WAYLAND_DISPLAY: '' };
+  await invoke([installer, release, skipped, '--skip-api'], skipEnv);
+  const skippedSettings = fs.readFileSync(path.join(skipped, 'data/.env'), 'utf8');
+  assert(/^BASE_URL=\r?$/m.test(skippedSettings)); assert(/^API_KEY=\r?$/m.test(skippedSettings));
+  assert.deepEqual(fs.readFileSync(skippedConfig), originalSkippedConfig);
+  assert(!fs.existsSync(path.join(skipped, 'data/state/router.json')));
+  await assert.rejects(invoke([path.join(skipped, 'linux/provider.mjs'), 'launch'], skipEnv), /尚未配置 API/);
+  const keptEnv = fs.readFileSync(path.join(installed, 'data/.env'));
+  const keptConfig = fs.readFileSync(configFile);
+  await invoke([installer, release, installed, '--skip-api'], { CHATGPT_API_KEY: '', CHATGPT_API_BASE_URL: '' });
+  assert.deepEqual(fs.readFileSync(path.join(installed, 'data/.env')), keptEnv);
+  assert.deepEqual(fs.readFileSync(configFile), keptConfig);
+  checks.push('Fresh installation can defer API with no native provider/config writes; unconfigured launch reports an explicit error; skipping updates preserves credentials and preferences');
+
   const report = { passed: true, platform: process.platform, architecture: process.arch, node: process.version, checks,
     scope: 'Shipped installer and router executed under Linux with isolated homes and mock upstreams; desktop GUI and real model inference are not exercised.' };
   fs.writeFileSync(path.join(root, 'data/diagnostics/linux-provider-result.json'), JSON.stringify(report, null, 2));
