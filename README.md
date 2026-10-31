@@ -7,7 +7,7 @@
 支持接入 **DeepSeek** · **Claude** · **Gemini** · **OpenAI 全系/中转** · **本地 Ollama / vLLM** 与任意兼容 API  
 **原版丝滑体验 · 零修改客户端 · 三种灵活模式 · 深度思考与生图全面适配**
 
-[![Version](https://img.shields.io/badge/Release-v3.1.8-blue.svg)](release/README.md)
+[![Version](https://img.shields.io/badge/Release-v3.1.9-blue.svg)](release/README.md)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-brightgreen.svg)](#-极速上手)
 [![Zero Intrusion](https://img.shields.io/badge/Security-Zero%20Intrusion%20(No%20Patching)-success.svg)](#-核心特性与优势)
 [![Node Runtime](https://img.shields.io/badge/Runtime-Built--in%20Node.js-orange.svg)](#-极速上手)
@@ -65,10 +65,10 @@
 
 | 平台 | 下载发布包 | 极速安装方式 |
 | :--- | :--- | :--- |
-| **Windows x64** | [ChatGPT-API-Launcher-3.1.8-win-x64.zip](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.1.8/ChatGPT-API-Launcher-3.1.8-win-x64.zip) | 完整解压后双击运行 `安装.cmd`，选择程序目录完成安装。 |
-| **macOS (Apple Silicon)** | [ChatGPT-API-Provider-3.1.8-macos-arm64.dmg](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.1.8/ChatGPT-API-Provider-3.1.8-macos-arm64.dmg) | 打开 DMG 镜像，将对应的启动入口与控制台 App 拖到“应用程序”文件夹。（详见 [macOS 说明](docs/macos-dmg-readme.md)） |
-| **Linux x64** | [ChatGPT-API-Provider-3.1.8-linux-x64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.1.8/ChatGPT-API-Provider-3.1.8-linux-x64.tar.gz) | 解压压缩包，以桌面用户身份执行 `./install.sh`。（详见 [Linux 说明](docs/linux-readme.md)） |
-| **Linux ARM64** | [ChatGPT-API-Provider-3.1.8-linux-arm64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.1.8/ChatGPT-API-Provider-3.1.8-linux-arm64.tar.gz) | 解压后同样执行 `./install.sh` 即可。 |
+| **Windows x64** | [ChatGPT-API-Launcher-3.1.9-win-x64.zip](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.1.9/ChatGPT-API-Launcher-3.1.9-win-x64.zip) | 完整解压后双击运行 `安装.cmd`，选择程序目录完成安装。 |
+| **macOS (Apple Silicon)** | [ChatGPT-API-Provider-3.1.9-macos-arm64.dmg](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.1.9/ChatGPT-API-Provider-3.1.9-macos-arm64.dmg) | 打开 DMG 镜像，将对应的启动入口与控制台 App 拖到“应用程序”文件夹。（详见 [macOS 说明](docs/macos-dmg-readme.md)） |
+| **Linux x64** | [ChatGPT-API-Provider-3.1.9-linux-x64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.1.9/ChatGPT-API-Provider-3.1.9-linux-x64.tar.gz) | 解压压缩包，以桌面用户身份执行 `./install.sh`。（详见 [Linux 说明](docs/linux-readme.md)） |
+| **Linux ARM64** | [ChatGPT-API-Provider-3.1.9-linux-arm64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.1.9/ChatGPT-API-Provider-3.1.9-linux-arm64.tar.gz) | 解压后同样执行 `./install.sh` 即可。 |
 
 ### 2. 配置你的 API 来源
 
@@ -145,6 +145,8 @@ flowchart LR
 图片模型按上游目录中的能力信息与已知模型名称自动识别；**仅图片编辑** 的模型不能设为默认生图。只有文本聊天模型、缺少图片接口或 Key 没有对应权限时，适配层无法补出图片生成能力。
 
 如果 API 直接在 Responses 中返回 `image_generation_call`，适配层会保存其中的 PNG、JPEG 或 WebP 原图，转换为聊天中的图片，并保留后续编辑需要的图像数据。图片位于客户端数据目录的 `generated_images/chatgpt-api/` 下，升级安装包不会清除，请随客户端数据一起备份。这类结果以聊天图片呈现，不保证官方图库、生成进度卡片等专用界面；已经发生的空白历史不会自动重写。
+
+**生图后可以继续原对话。** 对 Responses 通道，适配层会在发送历史时将自己生成的图片展示消息还原为原生生图结果，避免 `input_image` 被当成 assistant 文本输出而报错。原始结果的 ID、图片描述等元数据保存在图片旁的小型 `.response.json` 文件中，不另外保存聊天或重复保存图片数据；已有 3.1.8 图片消息即使没有这个文件，也会兼容其已有原图。仅发送格式改变，本地聊天记录不重写，普通工具返回的图片和用户上传图片保持原有处理方式。
 
 ---
 

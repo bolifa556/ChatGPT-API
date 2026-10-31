@@ -14,7 +14,7 @@ import { NonGptAdapter, NonGptEvents, validateNonGptCompaction } from './non-gpt
 import { usesChat, chatRequest, chatResponse, ChatEvents } from './chat-compat.mjs';
 import { decodedStream, ssePackets, encodeSse } from './sse.mjs';
 import { forwardImages, imageOnlyModel, imageCapabilities } from './image-compat.mjs';
-import { ResponseImages } from './responses-images.mjs';
+import { ResponseImages, restoreHostedImageHistory } from './responses-images.mjs';
 import { contextFields, rememberContexts, contextKey, applyContext } from './model-context.mjs';
 import { officialDispatcherFor, readEncodedBody, outgoingBody, writeChunk, relayClose,
   requestWithAbort as request, protocolError, releaseResponseBody, RESPONSE_TIMEOUTS, MAX_REQUEST_BYTES } from './transport.mjs';
@@ -215,10 +215,11 @@ function route(model) {
   throw Object.assign(new Error('Unknown model: ' + model + '. Refresh the model list; this request was not forwarded.'), { status: 400, code: 'unknown_model' });
 }
 function historyForTarget(payload, which) {
-  if (which !== 'official' && !isGptModel(payload.model)) return { payload, changed: false };
-  const result = which === 'official' ? normalizeOfficialHistory(payload) : normalizeGptHistory(payload);
+  const images = restoreHostedImageHistory(payload, codexHome);
+  if (which !== 'official' && !isGptModel(payload.model)) return images;
+  const result = which === 'official' ? normalizeOfficialHistory(images.payload) : normalizeGptHistory(images.payload);
   if (result.changed) log('history compatibility model=' + payload.model + ' ' + JSON.stringify(result.stats));
-  return result;
+  return { ...result, changed: images.changed || result.changed };
 }
 function prepareRequest(payload, which, pathname = '/v1/responses') {
   if (which === 'gateway' && !isGptModel(payload.model)) {
@@ -226,7 +227,7 @@ function prepareRequest(payload, which, pathname = '/v1/responses') {
     const chat = usesChat(payload);
     const adapter = new NonGptAdapter(payload, { preserveReasoning: /^(阿里云订阅|词元计划|vllm)\//.test(payload.model) });
     const converted = adapter.request();
-    return { payload: chat ? chatRequest(converted) : converted, changed: true, adapter, chat };
+    return { payload: chat ? chatRequest(converted) : restoreHostedImageHistory(converted, codexHome).payload, changed: true, adapter, chat };
   }
   return historyForTarget(payload, which);
 }

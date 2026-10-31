@@ -5,6 +5,57 @@ import crypto from 'node:crypto';
 const hosted = item => item?.type === 'image_generation_call';
 const invalid = message => Object.assign(new Error(message), { status: 502, code: 'invalid_upstream_image_response' });
 
+function save(file, bytes, replace = false) {
+  const temporary = file + '.' + crypto.randomUUID() + '.tmp';
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    if (fs.existsSync(file)) {
+      if (!fs.lstatSync(file).isFile()) throw new Error('Invalid existing image file');
+      if (fs.readFileSync(file).equals(bytes)) return;
+      if (!replace) throw new Error('Invalid existing image file');
+    }
+    fs.writeFileSync(temporary, bytes, { flag: 'wx', mode: 0o600 });
+    fs.renameSync(temporary, file);
+  } catch {
+    throw Object.assign(new Error('The generated image could not be saved in the client image directory.'), { status: 502, code: 'image_storage_unavailable' });
+  } finally { try { fs.rmSync(temporary, { force: true }); } catch {} }
+}
+
+// The native core accepts assistant input_image content for display/editing,
+// but Responses upstreams validate assistant output messages as text/refusal.
+// Reverse ONLY our image presentation, never user uploads or native tool output.
+// This is the already-generated result, not a new tool invocation or user turn.
+export function restoreHostedImageHistory(payload, codexHome) {
+  if (!Array.isArray(payload?.input)) return { payload, changed: false };
+  const ids = new Map(); let changed = false;
+  let input = payload.input.map(item => {
+    if (item?.type !== 'message' || item.role !== 'assistant' || !/^msg_[a-f0-9]{32}$/.test(item.id || '') ||
+        item.status && item.status !== 'completed' || !Array.isArray(item.content) || item.content.length !== 2) return item;
+    const [text, image] = item.content;
+    if (text?.type !== 'output_text' || image?.type !== 'input_image') return item;
+    const reference = /^!\[\]\(<[^\r\n]+\/generated_images\/chatgpt-api\/([a-f0-9]{64})\.(png|jpeg|webp)>\)$/.exec(text.text);
+    const data = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(image.image_url || '');
+    if (!reference || !data || reference[2] !== data[1]) return item;
+    const bytes = Buffer.from(data[2], 'base64'), digest = crypto.createHash('sha256').update(bytes).digest('hex');
+    if (digest !== reference[1]) return item;
+    // 3.1.8 did not keep the original result metadata. Its image bytes still
+    // suffice for the documented result schema; use a stable result ID.
+    let result = { type: 'image_generation_call', id: 'ig_' + item.id.slice(4), status: 'completed' };
+    if (codexHome) {
+      try {
+        const saved = JSON.parse(fs.readFileSync(path.resolve(codexHome, 'generated_images', 'chatgpt-api', item.id + '.response.json'), 'utf8'));
+        if (saved.version === 1 && saved.digest === digest && saved.item?.type === 'image_generation_call' &&
+            saved.item.status === 'completed' && typeof saved.item.id === 'string') result = saved.item;
+      } catch {} // A moved/older image retains the self-contained result above.
+    }
+    changed = true; ids.set(item.id, result.id);
+    return { ...result, result: data[2] };
+  });
+  if (!changed) return { payload, changed: false };
+  input = input.map(item => item?.type === 'item_reference' && ids.has(item.id) ? { ...item, id: ids.get(item.id) } : item);
+  return { payload: { ...payload, input }, changed: true };
+}
+
 function imageBytes(result) {
   if (typeof result !== 'string' || !result.length || !/^[A-Za-z0-9+/]+={0,2}$/.test(result)) {
     throw invalid('The completed image result is missing valid base64 image data.');
@@ -47,19 +98,15 @@ export class ResponseImages {
         return entry.message;
       }
       const { bytes, format } = imageBytes(item.result);
-      const file = path.join(this.directory, crypto.createHash('sha256').update(bytes).digest('hex') + '.' + format);
-      const temporary = file + '.' + crypto.randomUUID() + '.tmp';
-      try {
-        fs.mkdirSync(this.directory, { recursive: true });
-        if (fs.existsSync(file)) {
-          if (!fs.lstatSync(file).isFile() || !fs.readFileSync(file).equals(bytes)) throw new Error('Invalid existing image file');
-        } else {
-          fs.writeFileSync(temporary, bytes, { flag: 'wx', mode: 0o600 });
-          fs.renameSync(temporary, file);
-        }
-      } catch {
-        throw Object.assign(new Error('The generated image could not be saved in the client image directory.'), { status: 502, code: 'image_storage_unavailable' });
-      } finally { try { fs.rmSync(temporary, { force: true }); } catch {} }
+      const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+      const file = path.join(this.directory, digest + '.' + format);
+      save(file, bytes);
+      const { result, ...metadata } = item;
+      metadata.id ??= 'ig_' + entry.id.slice(4);
+      metadata.status ??= 'completed';
+      // Keep only the original result's metadata beside the image, not another
+      // conversation or a second copy of the image bytes.
+      save(path.join(this.directory, entry.id + '.response.json'), Buffer.from(JSON.stringify({ version: 1, digest, item: metadata })), true);
       entry.result = item.result;
       entry.message = { type: 'message', id: entry.id, role: 'assistant', status: 'completed', content: [
         { type: 'output_text', text: '![](<' + file.replaceAll('\\', '/').replaceAll('<', '%3C').replaceAll('>', '%3E') + '>)', annotations: [] },
@@ -80,6 +127,15 @@ export class ResponseImages {
     if (entry.done) return [];
     const events = [];
     if (!entry.added) events.push(this.added(entry));
+    if (message.status === 'completed') {
+      const part = message.content[0], fields = { output_index: entry.index, item_id: message.id, content_index: 0 };
+      events.push(
+        { type: 'response.content_part.added', ...fields, part: { ...part, text: '' } },
+        { type: 'response.output_text.delta', ...fields, delta: part.text },
+        { type: 'response.output_text.done', ...fields, text: part.text },
+        { type: 'response.content_part.done', ...fields, part },
+      );
+    }
     events.push({ type: 'response.output_item.done', output_index: entry.index, item: message });
     entry.done = true;
     return events;
