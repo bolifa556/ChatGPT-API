@@ -21,7 +21,7 @@ const listen = server => new Promise(resolve => {
 });
 let gatewayModels = [{ id: 'Other/chat-model' }, { id: '绘图/任意别名', capabilities: { image_generation: true, image_edit: true } }];
 let officialStatus = 200, officialData = nativeResult, gatewayStatus = 200, gatewayData = { created: 1780000001, data: [{ b64_json: png }] };
-let officialAction = '', downloadPort;
+let officialAction = '', gatewayAction = '', downloadPort, downloadType = 'image/png';
 let unavailableFirst = false;
 function peer(which) {
   return http.createServer(async (req, res) => {
@@ -38,6 +38,9 @@ function peer(which) {
     if (which === 'official' && officialAction === 'disconnect') { req.socket.destroy(); return; }
     let status = which === 'official' ? officialStatus : gatewayStatus;
     let data = which === 'official' ? officialData : gatewayData;
+    if (which === 'gateway' && gatewayAction === 'multipart-only' && req.url.endsWith('/edits') && req.headers['content-type'] === 'application/json') {
+      status = 400; data = { error: { message: 'at least one image or image_url is required' } };
+    }
     if (which === 'gateway' && unavailableFirst && body.model === '绘图/任意别名') { status = 404; data = { error: { code: 'model_not_found', message: 'Image alias unavailable' } }; }
     res.writeHead(status, { 'content-type': 'application/json', 'x-native-image-peer': which });
     res.end(JSON.stringify(data));
@@ -74,7 +77,7 @@ const count = which => records.filter(r => r.which === which && r.body).length;
 let gatewayPort, officialPort;
 try {
   downloadPort = await listen(http.createServer((req, res) => {
-    records.push({ which: 'download',headers: req.headers }); res.writeHead(200, { 'content-type': 'image/png' }); res.end(Buffer.from(png, 'base64'));
+    records.push({ which: 'download',headers: req.headers }); res.writeHead(200, { 'content-type': downloadType }); res.end(Buffer.from(png, 'base64'));
   }));
   gatewayPort = await listen(peer('gateway')); officialPort = await listen(peer('official'));
   const mixed = await start('mixed');
@@ -147,13 +150,42 @@ try {
   assert.equal(JSON.parse(result.raw).data[0].revised_prompt, 'upstream revision'); assert.equal(records.at(-1).headers.authorization, undefined);
   assert.equal(records.at(-1).headers['chatgpt-account-id'], undefined); assert.equal(result.headers.get('content-length'), null);
   checks.push('URL-only API image results convert to native base64; image download receives no credentials and preserves upstream content');
+  downloadType = 'application/octet-stream';
+  result = await send(gatewayOnly); assert.equal(result.status, 200); assert.equal(JSON.parse(result.raw).data[0].b64_json, png);
+  downloadType = 'image/png';
+  checks.push('Image URLs served as generic binary data retain their original raster bytes');
   gatewayData = { created: 1780000001, data: [{ b64_json: png }] };
 
   const multipart = await start('gateway', { settings: { IMAGE_EDIT_FORMAT: 'multipart' } });
-  result = await send(multipart, 'edits', { images: [{ image_url: dataUrl }, { image_url: dataUrl }], background: 'transparent', quality: 'high', size: '1024x1024' });
+  result = await send(multipart, 'edits', { images: [{ image_url: dataUrl }, { image_url: dataUrl }], mask: { image_url: dataUrl }, background: 'transparent', quality: 'high', size: '1024x1024' });
   assert.equal(result.status, 200); assert.equal(records.at(-1).body['image[]'].bytes, png); assert.equal(records.at(-1).body.background, 'transparent');
   assert.equal(records.at(-1).body.quality, 'high'); assert.equal(records.at(-1).body.prompt, nativeBody.prompt);
+  assert.equal(records.at(-1).body.mask.bytes, png); assert.equal(records.at(-1).body.mask.type, 'image/png');
   checks.push('Legacy multipart edit APIs receive original image bytes and explicit size, quality, transparency and prompt');
+  gatewayAction = 'multipart-only';
+  const beforeEdit = records.length;
+  result = await send(gatewayOnly, 'edits', { images: [{ image_url: dataUrl }, { image_url: dataUrl }], mask: { image_url: dataUrl }, background: 'transparent', quality: 'high', size: '1024x1024' });
+  assert.equal(result.status, 200);
+  const editRequests = records.slice(beforeEdit).filter(record => record.which === 'gateway');
+  assert.equal(editRequests.length, 2); assert.equal(editRequests[0].headers['content-type'], 'application/json');
+  assert.match(editRequests[1].headers['content-type'], /^multipart\/form-data/);
+  assert.equal(editRequests[1].body['image[]'].bytes, png); assert.equal(editRequests[1].body.prompt, nativeBody.prompt);
+  assert.equal(editRequests[1].body.model, editRequests[0].body.model);
+  assert.equal(editRequests[1].body.background, 'transparent'); assert.equal(editRequests[1].body.quality, 'high');
+  assert.equal(editRequests[1].body.mask.bytes, png);
+  gatewayAction = '';
+  for (const [status, data] of [
+    [400, { error: { message: 'at least one image or image_url is required', code: 'content_policy_violation' } }],
+    [400, { error: { message: 'Invalid image dimensions', param: 'image', code: 'invalid_value' } }],
+    [400, { error: { message: 'at least one image or image_url is required' }, data: [{ b64_json: png }] }],
+    [500, { error: { message: 'at least one image or image_url is required' } }],
+  ]) {
+    gatewayStatus = status; gatewayData = data; const before = count('gateway');
+    result = await send(gatewayOnly, 'edits', { images: [{ image_url: dataUrl }] });
+    assert.equal(result.status, status); assert.equal(result.raw, JSON.stringify(data)); assert.equal(count('gateway'), before + 1);
+  }
+  gatewayStatus = 200; gatewayData = { created: 1780000001, data: [{ b64_json: png }] };
+  checks.push('A definitive JSON image-field rejection negotiates multipart once on the same API/model with identical inputs; accepted output, safety, invalid image data and server failures never trigger this conversion');
   result = await send(mixed, 'edits', { images: [{ file_id: 'file-native-original' }] });
   assert.equal(result.status, 200); assert.deepEqual(records.at(-1).body.images, [{ image_url: 'http://127.0.0.1:' + downloadPort + '/image.png' }]);
   assert(records.some(r => r.path === '/backend-api/files/download/file-native-original' && r.headers.authorization === 'Bearer mock-native-oauth'));

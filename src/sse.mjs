@@ -11,23 +11,39 @@ export function decodedStream(body, encoding = '') {
   decoder.once('close', () => { if (!body.destroyed) body.destroy(); });
   return body.pipe(decoder);
 }
-export async function* ssePackets(stream) {
-  const decoder = new TextDecoder(); let buffer = '';
+export async function* ssePackets(stream, { maxEventBytes = MAX_EVENT_BYTES } = {}) {
+  const decoder = new TextDecoder();
+  let parts = [], bytes = 0, carriage = '', newline = '';
   function packet(raw) {
     const data = raw.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
     return data && data !== '[DONE]' ? { raw, data: JSON.parse(data) } : { raw, done: data === '[DONE]' };
   }
-  for await (const chunk of stream) {
-    buffer = (buffer + decoder.decode(chunk, { stream: true })).replace(/\r\n/g, '\n');
-    let at;
-    while ((at = buffer.indexOf('\n\n')) >= 0) {
-      const raw = buffer.slice(0, at); buffer = buffer.slice(at + 2);
-      if (Buffer.byteLength(raw) > MAX_EVENT_BYTES) throw new Error('Upstream event exceeds limit');
-      yield packet(raw);
-    }
-    if (Buffer.byteLength(buffer) > MAX_EVENT_BYTES) throw new Error('Upstream event exceeds limit');
+  function append(text) {
+    bytes += Buffer.byteLength(text);
+    if (bytes > maxEventBytes) throw new Error('Upstream event exceeds limit');
+    if (text) parts.push(text);
   }
-  buffer += decoder.decode();
-  if (buffer.trim()) yield packet(buffer.replace(/\r\n/g, '\n'));
+  function* consume(text, final = false) {
+    text = carriage + text; carriage = '';
+    if (!final && text.endsWith('\r')) { carriage = '\r'; text = text.slice(0, -1); }
+    text = newline + text.replace(/\r\n/g, '\n'); newline = '';
+    let start = 0, at;
+    while ((at = text.indexOf('\n\n', start)) >= 0) {
+      append(text.slice(start, at));
+      const raw = parts.join(''); parts = []; bytes = 0;
+      yield packet(raw); start = at + 2;
+    }
+    let tail = text.slice(start);
+    if (!final && tail.endsWith('\n')) { newline = '\n'; tail = tail.slice(0, -1); }
+    append(tail);
+  }
+  for await (const chunk of stream) {
+    // Keep large base64 events in chunks; repeatedly scanning/copying the whole
+    // growing event makes a valid image take quadratic time to parse.
+    yield* consume(decoder.decode(chunk, { stream: true }));
+  }
+  yield* consume(decoder.decode(), true);
+  const raw = parts.join('');
+  if (raw.trim()) yield packet(raw);
 }
 export const encodeSse = event => 'event: ' + event.type + '\ndata: ' + JSON.stringify(event) + '\n\n';

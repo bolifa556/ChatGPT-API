@@ -326,7 +326,9 @@ async function* convertedEvents(stream, adapted, images) {
   const events = adapted.adapter ? new NonGptEvents(adapted.adapter) : null;
   const chat = adapted.chat ? new ChatEvents(adapted.payload.model) : null;
   let terminal = false;
-  for await (const packet of ssePackets(stream)) {
+  // Responses events can contain base64 images. Match the buffered Responses
+  // body limit; Chat events and accumulated tool arguments keep their own limit.
+  for await (const packet of ssePackets(stream, { maxEventBytes: chat ? undefined : 64 * 1024 * 1024 })) {
     if (packet.done && chat) break;
     if (!packet.data) continue;
     for (const event of chat ? chat.convert(packet.data) : [packet.data]) {

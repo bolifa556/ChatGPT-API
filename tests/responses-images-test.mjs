@@ -250,6 +250,27 @@ try {
   const resumed = new WebSocket(base.replace('http:', 'ws:') + '/v1/responses'); await once(resumed, 'open');
   assert.equal((await wsTurn(resumed, 'gpt-native', null, delivered)).at(-1).type, 'response.completed'); resumed.close();
   checks.push('Already-saved 3.1.8 history continues over HTTP and a reconnected official WebSocket without editing or replacing the on-disk conversation');
+  // A valid uncompressed PNG can exceed the 16 MiB text-event limit after
+  // base64 encoding. Exercise the actual compressed SSE router, not just the converter.
+  const chunk = (name, bytes) => {
+    const type = Buffer.from(name), prefix = Buffer.alloc(4), crc = Buffer.alloc(4);
+    prefix.writeUInt32BE(bytes.length); crc.writeUInt32BE(zlib.crc32(Buffer.concat([type, bytes])));
+    return Buffer.concat([prefix, type, bytes, crc]);
+  };
+  const header = Buffer.alloc(13); header.writeUInt32BE(2048); header.writeUInt32BE(1600, 4); header[8] = 8; header[9] = 6;
+  const largePng = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header),
+    chunk('IDAT', zlib.deflateSync(Buffer.alloc(1600 * (1 + 2048 * 4)), { level: 0 })), chunk('IEND', Buffer.alloc(0))]);
+  const largeResult = largePng.toString('base64'); assert(largeResult.length > 16 * 1024 * 1024);
+  imageOutput = [image('ig_large_fixture', largeResult)];
+  const largeStream = await send('GPT/gpt-test', true); let largeDelivered, largeTerminal;
+  for await (const packet of ssePackets(largeStream.body, { maxEventBytes: 64 * 1024 * 1024 })) {
+    if (packet.data?.type === 'response.output_item.done') largeDelivered = packet.data.item;
+    if (packet.data) largeTerminal = packet.data.type;
+  }
+  assert.equal(largeTerminal, 'response.completed');
+  assert(fs.readFileSync(savedPath(largeDelivered)).equals(largePng));
+  assert.equal(restoreHostedImageHistory({ input: [largeDelivered] }, home).payload.input[0].result, largeResult);
+  checks.push('A valid PNG larger than a 16 MiB base64 event survives compressed Responses streaming, storage and history replay without truncation');
   imageOutput = [image('ig_bad', '')];
   const bad = await send('GPT/gpt-test'); assert.equal(bad.status, 502); assert.equal((await bad.json()).error.code, 'invalid_upstream_image_response');
   const badStream = await send('GPT/gpt-test', true), errors = [];

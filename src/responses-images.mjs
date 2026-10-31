@@ -56,15 +56,19 @@ export function restoreHostedImageHistory(payload, codexHome) {
   return { payload: { ...payload, input }, changed: true };
 }
 
+export function imageFormat(bytes) {
+  return bytes.length >= 24 && bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')) ? 'png'
+    : bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff ? 'jpeg'
+      : bytes.length >= 16 && bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP' ? 'webp' : null;
+}
+
 function imageBytes(result) {
   if (typeof result !== 'string' || !result.length || !/^[A-Za-z0-9+/]+={0,2}$/.test(result)) {
     throw invalid('The completed image result is missing valid base64 image data.');
   }
   const bytes = Buffer.from(result, 'base64');
   if (bytes.toString('base64').replace(/=+$/, '') !== result.replace(/=+$/, '')) throw invalid('The image result contains invalid base64 data.');
-  const format = bytes.length >= 24 && bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')) ? 'png'
-    : bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff ? 'jpeg'
-      : bytes.length >= 16 && bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP' ? 'webp' : null;
+  const format = imageFormat(bytes);
   if (!format) throw invalid('The image result is not a supported PNG, JPEG or WebP image.');
   return { bytes, format };
 }

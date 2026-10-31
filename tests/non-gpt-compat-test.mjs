@@ -41,4 +41,10 @@ assert.equal(normalizeGptHistory(trigger).payload,trigger);
 const text='data: '+JSON.stringify({type:'response.output_text.delta',delta:'中文'})+'\r\n\r\ndata: [DONE]';
 const packets=[];for await(const p of ssePackets(Readable.from([...Buffer.from(text)].map(x=>Buffer.from([x])))))packets.push(p);
 assert.equal(packets[0].data.delta,'中文');assert(packets[1].done);
+for (const tail of ['', '\n', '\r\n', '\n\n', '\r\n\r\n']) {
+  const wire = 'data: {"type":"small"}' + tail, decoded = [];
+  for await (const p of ssePackets(Readable.from([...Buffer.from(wire)].map(x=>Buffer.from([x]))), { maxEventBytes: 64 })) decoded.push(p);
+  assert.equal(decoded.length, 1); assert.equal(decoded[0].data.type, 'small');
+}
+await assert.rejects(async()=>{for await(const p of ssePackets(Readable.from([Buffer.from('data: '+JSON.stringify({value:'X'.repeat(50)}))]),{maxEventBytes:32})){}},/Upstream event exceeds limit/);
 console.log(JSON.stringify({passed:true,checks:['immutable request; future model policy','custom/namespace/carrier/tool-choice conversion','GPT thinking filtered without changing effort','stream IDs and final output agree','foreign reasoning remains distinguishable after ID repair','malformed tool input not executed or rewritten','opaque compaction fails explicitly','split Unicode/CRLF/EOF SSE']},null,2));

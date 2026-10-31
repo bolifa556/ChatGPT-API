@@ -183,3 +183,27 @@ jobs:
           gh release upload "$tag" "$RUNNER_TEMP/release-assets/"* --clobber
           gh release edit "$tag" --draft=false --latest --title "ChatGPT API ${tag#v}" --notes-file "$RUNNER_TEMP/release-notes.md"
           gh release view "$tag" --json url,isDraft,assets
+      - name: Remove the explicitly superseded release after publication
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          from pathlib import Path
+          manifest = Path('.github/release-replacement.json')
+          if not manifest.is_file():
+              raise SystemExit(0)
+          replacement = json.loads(manifest.read_text(encoding='utf-8'))
+          retired = replacement.get('retire')
+          if replacement.get('tag') != os.environ['GITHUB_REF_NAME'] or not retired:
+              raise SystemExit(0)
+          tag = retired['tag']
+          assert re.fullmatch(r'v\d+\.\d+\.\d+', tag) and tag != replacement['tag']
+          repository = os.environ['GH_REPO']
+          current = json.loads(subprocess.check_output(['gh', 'api', f'repos/{repository}/releases/tags/{replacement["tag"]}']))
+          assert not current['draft'] and len(current['assets']) == 4
+          assert all(asset['state'] == 'uploaded' and asset['size'] > 0 for asset in current['assets'])
+          existing = json.loads(subprocess.check_output(['gh', 'api', f'repos/{repository}/releases/tags/{tag}']))
+          assert existing['id'] == retired['releaseId'] and existing['tag_name'] == tag
+          assert sorted(asset['id'] for asset in existing['assets']) == sorted(retired['assetIds'])
+          assert not existing.get('immutable', False)
+          subprocess.run(['gh', 'release', 'delete', tag, '--yes', '--cleanup-tag'], check=True)
+          PY

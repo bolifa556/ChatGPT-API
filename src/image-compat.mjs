@@ -1,4 +1,5 @@
 import { requestWithAbort as request, releaseResponseBody, RESPONSE_TIMEOUTS, writeChunk } from './transport.mjs';
+import { imageFormat } from './responses-images.mjs';
 
 const fail = (message, code, status = 400) => Object.assign(new Error(message), { code, status });
 const ok = status => status >= 200 && status < 300;
@@ -70,6 +71,15 @@ export function imageModelUnavailable(status, data) {
   return [400,403].includes(status) && (e.param == null || e.param === 'model') &&
     /(?:model|image generation|image editing|images endpoint).*(?:not found|not available|unavailable|not supported|unsupported|no access|access denied)|(?:unknown|unsupported) model/i.test(message);
 }
+function imageEditNeedsMultipart(result) {
+  if (result.status !== 400 || result.data?.data?.length) return false;
+  const error = result.data?.error || {}, code = error.code || error.type;
+  if (code && !['invalid_request_error', 'missing_required_parameter', 'missing_required_field'].includes(code)) return false;
+  if (error.param && !['image', 'image[]', 'image_url'].includes(error.param)) return false;
+  // Older Images endpoints reject the native JSON `images` field before
+  // dispatch. Only this definitive format rejection permits one file upload.
+  return /^(?:at least one image(?: or image_url)? is required|missing required parameter: ["']?image["']?\.?)$/i.test(error.message || '');
+}
 function responseHeaders(headers, changed = false) {
   const result = { ...headers };
   for (const name of ['connection','transfer-encoding','keep-alive']) delete result[name];
@@ -97,9 +107,15 @@ async function imageBytes(reference, dispatcher, signal) {
       upstream.body.destroy(); url = new URL(upstream.headers.location, url); continue;
     }
     if (!ok(upstream.statusCode)) { upstream.body.destroy(); throw fail('Image download failed (HTTP ' + upstream.statusCode + ').', 'image_download_failed', 502); }
-    const type = String(upstream.headers['content-type'] || '').split(';')[0];
-    if (!type.startsWith('image/')) { upstream.body.destroy(); throw fail('Image URL did not return an image.', 'invalid_upstream_image_response', 502); }
-    return { bytes: await boundedBody(upstream.body, 32 * 1024 * 1024), type };
+    let type = String(upstream.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    if (type && type !== 'application/octet-stream' && !type.startsWith('image/')) { upstream.body.destroy(); throw fail('Image URL did not return an image.', 'invalid_upstream_image_response', 502); }
+    const bytes = await boundedBody(upstream.body, 32 * 1024 * 1024);
+    if (!type.startsWith('image/')) {
+      const format = imageFormat(bytes);
+      if (!format) throw fail('Image URL did not return a supported raster image.', 'invalid_upstream_image_response', 502);
+      type = 'image/' + format;
+    }
+    return { bytes, type };
   }
   throw fail('Image URL redirected too many times.', 'image_download_failed', 502);
 }
@@ -115,6 +131,7 @@ async function gatewayBody(original, model, operation, env, dispatcher, signal, 
       const image = payload.images[i];
       if (image.file_id && !image.image_url) payload.images[i] = { image_url: await resolveFile(image.file_id) };
     }
+    if (payload.mask?.file_id && !payload.mask.image_url) payload.mask = { image_url: await resolveFile(payload.mask.file_id) };
   }
   const format = env.IMAGE_EDIT_FORMAT || 'json';
   if (operation !== 'edits' || format === 'json') return { body: Buffer.from(JSON.stringify(payload)), contentType: 'application/json' };
@@ -122,13 +139,17 @@ async function gatewayBody(original, model, operation, env, dispatcher, signal, 
   if (!Array.isArray(payload.images) || !payload.images.length) throw fail('Image editing requires image references.', 'invalid_image_request');
   const form = new FormData();
   for (const [key,value] of Object.entries(payload)) {
-    if (key === 'images') continue;
+    if (key === 'images' || key === 'mask') continue;
     if (value != null) form.append(key, typeof value === 'object' ? JSON.stringify(value) : String(value));
   }
   for (const [i,image] of payload.images.entries()) {
     const { bytes,type } = await imageBytes(image.image_url, dispatcher, signal);
     const extension = type === 'image/jpeg' ? 'jpg' : type.split('/')[1];
     form.append(payload.images.length === 1 ? 'image' : 'image[]', new Blob([bytes], { type }), 'image-' + i + '.' + extension);
+  }
+  if (payload.mask) {
+    const { bytes, type } = await imageBytes(payload.mask.image_url, dispatcher, signal);
+    form.append('mask', new Blob([bytes], { type }), 'mask.png');
   }
   const encoded = new Response(form);
   return { body: Buffer.from(await encoded.arrayBuffer()), contentType: encoded.headers.get('content-type') };
@@ -193,8 +214,14 @@ export async function forwardImages({ req,res,url,body,operation,env,hasLogin,al
   let last;
   for (const model of candidates) {
     const gateway = resolveGateway?.(model);
-    const outgoing = await gatewayBody(original, gateway ? { ...model, id: gateway.model } : model, operation, gateway?.env || env, imageDispatcher, signal, resolveFile);
-    const result = await forward('gateway', model.id, outgoing, gateway);
+    const selectedModel = gateway ? { ...model, id: gateway.model } : model, settings = gateway?.env || env;
+    const outgoing = await gatewayBody(original, selectedModel, operation, settings, imageDispatcher, signal, resolveFile);
+    let result = await forward('gateway', model.id, outgoing, gateway);
+    if (operation === 'edits' && outgoing.contentType === 'application/json' && original.images?.length && imageEditNeedsMultipart(result)) {
+      const multipart = await gatewayBody(original, selectedModel, operation, { ...settings, IMAGE_EDIT_FORMAT: 'multipart' }, imageDispatcher, signal, resolveFile);
+      log('gateway images operation=edits model=' + model.id + ' format=multipart after JSON image-field rejection');
+      result = await forward('gateway', model.id, multipart, gateway);
+    }
     if (result.completed) return;
     last = { ...result,model: model.id };
     if (!imageModelUnavailable(result.status, result.data)) break;
