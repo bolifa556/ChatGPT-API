@@ -74,7 +74,7 @@ async function locked(ctx, action, name = 'provider-lock') {
 }
 function buildId(ctx) {
   const hash = crypto.createHash('sha256');
-  for (const file of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs','model-context.mjs','transport.mjs','response-state.mjs','settings.mjs','gateway-sources.mjs']) hash.update(fs.readFileSync(path.join(ctx.root, 'src', file)));
+  for (const file of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs','responses-images.mjs','model-context.mjs','transport.mjs','response-state.mjs','settings.mjs','gateway-sources.mjs']) hash.update(fs.readFileSync(path.join(ctx.root, 'src', file)));
   for (const name of ['model-contexts.json', 'model-template.json']) {
     if (fs.existsSync(path.join(ctx.root, 'assets', name))) hash.update(fs.readFileSync(path.join(ctx.root, 'assets', name)));
   }

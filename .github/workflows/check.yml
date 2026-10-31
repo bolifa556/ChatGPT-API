@@ -51,6 +51,7 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
       - run: python3 scripts/ci-run.py node tests/macos-platform-test.mjs
+      - run: node tests/responses-images-test.mjs
       - run: python3 scripts/ci-run.py node tests/install-deferred-test.mjs
       - run: python3 scripts/ci-run.py node tests/macos-provider-test.mjs
       - run: python3 scripts/ci-run.py node tests/macos-dmg-gui-test.mjs

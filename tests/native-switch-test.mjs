@@ -32,7 +32,7 @@ const wav=Buffer.alloc(1644);wav.write('RIFF');wav.writeUInt32LE(1636,4);wav.wri
 const audio='data:audio/wav;base64,'+wav.toString('base64');
 for (const directory of [home,cwd,path.join(fixture,'src'),path.join(fixture,'assets'),path.join(fixture,'data/cache'),path.join(fixture,'data/state')]) fs.mkdirSync(directory,{recursive:true});
 for (const name of ['model-template.json','reasoning-levels.json','model-contexts.json']) fs.copyFileSync(path.join(root,'assets',name),path.join(fixture,'assets',name));
-for(const name of ['Common.ps1','Package-Paths.ps1','Launcher-State.ps1','Router-Control.ps1','shim.mjs','transport.mjs','response-state.mjs','settings.mjs','gateway-sources.mjs','history-compat.mjs','non-gpt-compat.mjs','chat-compat.mjs','sse.mjs','image-compat.mjs','model-context.mjs','gateway-recovery.mjs'])fs.copyFileSync(path.join(root,'src',name),path.join(fixture,'src',name));
+for(const name of ['Common.ps1','Package-Paths.ps1','Launcher-State.ps1','Router-Control.ps1','shim.mjs','transport.mjs','response-state.mjs','settings.mjs','gateway-sources.mjs','history-compat.mjs','non-gpt-compat.mjs','chat-compat.mjs','sse.mjs','image-compat.mjs','responses-images.mjs','model-context.mjs','gateway-recovery.mjs'])fs.copyFileSync(path.join(root,'src',name),path.join(fixture,'src',name));
 fs.copyFileSync(path.join(root,'Read-ApiKey.ps1'),path.join(fixture,'Read-ApiKey.ps1'));
 const official = { ...JSON.parse(fs.readFileSync(path.join(root,'assets/model-template.json'),'utf8')).models[0], slug:'gpt-6-astra', supported_in_api:true };
 if(contextProbe){official.slug='gpt-6.1-sol';delete official.max_context_window;}

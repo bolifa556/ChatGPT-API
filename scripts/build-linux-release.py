@@ -43,7 +43,7 @@ def build(arch, output):
         payload.mkdir(parents=True)
         files = ['package.json', 'package-lock.json', 'linux/provider.mjs', 'linux/settings.mjs', 'linux/chatgpt-api','linux/console',
                  'assets/model-template.json', 'assets/reasoning-levels.json', 'assets/model-contexts.json','assets/console/index.html','assets/console/console.css','assets/console/console.js','assets/console/icon.svg',
-                 'src/shim.mjs','src/transport.mjs','src/response-state.mjs','src/settings.mjs','src/gateway-sources.mjs','src/console.mjs', 'src/chat-compat.mjs', 'src/history-compat.mjs', 'src/non-gpt-compat.mjs', 'src/sse.mjs', 'src/image-compat.mjs', 'src/model-context.mjs', 'src/gateway-recovery.mjs']
+                 'src/shim.mjs','src/transport.mjs','src/response-state.mjs','src/settings.mjs','src/gateway-sources.mjs','src/console.mjs', 'src/chat-compat.mjs', 'src/history-compat.mjs', 'src/non-gpt-compat.mjs', 'src/sse.mjs', 'src/image-compat.mjs','src/responses-images.mjs', 'src/model-context.mjs', 'src/gateway-recovery.mjs']
         locked = json.loads((ROOT / 'package-lock.json').read_text(encoding='utf-8'))['packages']
         for relative, metadata in locked.items():
             if not relative:

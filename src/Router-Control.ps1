@@ -1,6 +1,6 @@
 ﻿function Get-RouterBuildId([string]$packageDir) {
     $bytes = New-Object 'System.Collections.Generic.List[byte]'
-    foreach($name in @('shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs','model-context.mjs','transport.mjs','response-state.mjs','settings.mjs','gateway-sources.mjs')) {
+    foreach($name in @('shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs','responses-images.mjs','model-context.mjs','transport.mjs','response-state.mjs','settings.mjs','gateway-sources.mjs')) {
         $bytes.AddRange([IO.File]::ReadAllBytes((Join-Path $packageDir ('src\'+$name))))
     }
     foreach($asset in @('model-contexts.json','model-template.json')) {

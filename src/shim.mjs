@@ -14,6 +14,7 @@ import { NonGptAdapter, NonGptEvents, validateNonGptCompaction } from './non-gpt
 import { usesChat, chatRequest, chatResponse, ChatEvents } from './chat-compat.mjs';
 import { decodedStream, ssePackets, encodeSse } from './sse.mjs';
 import { forwardImages, imageOnlyModel, imageCapabilities } from './image-compat.mjs';
+import { ResponseImages } from './responses-images.mjs';
 import { contextFields, rememberContexts, contextKey, applyContext } from './model-context.mjs';
 import { officialDispatcherFor, readEncodedBody, outgoingBody, writeChunk, relayClose,
   requestWithAbort as request, protocolError, releaseResponseBody, RESPONSE_TIMEOUTS, MAX_REQUEST_BYTES } from './transport.mjs';
@@ -56,7 +57,7 @@ const gatewayDispatcher = new Agent(transport === 'ssh' ? { connect: { hostname:
 const officialDispatcher = officialDispatcherFor(officialProxy);
 const sourceId = crypto.createHash('sha256').update(gatewayBase + '\n' + (env.API_KEY || '')).digest('hex');
 const buildHash = crypto.createHash('sha256');
-for (const name of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs','model-context.mjs','transport.mjs','response-state.mjs','settings.mjs','gateway-sources.mjs']) buildHash.update(fs.readFileSync(path.join(dir, name)));
+for (const name of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs','responses-images.mjs','model-context.mjs','transport.mjs','response-state.mjs','settings.mjs','gateway-sources.mjs']) buildHash.update(fs.readFileSync(path.join(dir, name)));
 for (const name of ['model-contexts.json', 'model-template.json']) {
   if (fs.existsSync(path.join(root, 'assets', name))) buildHash.update(fs.readFileSync(path.join(root, 'assets', name)));
 }
@@ -320,7 +321,7 @@ function parseRequest(text) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw Object.assign(new Error('The request body must be a JSON object.'), { status: 400, code: 'invalid_json_request' });
   return value;
 }
-async function* convertedEvents(stream, adapted) {
+async function* convertedEvents(stream, adapted, images) {
   const events = adapted.adapter ? new NonGptEvents(adapted.adapter) : null;
   const chat = adapted.chat ? new ChatEvents(adapted.payload.model) : null;
   let terminal = false;
@@ -329,14 +330,14 @@ async function* convertedEvents(stream, adapted) {
     if (!packet.data) continue;
     for (const event of chat ? chat.convert(packet.data) : [packet.data]) {
       if (['response.completed','response.incomplete','response.failed','error'].includes(event.type)) terminal = true;
-      for (const converted of events ? events.convert(event) : [event]) yield converted;
+      for (const converted of events ? events.convert(event) : [event]) yield* images ? images.convert(converted) : [converted];
     }
     // A Responses terminal event is complete even if the peer keeps HTTP open.
     // Chat completion is emitted by finish() after its usage/[DONE] packets.
     if (terminal) break;
   }
   if (chat) for (const event of chat.finish()) {
-    for (const converted of events.convert(event)) yield converted;
+    for (const converted of events.convert(event)) yield* images ? images.convert(converted) : [converted];
   }
   if (events) events.finish();
   else if (!terminal) throw Object.assign(new Error('Upstream stream ended before a terminal response event.'), { status: 502, code: 'incomplete_upstream_response' });
@@ -448,14 +449,15 @@ async function handleHttp(req, res) {
     log('request headers ' + JSON.stringify({ requestId, status: upstreamStatus, upstreamBytes,
       encoding: outgoingBodyData.encoding || 'identity', ms: Date.now() - started }));
     const outgoing = { ...upstream.headers }; for (const name of ['connection','transfer-encoding','keep-alive']) delete outgoing[name];
-    if ((adapted.adapter || gateway && parsed.model !== gateway.model) && upstream.statusCode >= 200 && upstream.statusCode < 300) {
+    const images = gateway && /^\/(?:v1\/)?responses$/.test(url.pathname) ? new ResponseImages(codexHome) : null;
+    if ((images || adapted.adapter || gateway && parsed.model !== gateway.model) && upstream.statusCode >= 200 && upstream.statusCode < 300) {
       const stream = decodedStream(upstream.body, upstream.headers['content-encoding']);
       delete outgoing['content-length']; delete outgoing['content-encoding'];
       outgoing['x-chatgpt-api-adapted'] = 'true';
       if (String(upstream.headers['content-type']).includes('text/event-stream')) {
         res.writeHead(upstream.statusCode, outgoing);
         try {
-          for await (const event of convertedEvents(stream, adapted)) {
+          for await (const event of convertedEvents(stream, adapted, images)) {
             if (res.destroyed) break;
             firstByteMs ??= Date.now() - started;
             await writeChunk(res, encodeSse(clientEvent(event, parsed.model, gateway)));
@@ -469,7 +471,8 @@ async function handleHttp(req, res) {
         for await (const chunk of stream) { size += chunk.length; if (size > 64 * 1024 * 1024) throw new Error('Upstream response exceeds limit'); chunks.push(chunk); }
         const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         const converted = adapted.chat ? chatResponse(data, gateway.model) : data;
-        const response = adapted.adapter ? adapted.adapter.response(converted) : converted;
+        const native = adapted.adapter ? adapted.adapter.response(converted) : converted;
+        const response = images ? images.response(native) : native;
         if (gateway && gateway.model !== parsed.model && response.model) response.model = parsed.model;
         res.writeHead(upstream.statusCode, outgoing);
         firstByteMs ??= Date.now() - started;
@@ -685,7 +688,7 @@ if (process.argv.includes('--prepare')) {
             throw Object.assign(new Error(message), { status: up.statusCode, upstreamError });
           }
           if (!String(up.headers['content-type']).includes('text/event-stream')) throw Object.assign(new Error('Gateway did not return an SSE response'), { status: 502, code: 'invalid_upstream_content_type' });
-          for await (const original of convertedEvents(decodedStream(up.body, up.headers['content-encoding']), adapted)) {
+          for await (const original of convertedEvents(decodedStream(up.body, up.headers['content-encoding']), adapted, new ResponseImages(codexHome))) {
               const response = clientEvent(original, body.model, gateway);
               if (pending.interrupted) break;
               pending.output.observe(response);
