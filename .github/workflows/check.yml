@@ -37,10 +37,10 @@ jobs:
         run: |
           version=$(node -p "require('./package.json').version")
           bundle="ChatGPT-API-Provider-$version-linux-x64"
-          python3 tests/linux-package-test.py "release/$version/$bundle.tar.gz"
+          python3 scripts/ci-run.py python3 tests/linux-package-test.py "release/$version/$bundle.tar.gz"
           mkdir -p "$RUNNER_TEMP/linux-release"
           tar -xzf "release/$version/$bundle.tar.gz" -C "$RUNNER_TEMP/linux-release"
-          "$RUNNER_TEMP/linux-release/$bundle/payload/runtime/node" tests/linux-provider-test.mjs "$RUNNER_TEMP/linux-release/$bundle"
+          python3 scripts/ci-run.py "$RUNNER_TEMP/linux-release/$bundle/payload/runtime/node" tests/linux-provider-test.mjs "$RUNNER_TEMP/linux-release/$bundle"
   macos:
     runs-on: macos-latest
     steps:

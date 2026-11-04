@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   windows:
@@ -75,10 +75,10 @@ jobs:
       - name: Verify Linux packages and x64 installation
         run: |
           version=$(node -p "require('./package.json').version")
-          python3 tests/linux-package-test.py "release/$version/ChatGPT-API-Provider-$version-linux-x64.tar.gz" "release/$version/ChatGPT-API-Provider-$version-linux-arm64.tar.gz"
+          python3 scripts/ci-run.py python3 tests/linux-package-test.py "release/$version/ChatGPT-API-Provider-$version-linux-x64.tar.gz" "release/$version/ChatGPT-API-Provider-$version-linux-arm64.tar.gz"
           mkdir -p "$RUNNER_TEMP/linux-release"
           tar -xzf "release/$version/ChatGPT-API-Provider-$version-linux-x64.tar.gz" -C "$RUNNER_TEMP/linux-release"
-          "$RUNNER_TEMP/linux-release/ChatGPT-API-Provider-$version-linux-x64/payload/runtime/node" tests/linux-provider-test.mjs "$RUNNER_TEMP/linux-release/ChatGPT-API-Provider-$version-linux-x64"
+          python3 scripts/ci-run.py "$RUNNER_TEMP/linux-release/ChatGPT-API-Provider-$version-linux-x64/payload/runtime/node" tests/linux-provider-test.mjs "$RUNNER_TEMP/linux-release/ChatGPT-API-Provider-$version-linux-x64"
       - uses: actions/upload-artifact@v4
         with:
           name: release-linux
