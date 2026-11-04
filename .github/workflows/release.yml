@@ -105,6 +105,9 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: python3 scripts/ci-run.py node tests/macos-platform-test.mjs
       - run: node tests/responses-images-test.mjs
+      - run: node tests/configuration-update-test.mjs
+      - run: node tests/feature-matrix-test.mjs
+      - run: node tests/transport-test.mjs
       - run: python3 scripts/ci-run.py node tests/install-deferred-test.mjs
       - run: python3 scripts/ci-run.py node tests/macos-provider-test.mjs
       - run: python3 scripts/ci-run.py node tests/macos-dmg-gui-test.mjs

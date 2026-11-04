@@ -72,6 +72,16 @@ for (const model of models) {
   }
 }
 const nativeTypes = ['agent_message','local_shell_call','tool_search_call','tool_search_output','web_search_call','image_generation_call','compaction','configuration_update','compaction_trigger','context_compaction'];
+{
+  const mcp = label => ({ type: 'mcp', server_label: label, server_url: 'https://' + label + '.invalid/mcp' });
+  const named = { type: 'mcp', server_label: 'first', name: 'exec' };
+  const body = { model: '词元计划/model', tools: [...carriers, mcp('first'), mcp('second')], input: [], tool_choice: named };
+  assert.deepEqual(new NonGptAdapter(body).request().tool_choice, named);
+  const selected = chatRequest(new NonGptAdapter({ ...body, tool_choice: { type: 'allowed_tools', mode: 'auto', tools: [{ type: 'mcp', server_label: 'first' }] } }).request());
+  assert.deepEqual(selected.tools, [mcp('first')]);
+  assert.throws(() => chatRequest({ ...body, tool_choice: { type: 'allowed_tools', mode: 'auto', tools: [named] } }), error => error.code === 'unsupported_chat_format');
+  checks.push({ feature: 'MCP choices keep server identity and never alias a named remote tool to a same-named local custom tool; unrepresentable restrictions fail instead of widening tool access', passed: true });
+}
 for (const type of nativeTypes) {
   const body = { model: 'gpt-6-astra', input: [{ type, id: type === 'web_search_call' ? 'ws_native' : 'opaque_native', payload: { untouched: true } }, ...tools], tools: [{ type: 'web_search' }] };
   assert.equal(normalizeOfficialHistory(body).payload, body);

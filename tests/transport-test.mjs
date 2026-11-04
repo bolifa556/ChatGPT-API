@@ -54,12 +54,16 @@ async function turn(ws, body) { const result = events(ws); ws.send(JSON.stringif
 try {
   const makeHttp = kind => http.createServer(async (req, res) => {
     try {
-      if (req.url.includes('/models')) { res.end(JSON.stringify(kind === 'official' ? { models: [model] } : { data: [{ id: 'GPT/gpt-6-sol' }, { id: 'Other/test-model' }] })); return; }
+      if (req.url.includes('/models')) { res.end(JSON.stringify(kind === 'official' ? { models: [model] } : { data: [{ id: 'GPT/gpt-6-sol' }, { id: 'Other/test-model' }, { id: '阿里云订阅/config-fixture' }] })); return; }
       const chunks = []; for await (const chunk of req) chunks.push(chunk);
       const raw = Buffer.concat(chunks), encoding = req.headers['content-encoding'];
       const decoder = { gzip: zlib.gunzipSync, deflate: zlib.inflateSync, br: zlib.brotliDecompressSync, zstd: zlib.zstdDecompressSync }[encoding];
       const decoded = decoder ? decoder(raw) : raw, body = JSON.parse(decoded), response = output(body.model);
-      record(body, { kind, transport: 'http', encoding, hash: digest(raw), headers: req.headers });
+      record(body, { kind, transport: 'http', path: req.url, encoding, hash: digest(raw), headers: req.headers });
+      if (req.url.endsWith('/chat/completions')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ id: 'chat_config_fixture', model: body.model, choices: [{ index: 0, message: { role: 'assistant', content: '{"answer":"fixture"}' }, finish_reason: 'stop' }] })); return;
+      }
       if (body.stream) {
         res.writeHead(200, { 'content-type': 'text/event-stream' });
         res.end('data: ' + JSON.stringify({ type: 'response.created', response: { ...response, output: [], status: 'in_progress' } }) + '\n\ndata: ' + JSON.stringify({ type: 'response.completed', response }) + '\n\n');
@@ -70,11 +74,11 @@ try {
     } catch (error) { res.writeHead(500); res.end(error.message); }
   });
   const official = makeHttp('official'), wss = new WebSocketServer({ server: official, maxPayload: 256 * 1024 * 1024 });
-  wss.on('connection', ws => {
+  wss.on('connection', (ws, req) => {
     const peer = { ws, ids: new Set(), lanes: new Map() }; peers.push(peer); ws.on('error', () => {});
     ws.on('message', raw => {
       const body = JSON.parse(raw), lane = body.stream_id ?? null;
-      record(body, { kind: 'official', transport: 'ws' });
+      record(body, { kind: 'official', transport: 'ws', headers: req.headers });
       peer.lanes.set(lane, (peer.lanes.get(lane) || Promise.resolve()).then(async () => {
         if (body.closeCode) { body.closeCode === 1006 ? ws.terminate() : ws.close(body.closeCode, 'Original upstream close reason'); return; }
         if (body.queue) await delay(30);
@@ -101,7 +105,45 @@ try {
   let ready = false;
   for (let i = 0; i < 100; i++) { try { ready = (await fetch(base + '/healthz')).ok; if (ready) break; } catch {} await delay(30); }
   assert(ready, stderr);
-  async function connect() { const ws = new WebSocket(base.replace('http:', 'ws:') + '/v1/responses'); clients.push(ws); ws.on('error', () => {}); await once(ws, 'open'); return ws; }
+  async function connect(headers) { const ws = new WebSocket(base.replace('http:', 'ws:') + '/v1/responses', { headers }); clients.push(ws); ws.on('error', () => {}); await once(ws, 'open'); return ws; }
+
+  const nativeProtocol = 'x-openai-internal-codex-responses-lite';
+  const forwardedProtocol = 'x-bf-eh-' + nativeProtocol;
+  for (const selected of ['gpt-6-sol', 'GPT/gpt-6-sol', 'Other/test-model']) {
+    const native = selected !== 'Other/test-model', gateway = selected.startsWith('GPT/');
+    for (const stream of [false, true]) {
+      const original = { model: selected, stream, input: [{ role: 'user', content: 'Use only the client tools.' }] };
+      const reply = await fetch(base + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json', [nativeProtocol]: 'true' }, body: JSON.stringify(original) });
+      assert.equal(reply.status, 200); await reply.arrayBuffer();
+      const sent = records.at(-1);
+      assert.equal(sent.headers[nativeProtocol], native ? 'true' : undefined);
+      assert.equal(sent.headers[forwardedProtocol], gateway ? 'true' : undefined);
+      assert.equal(sent.body.input[0].content, original.input[0].content);
+      assert.equal(sent.body.tools, undefined);
+    }
+    const ws = await connect({ [nativeProtocol]: 'true' });
+    assert.equal((await turn(ws, { model: selected, input: [] })).type, 'response.completed');
+    assert.equal(records.at(-1).headers[nativeProtocol], native ? 'true' : undefined);
+    assert.equal(records.at(-1).headers[forwardedProtocol], gateway ? 'true' : undefined);
+    ws.close();
+  }
+  await (await fetch(base + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json', [forwardedProtocol]: 'true' }, body: JSON.stringify({ model: 'GPT/gpt-6-sol', input: [] }) })).arrayBuffer();
+  assert.equal(records.at(-1).headers[nativeProtocol], undefined);
+  assert.equal(records.at(-1).headers[forwardedProtocol], undefined);
+  checks.push('Native Responses protocol identity survives a Bifrost header boundary over HTTP/SSE/WS without changing tools or messages; ordinary, official and non-GPT requests do not acquire that identity');
+  {
+    const updated = { model: '阿里云订阅/config-fixture', reasoning: { effort: 'low' }, text: { format: { type: 'text' } }, input: [
+      { role: 'user', content: 'Original task' },
+      { type: 'configuration_update', reasoning: { effort: 'medium' }, text: { format: { type: 'json_schema', name: 'fixture', schema: { type: 'object' } } } },
+    ] };
+    const response = await fetch(base + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(updated) });
+    assert.equal(response.status, 200); await response.arrayBuffer();
+    assert.equal(records.at(-1).path, '/v1/chat/completions');
+    assert.equal(records.at(-1).body.reasoning_effort, 'medium');
+    assert.deepEqual(records.at(-1).body.messages, [{ role: 'user', content: 'Original task' }]);
+    assert.deepEqual(records.at(-1).body.response_format.json_schema.schema, { type: 'object' });
+    checks.push('A native format update selects the correct Chat route after conversion, with exact original messages and current reasoning settings');
+  }
 
   const encoders = { gzip: zlib.gzipSync, deflate: zlib.deflateSync, br: zlib.brotliCompressSync, ...(zlib.zstdCompressSync ? { zstd: zlib.zstdCompressSync } : {}) };
   for (const [encoding, encode] of Object.entries(encoders)) {

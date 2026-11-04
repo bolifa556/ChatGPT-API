@@ -25,6 +25,14 @@ const checks = [];
 const converter = new ResponseImages(home);
 const plain = response([message]);
 assert.equal(converter.response(plain), plain);
+const nativeTool = { type: 'custom_tool_call', id: 'ctc_native_image', call_id: 'call_native_image', namespace: 'functions', name: 'exec', status: 'completed', input: "generatedImage(await tools.image_gen__imagegen({prompt:'Original native prompt'}));" };
+const emptyFinal = { ...message, phase: 'final_answer', content: [{ type: 'output_text', text: '', annotations: [] }] };
+const nativeReply = response([nativeTool, emptyFinal]);
+assert.equal(new ResponseImages(home).response(nativeReply), nativeReply);
+const nativeEvents = new ResponseImages(home);
+for (const event of [{ type: 'response.output_item.done', output_index: 0, item: nativeTool }, { type: 'response.output_item.done', output_index: 1, item: emptyFinal }, { type: 'response.completed', response: nativeReply }])
+  assert.equal(nativeEvents.convert(event)[0], event);
+checks.push('Native image_gen tool calls and their empty final answers pass through exactly, without image-to-text promotion, final-message replacement or invented calls');
 const output = converter.response(response([message, image(), image('ig_second')])).output;
 assert.equal(output[0], message);
 assert.equal(output[1].content[1].image_url, 'data:image/png;base64,' + png);

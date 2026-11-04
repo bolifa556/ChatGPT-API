@@ -91,8 +91,11 @@ export function chatRequest(payload) {
     if (typeof choice === 'string') result.tool_choice = choice;
     else if (choice.type === 'function') result.tool_choice = { type: 'function', function: { name: choice.name } };
     else if (choice.type === 'allowed_tools') {
-      const allowed = new Set((choice.tools || []).map(tool => tool.type + ':' + (tool.name || '')));
-      result.tools = (result.tools || []).filter(tool => allowed.has(tool.type + ':' + (tool.function?.name || tool.name || '')));
+      if ((choice.tools || []).some(tool => tool.type === 'mcp' && tool.name != null))
+        throw unsupported('A named MCP tool restriction cannot be represented by filtering this Chat endpoint\'s server declarations.');
+      const key = tool => JSON.stringify([tool.type, tool.function?.name || tool.name || '', tool.server_label || '']);
+      const allowed = new Set((choice.tools || []).map(key));
+      result.tools = (result.tools || []).filter(tool => allowed.has(key(tool)));
       result.tool_choice = choice.mode;
     } else result.tool_choice = copy(choice);
   }

@@ -27,7 +27,7 @@ export class NonGptAdapter {
     this.reasoningPrefix = original.model ? 'rs_gateway_' + hash(original.model).slice(0, 12) + '_' : 'rs_gateway_';
     this.mapping = new Map();
     this.ids = new Map();
-    this.stats = { customTools: 0, namespaceTools: 0, carriersRemoved: 0, reasoningSkipped: 0, reasoningConverted: 0, reasoningPreserved: 0, callsRestored: 0, argumentErrors: 0, idsCorrected: 0 };
+    this.stats = { customTools: 0, namespaceTools: 0, carriersRemoved: 0, configurationsApplied: 0, reasoningSkipped: 0, reasoningConverted: 0, reasoningPreserved: 0, callsRestored: 0, argumentErrors: 0, idsCorrected: 0 };
   }
   register(name, namespace, custom) {
     if (typeof name !== 'string' || !name) throw new Error('Tool name is missing');
@@ -63,7 +63,7 @@ export class NonGptAdapter {
     if (!original || typeof original !== 'object') return original;
     const value = structuredClone(original);
     if (Array.isArray(value.tools)) value.tools = value.tools.map(t => this.choice(t));
-    if (value.name) {
+    if (value.name && ['function', 'custom'].includes(value.type)) {
       let key = alias(value.name, value.namespace);
       const matches = [...this.mapping].filter(([, m]) => m.name === value.name);
       if (!this.mapping.has(key) && !value.namespace && matches.length === 1) key = matches[0][0];
@@ -76,7 +76,20 @@ export class NonGptAdapter {
     const data = structuredClone(this.original), carriers = [], removedIds = new Set();
     if (Array.isArray(data.input)) {
       data.input = data.input.flatMap(item => {
-        if (item?.type === 'additional_tools') {
+        if (item?.type === 'configuration_update') {
+          // Native GPT keeps these controls in history for prompt caching.
+          // Other protocols express the effective settings on the request.
+          // Apply them in order to this outgoing copy, never as chat text.
+          const known = ['type', 'id', 'reasoning', 'text', 'internal_chat_message_metadata_passthrough'];
+          if (Object.keys(item).some(key => !known.includes(key)) || !['reasoning', 'text'].some(key => item[key] !== undefined))
+            throw Object.assign(new Error('This configuration update cannot be represented by the selected model protocol.'), { status: 400, code: 'unsupported_configuration_update' });
+          for (const key of ['reasoning', 'text']) if (item[key] !== undefined) {
+            if (!item[key] || typeof item[key] !== 'object' || Array.isArray(item[key]))
+              throw Object.assign(new Error('Configuration update ' + key + ' must be an object.'), { status: 400, code: 'unsupported_configuration_update' });
+            data[key] = { ...data[key], ...item[key] };
+          }
+          this.stats.configurationsApplied++;
+        } else if (item?.type === 'additional_tools') {
           carriers.push(...(item.tools || [])); this.stats.carriersRemoved++;
         } else if (item?.type === 'reasoning') {
           if (this.preserveReasoning && this.original.model && item.id?.startsWith(this.reasoningPrefix)) {

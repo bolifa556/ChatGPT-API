@@ -7,6 +7,21 @@ export const CONNECT_TIMEOUT_MS = 10000;
 // The native client owns generation deadlines. Explicit zeros disable Undici's
 // default timers; cancellation and upstream completion still release requests.
 export const RESPONSE_TIMEOUTS = { headersTimeout: 0, bodyTimeout: 0 };
+export const NATIVE_RESPONSES_HEADER = 'x-openai-internal-codex-responses-lite';
+export const FORWARDED_NATIVE_RESPONSES_HEADER = 'x-bf-eh-' + NATIVE_RESPONSES_HEADER;
+
+export function gatewayResponseHeaders(headers, native) {
+  const result = { ...headers };
+  delete result[FORWARDED_NATIVE_RESPONSES_HEADER];
+  if (!native) delete result[NATIVE_RESPONSES_HEADER];
+  // Bifrost forwards explicit x-bf-eh-* headers to its provider. Losing the
+  // client's native protocol marker makes CLIProxyAPI inject a hosted image
+  // tool instead of leaving generation to the client's existing image_gen.
+  // Copy only a marker the client actually supplied; never invent one.
+  else if (result[NATIVE_RESPONSES_HEADER] !== undefined)
+    result[FORWARDED_NATIVE_RESPONSES_HEADER] = result[NATIVE_RESPONSES_HEADER];
+  return result;
+}
 const codecs = {
   gzip: [zlib.gunzip, zlib.gzip], deflate: [zlib.inflate, zlib.deflate],
   br: [zlib.brotliDecompress, zlib.brotliCompress], zstd: [zlib.zstdDecompress, zlib.zstdCompress],

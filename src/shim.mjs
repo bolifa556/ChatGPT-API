@@ -17,7 +17,8 @@ import { forwardImages, imageOnlyModel, imageCapabilities } from './image-compat
 import { ResponseImages, restoreHostedImageHistory } from './responses-images.mjs';
 import { contextFields, rememberContexts, contextKey, applyContext } from './model-context.mjs';
 import { officialDispatcherFor, readEncodedBody, outgoingBody, writeChunk, relayClose,
-  requestWithAbort as request, protocolError, releaseResponseBody, RESPONSE_TIMEOUTS, MAX_REQUEST_BYTES } from './transport.mjs';
+  requestWithAbort as request, protocolError, releaseResponseBody, RESPONSE_TIMEOUTS, MAX_REQUEST_BYTES,
+  gatewayResponseHeaders, FORWARDED_NATIVE_RESPONSES_HEADER } from './transport.mjs';
 import { PendingResponses, HistoryCache, laneOf } from './response-state.mjs';
 import { GatewaySources } from './gateway-sources.mjs';
 import { overrideKey, redact } from './settings.mjs';
@@ -224,9 +225,9 @@ function historyForTarget(payload, which) {
 function prepareRequest(payload, which, pathname = '/v1/responses') {
   if (which === 'gateway' && !isGptModel(payload.model)) {
     if (pathname.endsWith('/responses/compact')) throw Object.assign(new Error('GPT opaque compaction is unavailable for non-GPT models.'), { status: 400, code: 'incompatible_compacted_history' });
-    const chat = usesChat(payload);
     const adapter = new NonGptAdapter(payload, { preserveReasoning: /^(阿里云订阅|词元计划|vllm)\//.test(payload.model) });
     const converted = adapter.request();
+    const chat = usesChat(converted);
     return { payload: chat ? chatRequest(converted) : restoreHostedImageHistory(converted, codexHome).payload, changed: true, adapter, chat };
   }
   return historyForTarget(payload, which);
@@ -268,7 +269,7 @@ function isGatewayKey(token) { return token === env.API_KEY || sources.secrets.h
 function headersFor(incoming, target, profile) {
   const headers = {};
   for (const [k, v] of Object.entries(incoming)) {
-    if (['host','connection','content-length','transfer-encoding','content-encoding','upgrade','proxy-authorization'].includes(k) || k.startsWith('sec-websocket-')) continue;
+    if (['host','connection','content-length','transfer-encoding','content-encoding','upgrade','proxy-authorization',FORWARDED_NATIVE_RESPONSES_HEADER].includes(k) || k.startsWith('sec-websocket-')) continue;
     headers[k] = v;
   }
   if (target !== 'official') headers['accept-encoding'] = 'identity';
@@ -441,9 +442,9 @@ async function handleHttp(req, res) {
     const adapted = prepareRequest(resolved, which, url.pathname);
     const outgoingBodyData = await outgoingBody(incoming, adapted.payload, adapted.changed || resolved !== parsed, which === 'official');
     body = outgoingBodyData.body; upstreamBytes = body.length;
-    const headers = headersFor(req.headers, which, gateway?.profile);
+    const originalHeaders = headersFor(req.headers, which, gateway?.profile);
+    const headers = which === 'gateway' ? gatewayResponseHeaders(originalHeaders, !adapted.adapter) : originalHeaders;
     if (outgoingBodyData.encoding) headers['content-encoding'] = outgoingBodyData.encoding;
-    if (adapted.adapter) delete headers['x-openai-internal-codex-responses-lite'];
     phase = 'upstream_headers';
     const upstream = await request(adapted.chat ? gateway.base + '/chat/completions' + url.search : targetUrl(which, url, gateway), { method: req.method, body, headers, dispatcher: which === 'official' ? officialDispatcher : gateway.dispatcher,
       signal: controller.signal, ...RESPONSE_TIMEOUTS });
@@ -678,8 +679,7 @@ if (process.argv.includes('--prepare')) {
         try {
           const adapted = prepareRequest(await gatewayImageReferences(gatewayRequest(body, gateway), req.headers, controller.signal), 'gateway');
           const wireBody = adapted.payload;
-          const headers = { ...headersFor(req.headers, 'gateway', gateway.profile), 'content-type': 'application/json' };
-          if (adapted.adapter) delete headers['x-openai-internal-codex-responses-lite'];
+          const headers = gatewayResponseHeaders({ ...headersFor(req.headers, 'gateway', gateway.profile), 'content-type': 'application/json' }, !adapted.adapter);
           const wireText = JSON.stringify(wireBody);
           log('WS request ' + JSON.stringify({ connectionId, requestId, route: 'gateway', model: event.model, bytes: Buffer.byteLength(wireText) }));
           const up = await request(gateway.base + (adapted.chat ? '/chat/completions' : '/responses'), { method: 'POST', headers, body: wireText, dispatcher: gateway.dispatcher, signal: controller.signal, ...RESPONSE_TIMEOUTS });

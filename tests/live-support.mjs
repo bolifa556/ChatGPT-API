@@ -74,8 +74,8 @@ export async function startLive(label) {
       return watched.map(digest).every((value, index) => value === before[index]);
     } };
 }
-export async function connect(base) {
-  const ws = new WebSocket(base.replace('http:', 'ws:') + '/v1/responses', { headers: { originator: 'codex_cli_rs', 'openai-beta': 'responses_websockets=2026-02-06' } });
+export async function connect(base, headers = {}) {
+  const ws = new WebSocket(base.replace('http:', 'ws:') + '/v1/responses', { headers: { originator: 'codex_cli_rs', 'openai-beta': 'responses_websockets=2026-02-06', ...headers } });
   ws.on('error', () => {}); await once(ws, 'open'); return ws;
 }
 export function turn(ws, body, timeout = 120000) {
