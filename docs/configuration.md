@@ -21,6 +21,8 @@
   ],
   "preferredProviderId": "default",
   "defaultImageModel": null,
+  "imageRouting": "official",
+  "imageStrengths": {},
   "contextLimit": 500000,
   "contextOverrides": {}
 }
@@ -29,6 +31,12 @@
 新增来源 ID 由控制台生成，以 `p_` 开头；不要手工更改已使用的 ID。单模型上限的键是 `[来源ID, 原始模型ID]` 的 JSON 字符串。`preferredProviderId` 用于自动图片候选优先顺序，不是将所有聊天自动路由到该来源。
 
 `defaultImageModel` 独立保存手动指定的默认生图模型，格式为 `{ "providerId": "default", "modelId": "实际图片模型ID" }`；`null` 表示自动选择，控制台会直接勾选路由实际采用的“默认生图（自动）”，无需手动选择或保存，不改变 `preferredProviderId`。旧配置尚无此字段时，可从原优先来源的 `imageModel` 迁移；恢复自动后不会再次启用旧值。来源的 `imageModel` 仍可补充目录中未识别的图片别名。
+
+`imageRouting` 在控制台“所有来源”右侧选择。`official` 使用登录的订阅账号，原样转发官方生图请求，不受下方 API 模型及强度设置影响；官方错误仍原样返回。`custom` 使用下方默认 API 生图模型。纯 API 模式始终使用 `custom`，忽略保存的官方选项；原生官方入口始终使用官方通道。旧配置已有手动 API 生图模型时沿用自定义通道，否则保留登录时使用官方的选择。
+
+“思考强度”列在加载目录时读取接口声明、匹配的官方模型目录或已核实的准确型号规格。来源在提示信息中标明；接口声明优先，无法确认的显示“无法检测”，不会用 GPT 模板猜测其他模型，也不逐档生成内容试错。刷新沿用启动和手动刷新模型目录的时机，没有周期探测。
+
+图片的 `complexity`（思考）与 `quality`（画质）独立保存。`imageStrengths` 的键同样为 `[来源ID, 原始模型ID]`，例如 `{ "[\"default\",\"gpt-image-2.6-sunburst\"]": { "complexity": "low", "quality": "high" } }`。未选择时自动使用当前可确认的最高档位；无法确定最高档位时使用模型默认。自定义原生生图请求会替换原模型自带的强度，未知或不支持的 `complexity` 不发送；已知画质按所选档位发送。显式 Images API 参数保持优先，已确认不支持的档位会在发送前报 400。普通聊天的思考设置不变。
 
 API 地址会补齐 `/v1`，不接受内嵌密码、查询参数或片段。保存的 Key 不在控制台状态接口中回传，空 Key 更新表示保留原值；控制台默认显示密码圆点，点击眼睛时通过经过认证且校验来源与修订号的独立接口查看明文，不改写配置。URL / Key 变更后不能使用旧凭据的目录缓存。
 

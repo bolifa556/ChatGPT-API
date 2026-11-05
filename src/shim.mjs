@@ -56,7 +56,7 @@ const gatewayDispatcher = gatewayDispatcherFor(gatewayEnabled ? gatewayBase : 'h
 const officialDispatcher = officialDispatcherFor(officialProxy);
 const sourceId = crypto.createHash('sha256').update(gatewayBase + '\n' + (env.API_KEY || '')).digest('hex');
 const buildHash = crypto.createHash('sha256');
-for (const name of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs','responses-images.mjs','model-context.mjs','transport.mjs','response-state.mjs','settings.mjs','gateway-sources.mjs']) buildHash.update(fs.readFileSync(path.join(dir, name)));
+for (const name of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs','responses-images.mjs','model-context.mjs','model-strength.mjs','transport.mjs','response-state.mjs','settings.mjs','gateway-sources.mjs']) buildHash.update(fs.readFileSync(path.join(dir, name)));
 for (const name of ['model-contexts.json', 'model-template.json']) {
   if (fs.existsSync(path.join(root, 'assets', name))) buildHash.update(fs.readFileSync(path.join(root, 'assets', name)));
 }
@@ -403,8 +403,10 @@ async function handleHttp(req, res) {
     const controller = new AbortController(); controllers.add(controller);
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
     try {
+      const imageLogin = hasOfficialAuth(req.headers);
       return await forwardImages({ req,res,url,body,operation: imageRoute[1],env: imageSettings(),
-        hasLogin: hasOfficialAuth(req.headers), allowGateway: gatewayEnabled,
+        hasLogin: imageLogin, allowGateway: gatewayEnabled,
+        routing: !gatewayEnabled ? 'official' : mode === 'gateway' || !imageLogin ? 'custom' : sources.settings.imageRouting,
         getModels: async () => catalog.gatewayModels.map(model => {
           const profile = sources.profile(model._providerId || 'default'), original = model._upstreamId || model.id;
           const selected = sources.settings.defaultImageModel;
@@ -413,7 +415,8 @@ async function handleHttp(req, res) {
         }),
         resolveGateway: model => {
           const selected = sources.target(model.id, catalog.gatewayModels);
-          return { ...selected, env: { ...env, IMAGE_EDIT_FORMAT: selected.profile.imageEditFormat } };
+          return { ...selected, strengths: sources.settings.imageStrengths[overrideKey(selected.profile.id, selected.model)],
+            env: { ...env, IMAGE_EDIT_FORMAT: selected.profile.imageEditFormat } };
         },
         headersFor,targetUrl,officialDispatcher,gatewayDispatcher,imageDispatcher: officialDispatcher,decodeBody,signal: controller.signal,log,
         resolveFile: async id => {

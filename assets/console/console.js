@@ -9,6 +9,54 @@ const savedKeyMask = '••••••••••••••••';
 const icon = (paths, className = '') => '<svg class="' + className + '" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + paths + '</svg>';
 const pencilIcon = icon('<path d="m15 5 4 4M5 19l4-1L20 7a2.8 2.8 0 0 0-4-4L5 14l-1 6Z"/>');
 const eyeIcon = visible => icon('<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>' + (visible ? '<path d="m3 3 18 18"/>' : ''));
+const chevronIcon = icon('<path d="m7 10 5 5 5-5"/>', 'choice-chevron');
+const checkIcon = icon('<path d="m5 12 4 4L19 6"/>', 'choice-check');
+let openChoice, choiceSequence = 0;
+function closeChoice(focus = false) {
+  if (!openChoice) return;
+  const { button, menu } = openChoice; openChoice = null;
+  button.setAttribute('aria-expanded', 'false'); menu.remove();
+  if (focus && button.isConnected) button.focus();
+}
+function setChoices(button, choices, value = '') {
+  button._choiceOptions = choices; button.value = value;
+  const selected = choices.find(item => item.value === value) || choices[0];
+  button.innerHTML = '<span class="choice-value">' + escape(selected?.displayLabel || selected?.label || '') + '</span>' + chevronIcon;
+  button.type = 'button'; button.setAttribute('aria-haspopup', 'listbox'); button.setAttribute('aria-expanded', 'false');
+  button.onclick = () => showChoices(button);
+  button.onkeydown = event => {
+    if (['ArrowDown', 'ArrowUp'].includes(event.key)) { event.preventDefault(); showChoices(button, event.key === 'ArrowUp'); }
+  };
+}
+function showChoices(button, last = false) {
+  const same = openChoice?.button === button; closeChoice(); if (same) return;
+  const choices = button._choiceOptions || [], menu = document.createElement('div');
+  menu.className = 'choice-menu'; menu.id = 'choice-menu-' + (++choiceSequence); menu.setAttribute('role', 'listbox');
+  menu.setAttribute('aria-label', button.getAttribute('aria-label') || '选择设置');
+  button.setAttribute('aria-controls', menu.id); button.setAttribute('aria-expanded', 'true');
+  menu.innerHTML = choices.map((choice, index) => '<button type="button" role="option" tabindex="-1" class="choice-option" data-index="' + index + '" aria-selected="' + (choice.value === button.value) + '"><span>' + escape(choice.label) + '</span>' + (choice.value === button.value ? checkIcon : '') + '</button>').join('');
+  document.body.append(menu); openChoice = { button, menu };
+  const bounds = button.getBoundingClientRect(), width = Math.max(bounds.width, 178);
+  menu.style.width = width + 'px'; menu.style.left = Math.max(8, Math.min(bounds.left, innerWidth - width - 8)) + 'px';
+  menu.style.top = (bounds.bottom + menu.offsetHeight + 8 > innerHeight ? Math.max(8, bounds.top - menu.offsetHeight - 5) : bounds.bottom + 5) + 'px';
+  const options = [...menu.querySelectorAll('.choice-option')];
+  for (const option of options) option.onclick = () => {
+    const choice = choices[Number(option.dataset.index)]; setChoices(button, choices, choice.value);
+    closeChoice(true); button.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  menu.onkeydown = event => {
+    const index = options.indexOf(document.activeElement);
+    if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+      event.preventDefault(); const next = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
+      options[next]?.focus();
+    } else if (event.key === 'Escape') { event.preventDefault(); closeChoice(true); }
+    else if (event.key === 'Tab') closeChoice(true);
+  };
+  (last ? options.at(-1) : options.find(item => item.getAttribute('aria-selected') === 'true') || options[0])?.focus();
+}
+document.addEventListener('pointerdown', event => { if (openChoice && !openChoice.menu.contains(event.target) && !openChoice.button.contains(event.target)) closeChoice(); });
+window.addEventListener('resize', () => closeChoice());
+window.addEventListener('scroll', event => { if (openChoice && !openChoice.menu.contains(event.target)) closeChoice(); }, true);
 async function api(route, body) {
   const response = await fetch('/api/' + route, { method: body === undefined ? 'GET' : 'POST', headers: { authorization: 'Bearer ' + token, ...(body === undefined ? {} : { 'content-type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const result = await response.json(); if (!response.ok) throw new Error(result.error || '操作未完成。'); return result;
@@ -34,8 +82,7 @@ function sourceTitle(provider) {
 }
 function renderSourceFilters() {
   const filter = $('#model-source-filter'), selected = filter.value;
-  filter.innerHTML = '<option value="">所有来源</option>' + draft.providers.map(provider => '<option value="' + provider.id + '">' + escape(provider.name) + '</option>').join('');
-  filter.value = draft.providers.some(provider => provider.id === selected) ? selected : '';
+  setChoices(filter, [{ value: '', label: '所有来源' }, ...draft.providers.map(provider => ({ value: provider.id, label: provider.name }))], draft.providers.some(provider => provider.id === selected) ? selected : '');
 }
 function bindSourceTitle(card, provider) {
   const title = card.querySelector('.source-title');
@@ -67,14 +114,6 @@ function imageDefault() {
   const model = (data.automaticImageModels || []).map(id => data.models.find(item => item.id === id))
     .find(model => model && draft.providers.some(provider => provider.id === model.providerId && provider.enabled));
   return model ? { providerId: model.providerId, modelId: model.name } : null;
-}
-function renderImageDefault() {
-  const selected = imageDefault(), provider = draft.providers.find(item => item.id === selected?.providerId);
-  $('#image-default-summary').innerHTML = selected
-    ? '<span>默认生图：<strong>' + escape(selected.modelId) + '</strong>（' + escape(provider?.name || '来源已移除') + (draft.defaultImageModel ? '' : ' · 自动') + '）</span>'
-      + (draft.defaultImageModel ? '<button id="clear-image-default" class="quiet-action" type="button">恢复自动</button>' : '')
-    : '<span>当前目录未识别到生图模型。启动 API 入口或刷新模型目录后，会自动选好默认模型。</span>';
-  if (draft.defaultImageModel) $('#clear-image-default').onclick = () => { draft.defaultImageModel = null; changed(); renderModels(); };
 }
 function bindKey(card, provider) {
   const input = card.querySelector('[data-field=apiKey]'), button = card.querySelector('.reveal');
@@ -135,6 +174,7 @@ function renderSources() {
       if (!confirm('移除“' + provider.name + '”？已有聊天记录不会被删除。')) return;
       draft.providers = draft.providers.filter(item => item.id !== provider.id);
       for (const key of Object.keys(draft.contextOverrides)) if (JSON.parse(key)[0] === provider.id) delete draft.contextOverrides[key];
+      for (const key of Object.keys(draft.imageStrengths || {})) if (JSON.parse(key)[0] === provider.id) delete draft.imageStrengths[key];
       if (draft.preferredProviderId === provider.id) draft.preferredProviderId = draft.providers.find(item => item.enabled)?.id || '';
       if (draft.defaultImageModel?.providerId === provider.id) draft.defaultImageModel = null;
       changed(); renderSources(); renderSourceFilters(); renderModels(); updateCounts();
@@ -146,8 +186,23 @@ function updateCounts() {
   $('#source-count').textContent = draft.providers.length;
   $('#model-count').textContent = data.models.filter(model => draft.providers.some(provider => provider.id === model.providerId && provider.enabled)).length;
 }
+const strengthLabel = value => ({ none: '关闭', off: '关闭', minimal: '最低', low: '低', medium: '中', high: '高', xhigh: '特高', max: '最高', ultra: '极高', auto: '模型默认', standard: '标准', hd: '高清' })[value] || value;
+function strengthCell(model) {
+  const title = capability => ({ catalog: '接口声明', 'native-catalog': '官方模型目录', documentation: '官方型号规格' })[capability?.source] || '';
+  const text = capability => capability?.status === 'known' ? capability.levels.map(strengthLabel).join(' / ') : capability?.status === 'unsupported' ? '不支持' : '无法检测';
+  if (model.kind !== 'image') return '<span class="strength-levels" title="' + escape(title(model.strengths?.reasoning) + '：' + (model.strengths?.reasoning?.levels || []).join(' / ')) + '">' + escape(text(model.strengths?.reasoning)) + '</span>';
+  if (['complexity', 'quality'].every(field => !model.strengths?.[field] || model.strengths[field].status === 'unknown')) return '<span class="model-note">无法检测</span>';
+  const choice = draft.imageStrengths?.[model.overrideKey] || {};
+  return ['complexity', 'quality'].map(field => {
+    const capability = model.strengths?.[field], name = field === 'complexity' ? '思考' : '画质';
+    if (capability?.status !== 'known') return '<div class="strength-control"><span>' + name + '</span><span class="model-note">' + escape(text(capability)) + '</span></div>';
+    const value = capability.levels.includes(choice[field]) ? choice[field] : '';
+    return '<div class="strength-control" title="' + escape(title(capability) + '；默认使用可确认的最高档位') + '"><span>' + name + '</span><button type="button" class="choice-trigger compact image-strength" data-key="' + escape(model.overrideKey) + '" data-field="' + field + '" value="' + escape(value) + '" aria-label="' + escape(model.name + ' ' + name + '强度') + '"></button></div>';
+  }).join('');
+}
 function renderModels() {
   if (!data) return;
+  closeChoice();
   const defaultImage = imageDefault();
   const search = $('#model-search').value.toLowerCase(), source = $('#model-source-filter').value;
   const models = data.models.filter(model => draft.providers.some(provider => provider.id === model.providerId && provider.enabled) && (!source || model.providerId === source) && (model.name + (draft.providers.find(provider => provider.id === model.providerId)?.name || model.providerName)).toLowerCase().includes(search));
@@ -162,22 +217,33 @@ function renderModels() {
       const control = model.image?.generation
         ? '<label class="image-default-choice' + (selected ? ' selected' : '') + '"><input type="checkbox" class="image-default" data-id="' + escape(model.id) + '" ' + (selected ? 'checked ' : '') + (automatic ? 'disabled ' : '') + 'aria-label="' + escape(model.name + ' · ' + providerName + ' 默认生图') + '"><span>默认生图' + (automatic ? '（自动）' : '') + '</span></label>'
         : '<span class="model-note">仅图片编辑</span>';
-      return '<tr class="image-model-row"><td><strong>' + escape(model.name) + '</strong><span class="model-kind">图片</span></td><td>' + escape(providerName) + '</td><td></td><td></td><td>' + control + '</td></tr>';
+      return '<tr class="image-model-row"><td><strong>' + escape(model.name) + '</strong><span class="model-kind">图片</span></td><td>' + escape(providerName) + '</td><td></td><td></td><td>' + control + '</td><td class="model-strength">' + strengthCell(model) + '</td></tr>';
     }
-    return '<tr><td><strong>' + escape(model.name) + '</strong></td><td>' + escape(providerName) + '</td><td>' + tokens(model.capacity) + '</td><td><input class="model-override" type="number" min="4096" max="2000000" data-key="' + escape(model.overrideKey) + '" value="' + override + '" placeholder="自动" aria-label="' + escape(model.name) + ' 的上下文上限"></td><td data-effective="' + escape(model.overrideKey) + '">' + tokens(Math.floor(actual * (model.effectivePercent ?? 95) / 100)) + '</td></tr>';
+    return '<tr><td><strong>' + escape(model.name) + '</strong></td><td>' + escape(providerName) + '</td><td>' + tokens(model.capacity) + '</td><td><input class="model-override" type="number" min="4096" max="2000000" data-key="' + escape(model.overrideKey) + '" value="' + override + '" placeholder="自动" aria-label="' + escape(model.name) + ' 的上下文上限"></td><td data-effective="' + escape(model.overrideKey) + '">' + tokens(Math.floor(actual * (model.effectivePercent ?? 95) / 100)) + '</td><td class="model-strength">' + strengthCell(model) + '</td></tr>';
   }).join('');
   for (const input of document.querySelectorAll('.model-override')) input.oninput = () => {
     const model = models.find(item => item.overrideKey === input.dataset.key); draft.contextOverrides[input.dataset.key] = input.value ? Number(input.value) : null;
     const actual = Math.min(Number(input.value) || model.capacity || model.fallbackCapacity || model.limit, model.capacity || Infinity, Number(draft.contextLimit));
-    input.closest('tr').lastElementChild.textContent = tokens(Math.floor(actual * (model.effectivePercent ?? 95) / 100)); changed();
+    input.closest('tr').querySelector('[data-effective]').textContent = tokens(Math.floor(actual * (model.effectivePercent ?? 95) / 100)); changed();
   };
+  for (const select of document.querySelectorAll('.image-strength')) {
+    const capability = models.find(item => item.overrideKey === select.dataset.key).strengths[select.dataset.field];
+    setChoices(select, [{ value: '', label: capability.highest ? '自动使用最高档位' : '使用模型默认', displayLabel: capability.highest ? strengthLabel(capability.highest) : '模型默认' },
+      ...capability.levels.map(level => ({ value: level, label: strengthLabel(level) + (level === 'auto' ? '' : '（' + level + '）'), displayLabel: strengthLabel(level) }))], select.value);
+    select.onchange = () => {
+      draft.imageStrengths ||= {};
+      const key = select.dataset.key, field = select.dataset.field, choice = draft.imageStrengths[key] ||= {};
+      if (select.value) choice[field] = select.value; else delete choice[field];
+      if (!Object.keys(choice).length) delete draft.imageStrengths[key];
+      changed();
+    };
+  }
   for (const input of document.querySelectorAll('.image-default')) input.onchange = () => {
     const model = models.find(item => item.id === input.dataset.id);
     draft.defaultImageModel = input.checked ? { providerId: model.providerId, modelId: model.name } : null;
     changed(); renderModels();
     [...document.querySelectorAll('.image-default')].find(item => item.dataset.id === model.id)?.focus();
   };
-  renderImageDefault();
 }
 function render(result) {
   data = result; draft = structuredClone(result.settings); dirty = false;
@@ -185,9 +251,11 @@ function render(result) {
   $('#notice').hidden = !result.configurationSaved || !result.runtime.restartRequired;
   $('#notice').textContent = '设置已保存。完全退出并重新打开 ChatGPT 后，加载新的 API 来源、模型菜单和上下文设置。';
   renderSourceFilters();
+  setChoices($('#image-routing'), [{ value: 'official', label: '官方生图设置' }, { value: 'custom', label: '自定义生图设置' }], draft.imageRouting);
   renderSources(); renderModels(); updateCounts(); updateSavebar();
 }
 function view(name) {
+  closeChoice();
   for (const button of document.querySelectorAll('[data-view]')) button.classList.toggle('active', button.dataset.view === name);
   for (const item of document.querySelectorAll('.view')) item.hidden = item.id !== 'view-' + name;
   $('#page-name').textContent = ({ sources: 'API 来源', models: '模型与上下文', about: '使用说明' })[name];
@@ -204,6 +272,7 @@ $('#add-source').onclick = () => {
 };
 $('#context-limit').oninput = event => { draft.contextLimit = Number(event.target.value); changed(); updateCounts(); renderModels(); };
 $('#model-search').oninput = renderModels; $('#model-source-filter').onchange = renderModels;
+$('#image-routing').onchange = () => { draft.imageRouting = $('#image-routing').value; changed(); };
 $('#discard').onclick = () => render(data);
 $('#save-settings').onclick = async () => { busy = true; updateSavebar(); try { render(await api('settings', draft)); toast('已保存，重开客户端后应用。'); } catch (error) { toast(error.message); } finally { busy = false; updateSavebar(); } };
 $('#refresh-models').onclick = async () => { busy = true; updateSavebar(); const button = $('#refresh-models'); button.textContent = '正在加载…'; try { render(await api('refresh', {})); toast('模型目录已更新。'); } catch (error) { toast(error.message); } finally { busy = false; button.textContent = '刷新模型目录'; updateSavebar(); } };

@@ -25,7 +25,9 @@ const peer = http.createServer(async (req, res) => {
   if (req.headers.authorization !== 'Bearer ' + keys[source]) { res.writeHead(401); res.end('wrong source key'); return; }
   if (req.url === base + '/models') {
     modelRequests++; if (source === 'b' && sourceBDown) { res.writeHead(503); res.end('{}'); return; }
-    res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ data: models.map(id => ({ id, context_window: source === 'a' ? 128000 : 512000 })) })); return;
+    res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ data: models.map(id => ({ id, context_window: source === 'a' ? 128000 : 512000,
+      ...(id === 'qwen-image' ? { supported_complexity_levels: source === 'a' ? ['low', 'high'] : ['low', 'medium'], supported_quality_levels: ['auto', 'low', 'high'] }
+        : id === models[0] ? { supported_reasoning_levels: [{ effort: 'low' }, { effort: 'high' }] } : {}) })) })); return;
   }
   const chunks = []; for await (const chunk of req) chunks.push(chunk); const body = JSON.parse(Buffer.concat(chunks));
   records.push({ source, url: req.url, body });
@@ -124,14 +126,17 @@ try {
   assert.equal(state.models.find(model => model.name === 'qwen-image').image.generation, true);
   assert.equal(state.models.find(model => model.name === 'qwen-image').image.editing, true);
   assert.equal(state.models.find(model => model.name === models[0]).image.known, false);
+  assert.deepEqual(state.models.find(model => model.name === models[0]).strengths.reasoning.levels, ['low', 'high']);
+  assert.equal(state.models.find(model => model.name === models[1]).strengths.reasoning.status, 'unknown');
   assert.equal(state.settings.defaultImageModel, null);
   assert.deepEqual(state.automaticImageModels, ['qwen-image', '@p_bbbbbbbb/qwen-image']);
   const automaticNativeImage = await fetch('http://127.0.0.1:' + port + '/v1/images/generations', {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-codex-image-turn-id': 'first-use-automatic-image' },
-    body: JSON.stringify({ model: 'gpt-image-2', prompt: 'First-use image without opening image settings' }),
+    body: JSON.stringify({ model: 'gpt-image-2', prompt: 'First-use image without opening image settings', complexity: 'max', quality: 'auto' }),
   });
   assert.equal(automaticNativeImage.status, 200); assert.equal(records.at(-1).source, 'a');
   assert.equal(records.at(-1).body.model, state.automaticImageModels[0]);
+  assert.equal(records.at(-1).body.complexity, 'high'); assert.equal(records.at(-1).body.quality, 'high');
   checks.push('First-use native image generation needs no manual default; the console displays the same automatic model and independent source candidates');
   const revealBody = { providerId: 'p_bbbbbbbb', revision: state.settings.revision };
   assert.equal((await fetch(new URL('/api/keys/reveal', consoleUrl), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(revealBody) })).status, 401);
@@ -160,7 +165,10 @@ try {
   assert.equal(state.settings.providers[1].name, 'Renamed source');
   const preferredBeforeImage = state.settings.preferredProviderId;
   const defaultImage = { providerId: 'p_bbbbbbbb', modelId: 'qwen-image' };
-  state = await (await request('settings', { ...state.settings, defaultImageModel: defaultImage })).json();
+  const strengthKey = overrideKey('p_bbbbbbbb', 'qwen-image');
+  state = await (await request('settings', { ...state.settings, defaultImageModel: defaultImage,
+    imageStrengths: { [strengthKey]: { complexity: 'low', quality: 'low' } } })).json();
+  assert.deepEqual(readSettings(fixture).imageStrengths[strengthKey], { complexity: 'low', quality: 'low' });
   assert.deepEqual(state.settings.defaultImageModel, defaultImage);
   assert.equal(state.automaticImageModels[0], 'qwen-image', 'Manual selection must preserve the automatic fallback independently');
   assert.equal(state.settings.preferredProviderId, preferredBeforeImage);
@@ -172,7 +180,9 @@ try {
   });
   assert.equal((await imageRequest()).status, 200); assert.equal(records.at(-1).source, 'b'); assert.equal(records.at(-1).body.model, 'qwen-image');
   assert.equal((await imageRequest('gpt-image-2', true)).status, 200); assert.equal(records.at(-1).source, 'b');
+  assert.equal(records.at(-1).body.complexity, 'low'); assert.equal(records.at(-1).body.quality, 'low');
   assert.equal((await imageRequest('qwen-image')).status, 200); assert.equal(records.at(-1).source, 'a');
+  assert.equal(records.at(-1).body.complexity, 'high', 'Other source must not inherit the same-name model selection');
   assert.equal(records.at(-1).body.prompt, 'Unchanged fixture image prompt');
   await wsTurn(models[0]); assert.equal(records.at(-1).source, 'a');
   state = await (await request('settings', { ...state.settings, defaultImageModel: null })).json();

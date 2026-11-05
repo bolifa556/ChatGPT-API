@@ -105,6 +105,8 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - run: npm ci --ignore-scripts
       - run: python3 scripts/ci-run.py node tests/macos-platform-test.mjs
+      - run: node tests/model-strength-test.mjs
+      - run: node tests/console-sources-test.mjs
       - run: node tests/gateway-transport-test.mjs
       - run: node tests/responses-images-test.mjs
       - run: node tests/configuration-update-test.mjs

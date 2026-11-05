@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { imageCandidates, imageModelUnavailable } from '../src/image-compat.mjs';
+import { readSettings, saveSettings } from '../src/settings.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fixture = path.join(root, 'data/testing/image-generation-' + process.pid);
@@ -57,6 +58,7 @@ async function start(mode, options = {}) {
     'OFFICIAL_BASE=http://127.0.0.1:' + officialPort + '/backend-api/codex',
     ...Object.entries(options.settings || {}).map(([key,value]) => key + '=' + value),
   ].join('\n'));
+  if (options.imageRouting) saveSettings(dir, { ...readSettings(dir), imageRouting: options.imageRouting });
   fs.writeFileSync(path.join(dir, 'data/state/route-state.json'), JSON.stringify({ mode, entryMode: options.entryMode || 'api', nativeAccount: options.nativeAccount === true, officialProxy: '', gatewayTransport: 'direct', clientVersion: '0.159.0' }));
   const child = spawn(process.execPath, [path.join(root, 'src/shim.mjs')], { env: { ...process.env, CHATGPT_API_ROOT: dir, CODEX_HOME: path.join(dir, 'home') }, windowsHide: true, stdio: ['ignore','ignore','pipe'] }); children.push(child);
   let stderr = ''; child.stderr.on('data', chunk => stderr += chunk);
@@ -88,6 +90,9 @@ try {
   assert.equal(records.at(-1).path, '/backend-api/codex/images/generations'); assert.equal(result.headers.get('x-native-image-peer'), 'official');
   assert.equal(records.at(-1).headers['x-openai-actor-authorization'], undefined);
   checks.push('Official image model bypasses chat-menu allowlist; original body, output, headers and image metadata pass unchanged');
+  result = await send(mixed, 'generations', { complexity: 'max', quality: 'high' });
+  assert.equal(result.status, 200); assert.equal(records.at(-1).which, 'official');
+  assert.equal(records.at(-1).body.complexity, 'max'); assert.equal(records.at(-1).body.quality, 'high');
   result = await send(mixed, 'edits', { images: [{ image_url: dataUrl }] }, '');
   assert.equal(result.status, 200); assert.equal(records.at(-1).path, '/backend-api/codex/images/edits'); assert.deepEqual(records.at(-1).body.images, [{ image_url: dataUrl }]);
   checks.push('Native JSON image editing and both native endpoint prefixes are supported');
@@ -103,24 +108,33 @@ try {
   checks.push('Native-account image requests use client OAuth without auth.json; a bare API key never gains official identity');
 
   officialStatus = 404; officialData = { error: { code: 'model_not_found', message: 'Official image model unavailable' } };
-  result = await send(mixed);
+  const unavailableGatewayCalls = count('gateway');
+  result = await send(mixed); assert.equal(result.status, 404); assert.equal(count('gateway'), unavailableGatewayCalls);
+  const customMixed = await start('mixed', { imageRouting: 'custom' });
+  result = await send(customMixed);
   assert.equal(result.status, 200); assert.equal(records.at(-1).which, 'gateway'); assert.equal(records.at(-1).body.model, '绘图/任意别名');
   assert.equal(records.at(-1).body.prompt, nativeBody.prompt); assert.equal(records.at(-1).headers.authorization, 'Bearer mock-api-key');
   for (const name of ['chatgpt-account-id','openai-organization','openai-project']) assert.equal(records.at(-1).headers[name], undefined);
   assert.equal(records.at(-1).headers['x-codex-image-turn-id'], 'original-turn-id');
   assert.equal(records.at(-1).headers['x-openai-actor-authorization'], undefined);
   assert.equal(records.at(-1).body.input, undefined); assert.equal(records.at(-1).body.messages, undefined);
-  checks.push('Definitively unavailable official model falls back to any capability-advertised API image alias; OAuth and account headers never reach API');
+  checks.push('Official image selection preserves official errors; custom selection uses the API alias directly without leaking OAuth');
   const menu = JSON.parse(fs.readFileSync(path.join(mixed.dir, 'data/cache/models-smr.json'))).models;
   assert(!menu.some(m => m.slug === '绘图/任意别名')); assert(menu.some(m => m.slug === 'Other/chat-model'));
   checks.push('Image-only models are not incorrectly advertised as conversational models');
 
   const gatewayOnly = await start('gateway'); let beforeOfficial = count('official');
-  result = await send(gatewayOnly); assert.equal(result.status, 200); assert.equal(count('official'), beforeOfficial);
+  result = await send(gatewayOnly, 'generations', { complexity: 'max' }); assert.equal(result.status, 200); assert.equal(count('official'), beforeOfficial);
+  assert.equal(records.at(-1).body.complexity, undefined, 'Unverified API image model must not inherit native complexity');
   assert.equal(records.at(-1).body.model, '绘图/任意别名');
   const noLogin = await start('mixed', { login: false }); result = await send(noLogin, 'edits', { images: [{ image_url: dataUrl }] });
   assert.equal(result.status, 200); assert.equal(count('official'), beforeOfficial); assert.deepEqual(records.at(-1).body.images, [{ image_url: dataUrl }]);
   checks.push('Provider-only ignores saved official credentials; missing sign-in also uses API directly, for generation and editing');
+  const pureOfficialPreference = await start('gateway', { imageRouting: 'official' });
+  result = await send(pureOfficialPreference); assert.equal(result.status, 200); assert.equal(count('official'), beforeOfficial);
+  const mixedOfficialPreference = await start('mixed', { imageRouting: 'official', settings: { IMAGE_MODEL: '绘图/任意别名' } });
+  result = await send(mixedOfficialPreference); assert.equal(result.status, 404); assert.equal(records.at(-1).which, 'official');
+  checks.push('API-only ignores official image preference; signed-in official preference ignores custom image selection and parameters');
 
   gatewayModels.push({ id: 'qwen-image' });
   const defaultMixed = await start('mixed', { settings: { IMAGE_MODEL: '绘图/任意别名' } });
@@ -186,7 +200,7 @@ try {
   }
   gatewayStatus = 200; gatewayData = { created: 1780000001, data: [{ b64_json: png }] };
   checks.push('A definitive JSON image-field rejection negotiates multipart once on the same API/model with identical inputs; accepted output, safety, invalid image data and server failures never trigger this conversion');
-  result = await send(mixed, 'edits', { images: [{ file_id: 'file-native-original' }] });
+  result = await send(customMixed, 'edits', { images: [{ file_id: 'file-native-original' }] });
   assert.equal(result.status, 200); assert.deepEqual(records.at(-1).body.images, [{ image_url: 'http://127.0.0.1:' + downloadPort + '/image.png' }]);
   assert(records.some(r => r.path === '/backend-api/files/download/file-native-original' && r.headers.authorization === 'Bearer mock-native-oauth'));
   result = await send(gatewayOnly, 'edits', { images: [{ file_id: 'file-native-original' }] });
@@ -206,26 +220,27 @@ try {
   assert.equal(result.status, 502); assert.equal(count('gateway'), beforeNetwork); officialAction = '';
   checks.push('No generation retry or fallback on network failure, server errors, transient rate limits, content rejection or invalid parameters');
   officialStatus = 429; officialData = { error: { code: 'insufficient_quota', message: 'No image quota' } }; result = await send(mixed);
-  assert.equal(result.status, 200); assert.equal(records.at(-1).which, 'gateway');
-  checks.push('Explicit exhausted official image quota can use API fallback without retrying official');
+  assert.equal(result.status, 429); assert.equal(records.at(-1).which, 'official');
+  result = await send(customMixed); assert.equal(result.status, 200); assert.equal(records.at(-1).which, 'gateway');
+  checks.push('Official quota errors stay on the selected official route; selecting custom images remains independent of official quota');
 
   gatewayModels = [{ id: 'Other/chat-model' }]; await fetch(mixed.base + '/readyz'); await fetch(gatewayOnly.base + '/readyz');
   beforeOfficial = count('official'); result = await send(gatewayOnly); assert.equal(result.status, 400); assert.equal(JSON.parse(result.raw).error.code, 'no_gateway_image_model');
-  assert.equal(count('official'), beforeOfficial); result = await send(mixed); assert.equal(result.status, 400); assert.match(JSON.parse(result.raw).error.message, /Official.*unavailable.*no model/);
-  checks.push('No API image model errors explicitly; both unavailable errors identify official failure and missing API capability');
+  assert.equal(count('official'), beforeOfficial); result = await send(mixed); assert.equal(result.status, 429); assert.equal(result.raw, JSON.stringify(officialData));
+  checks.push('Missing API image capability reports its own error; official selection does not depend on the API image catalog');
 
   gatewayModels = [{ id: 'Other/chat-model' }, { id: '任意供应商/自定义生图别名' }];
   const alias = await start('gateway', { settings: { IMAGE_MODEL: '任意供应商/自定义生图别名' } }); result = await send(alias); assert.equal(result.status, 200); assert.equal(records.at(-1).body.model, '任意供应商/自定义生图别名');
   const badAlias = await start('gateway', { settings: { IMAGE_MODEL: 'absent-model' } }); result = await send(badAlias); assert.equal(result.status, 400); assert.equal(JSON.parse(result.raw).error.code, 'no_gateway_image_model');
   checks.push('Explicit alias selection needs no GPT Image naming; a configured model absent from this API errors without sending a generation');
   gatewayModels = [{ id: 'Other/chat-model' }, { id: '绘图/任意别名', capabilities: ['image_generation','image_edit'] }, { id: 'flux/flux-2' }];
-  await fetch(mixed.base + '/readyz'); unavailableFirst = true; result = await send(mixed); assert.equal(result.status, 200); assert.equal(records.at(-1).body.model, 'flux/flux-2'); unavailableFirst = false;
-  gatewayStatus = 404; gatewayData = { error: { code: 'model_not_found', message: 'API image model unavailable' } }; result = await send(mixed);
-  assert.equal(result.status, 404); assert.equal(JSON.parse(result.raw).error.code, 'image_model_unavailable'); assert.match(JSON.parse(result.raw).error.message, /Official.*Custom image model/);
-  checks.push('Known unavailable API candidates can try another image model; when official and all API image models are unavailable, return an error');
+  await fetch(customMixed.base + '/readyz'); unavailableFirst = true; result = await send(customMixed); assert.equal(result.status, 200); assert.equal(records.at(-1).body.model, 'flux/flux-2'); unavailableFirst = false;
+  gatewayStatus = 404; gatewayData = { error: { code: 'model_not_found', message: 'API image model unavailable' } }; result = await send(customMixed);
+  assert.equal(result.status, 404); assert.equal(result.raw, JSON.stringify(gatewayData));
+  checks.push('Automatic API candidates can skip a definitively unavailable model; exhausted API candidates preserve the upstream error');
 
   gatewayStatus = 200; gatewayData = { created: 1780000001, data: [{ unexpected: 'invalid output' }] };
-  const beforeMalformed = count('gateway'); result = await send(mixed); assert.equal(result.status, 502); assert.equal(JSON.parse(result.raw).error.code, 'invalid_upstream_image_response'); assert.equal(count('gateway'), beforeMalformed + 1);
+  const beforeMalformed = count('gateway'); result = await send(customMixed); assert.equal(result.status, 502); assert.equal(JSON.parse(result.raw).error.code, 'invalid_upstream_image_response'); assert.equal(count('gateway'), beforeMalformed + 1);
   checks.push('Accepted but malformed API image output reports its protocol error without generating again on another model');
   assert.deepEqual(imageCandidates([{ id: 'qwen/qwen-image' },{ id: 'generic', supported_endpoints: ['/v1/images/edits'] }], {}, 'edits', 'gpt-image-2', { nativeDefault: true }).map(m => m.id), ['qwen/qwen-image','generic']);
   assert.equal(imageCandidates([{ id: 'vision-chat', output_modalities: ['text'], capabilities: ['vision'] }], {}, 'generations', 'gpt-image-2', { nativeDefault: true }).length, 0);

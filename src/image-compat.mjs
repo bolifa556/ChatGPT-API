@@ -1,5 +1,6 @@
 import { requestWithAbort as request, releaseResponseBody, RESPONSE_TIMEOUTS, writeChunk } from './transport.mjs';
 import { imageFormat } from './responses-images.mjs';
+import { applyImageStrengths } from './model-strength.mjs';
 
 const fail = (message, code, status = 400) => Object.assign(new Error(message), { code, status });
 const ok = status => status >= 200 && status < 300;
@@ -119,8 +120,9 @@ async function imageBytes(reference, dispatcher, signal) {
   }
   throw fail('Image URL redirected too many times.', 'image_download_failed', 502);
 }
-async function gatewayBody(original, model, operation, env, dispatcher, signal, resolveFile) {
+async function gatewayBody(original, model, operation, env, dispatcher, signal, resolveFile, strengths, native) {
   const payload = structuredClone(original); payload.model = model.id;
+  applyImageStrengths(payload, model, strengths, native);
   // Native "auto" controls are provider defaults. Preserve explicit choices.
   if (!/^gpt-image(?:-|$)/i.test(leaf(model.id))) {
     for (const key of ['size','quality','background']) if (payload[key] === 'auto') delete payload[key];
@@ -167,17 +169,14 @@ async function nativeImageResponse(data, dispatcher, signal) {
 // Image calls are independent of the conversational model menu and adapters.
 // Fallback is allowed only after a definitive rejection, never after accepted
 // output, an ambiguous network failure, or a content-policy rejection.
-export async function forwardImages({ req,res,url,body,operation,env,hasLogin,allowGateway = true,getModels,headersFor,targetUrl,officialDispatcher,gatewayDispatcher,imageDispatcher,decodeBody,resolveFile,resolveGateway,signal,log }) {
+export async function forwardImages({ req,res,url,body,operation,env,hasLogin,allowGateway = true,routing = hasLogin ? 'official' : 'custom',getModels,headersFor,targetUrl,officialDispatcher,gatewayDispatcher,imageDispatcher,decodeBody,resolveFile,resolveGateway,signal,log }) {
   let original; try { original = JSON.parse(body.toString('utf8')); } catch { throw fail('Images requests must contain JSON.', 'invalid_image_request'); }
   if (!original || Array.isArray(original) || typeof original !== 'object') throw fail('Invalid Images request.', 'invalid_image_request');
   // The current native image tool has no model argument and always supplies
   // gpt-image-2. Its turn header distinguishes that default from an explicit
   // model selected by an ordinary Images API caller. Never inspect the prompt.
   const nativeDefault = Boolean(req.headers['x-codex-image-turn-id']) && original.model === 'gpt-image-2';
-  const models = allowGateway ? await getModels() : [];
-  const chosen = allowGateway && (requestedImage(models, original.model, nativeDefault)
-    || (operation === 'edits' ? env.IMAGE_EDIT_MODEL || env.IMAGE_MODEL : env.IMAGE_MODEL));
-  let officialFailure;
+  const nativeImage = Boolean(req.headers['x-codex-image-turn-id']);
   const forward = async (which, model, outgoing = { body, contentType: req.headers['content-type'] || 'application/json' }, gateway) => {
     const headers = headersFor(req.headers, which, gateway?.profile); headers['content-type'] = outgoing.contentType;
     if (which === 'gateway') delete headers['x-openai-internal-codex-responses-lite'];
@@ -200,25 +199,23 @@ export async function forwardImages({ req,res,url,body,operation,env,hasLogin,al
       return { status: upstream.statusCode,headers: upstream.headers,raw,data };
     } finally { releaseResponseBody(upstream.body); }
   };
-  if (hasLogin && !chosen) {
+  if (!allowGateway || routing === 'official') {
+    if (!hasLogin) throw fail('Official image generation requires ChatGPT sign-in.', 'official_sign_in_required', 401);
     const result = await forward('official', original.model);
     if (result.completed) return;
-    if (!allowGateway || !imageModelUnavailable(result.status, result.data)) { res.writeHead(result.status, responseHeaders(result.headers)); res.end(result.raw); return; }
-    officialFailure = result;
+    res.writeHead(result.status, responseHeaders(result.headers)); res.end(result.raw); return;
   }
-  if (!allowGateway) throw fail('The official entry requires ChatGPT sign-in for image generation and editing.', 'official_sign_in_required', 401);
-  let candidates;
-  try { candidates = imageCandidates(models, env, operation, original.model, { nativeDefault }); }
-  catch (e) { if (officialFailure) e.message = 'Official image model is unavailable (HTTP ' + officialFailure.status + '). ' + e.message; throw e; }
-  if (!candidates.length) throw fail((officialFailure ? 'Official image model is unavailable (HTTP ' + officialFailure.status + '). ' : '') + 'This custom API provides no model for image ' + (operation === 'edits' ? 'editing' : 'generation') + '. Add an image model to the API; IMAGE_MODEL / IMAGE_EDIT_MODEL can select an alias.', 'no_gateway_image_model');
+  const models = await getModels();
+  const candidates = imageCandidates(models, env, operation, original.model, { nativeDefault });
+  if (!candidates.length) throw fail('This custom API provides no model for image ' + (operation === 'edits' ? 'editing' : 'generation') + '. Add an image model to the API; IMAGE_MODEL / IMAGE_EDIT_MODEL can select an alias.', 'no_gateway_image_model');
   let last;
   for (const model of candidates) {
     const gateway = resolveGateway?.(model);
     const selectedModel = gateway ? { ...model, id: gateway.model } : model, settings = gateway?.env || env;
-    const outgoing = await gatewayBody(original, selectedModel, operation, settings, imageDispatcher, signal, resolveFile);
+    const outgoing = await gatewayBody(original, selectedModel, operation, settings, imageDispatcher, signal, resolveFile, gateway?.strengths, nativeImage);
     let result = await forward('gateway', model.id, outgoing, gateway);
     if (operation === 'edits' && outgoing.contentType === 'application/json' && original.images?.length && imageEditNeedsMultipart(result)) {
-      const multipart = await gatewayBody(original, selectedModel, operation, { ...settings, IMAGE_EDIT_FORMAT: 'multipart' }, imageDispatcher, signal, resolveFile);
+      const multipart = await gatewayBody(original, selectedModel, operation, { ...settings, IMAGE_EDIT_FORMAT: 'multipart' }, imageDispatcher, signal, resolveFile, gateway?.strengths, nativeImage);
       log('gateway images operation=edits model=' + model.id + ' format=multipart after JSON image-field rejection');
       result = await forward('gateway', model.id, multipart, gateway);
     }
@@ -226,7 +223,5 @@ export async function forwardImages({ req,res,url,body,operation,env,hasLogin,al
     last = { ...result,model: model.id };
     if (!imageModelUnavailable(result.status, result.data)) break;
   }
-  if (!officialFailure) { res.writeHead(last.status, responseHeaders(last.headers)); res.end(last.raw); return; }
-  const detail = typeof last.data?.error?.message === 'string' ? last.data.error.message : 'HTTP ' + last.status;
-  throw fail('Official image model is unavailable (HTTP ' + officialFailure.status + '). Custom image model ' + last.model + ' failed: ' + detail, 'image_model_unavailable', last.status);
+  res.writeHead(last.status, responseHeaders(last.headers)); res.end(last.raw);
 }

@@ -8,6 +8,7 @@ import { GatewaySources } from './gateway-sources.mjs';
 import { readEnvFile, readSettings, publicSettings, saveSettings, settingsRevision, atomicPrivate, overrideKey, redact } from './settings.mjs';
 import { rememberContexts, contextKey, applyContext } from './model-context.mjs';
 import { imageOnlyModel, imageCapabilities, automaticImageCandidates } from './image-compat.mjs';
+import { modelStrengths } from './model-strength.mjs';
 
 const moduleRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const readJson = (file, fallback = null) => { try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { return fallback; } };
@@ -53,6 +54,7 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
     } catch { return { running: false }; }
   }
   function models(pool) {
+    const official = readJson(path.join(root, 'data/cache/catalog-state.json'), {}).official || [];
     const known = readJson(path.join(root, 'assets/model-contexts.json'), {});
     const template = readJson(path.join(root, 'assets/model-template.json'), {}).models?.[0] || { context_window: 128000 };
     const capacities = new Map();
@@ -69,7 +71,7 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
       const image = imageCapabilities(configuredImage ? { ...model, type: 'image' } : model);
       const key = overrideKey(profile.id, model._upstreamId), resolved = applyContext({ ...template }, record, { limit: settings.contextLimit, override: settings.contextOverrides[key] });
       return { id: model.id, name: model._upstreamId, providerId: profile.id, providerName: profile.name, overrideKey: key, kind: image.known ? 'image' : 'chat',
-        image,
+        image, strengths: modelStrengths(model, official),
         capacity: record?.capacity || null, capacitySource: record?.source || 'unreported', fallbackCapacity: template.context_window, limit: resolved.context_window,
         effectivePercent: resolved.effective_context_window_percent ?? 95,
         effective: Math.floor(resolved.context_window * (resolved.effective_context_window_percent ?? 95) / 100) };

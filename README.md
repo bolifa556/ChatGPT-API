@@ -7,7 +7,7 @@
 支持接入 **DeepSeek** · **Claude** · **Gemini** · **OpenAI 全系/中转** · **本地 Ollama / vLLM** 与任意兼容 API  
 **原版丝滑体验 · 零修改客户端 · 三种灵活模式 · 深度思考与生图全面适配**
 
-[![Version](https://img.shields.io/badge/Release-v3.1.9-blue.svg)](release/README.md)
+[![Version](https://img.shields.io/badge/Release-v3.2.0-blue.svg)](release/README.md)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-brightgreen.svg)](#-极速上手)
 [![Zero Intrusion](https://img.shields.io/badge/Security-Zero%20Intrusion%20(No%20Patching)-success.svg)](#-核心特性与优势)
 [![Node Runtime](https://img.shields.io/badge/Runtime-Built--in%20Node.js-orange.svg)](#-极速上手)
@@ -65,10 +65,10 @@
 
 | 平台 | 下载发布包 | 极速安装方式 |
 | :--- | :--- | :--- |
-| **Windows x64** | [ChatGPT-API-Launcher-3.1.9-win-x64.zip](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.1.9/ChatGPT-API-Launcher-3.1.9-win-x64.zip) | 完整解压后双击运行 `安装.cmd`，选择程序目录完成安装。 |
-| **macOS (Apple Silicon)** | [ChatGPT-API-Provider-3.1.9-macos-arm64.dmg](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.1.9/ChatGPT-API-Provider-3.1.9-macos-arm64.dmg) | 打开 DMG 镜像，将对应的启动入口与控制台 App 拖到“应用程序”文件夹。（详见 [macOS 说明](docs/macos-dmg-readme.md)） |
-| **Linux x64** | [ChatGPT-API-Provider-3.1.9-linux-x64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.1.9/ChatGPT-API-Provider-3.1.9-linux-x64.tar.gz) | 解压压缩包，以桌面用户身份执行 `./install.sh`。（详见 [Linux 说明](docs/linux-readme.md)） |
-| **Linux ARM64** | [ChatGPT-API-Provider-3.1.9-linux-arm64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.1.9/ChatGPT-API-Provider-3.1.9-linux-arm64.tar.gz) | 解压后同样执行 `./install.sh` 即可。 |
+| **Windows x64** | [ChatGPT-API-Launcher-3.2.0-win-x64.zip](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.0/ChatGPT-API-Launcher-3.2.0-win-x64.zip) | 完整解压后双击运行 `安装.cmd`，选择程序目录完成安装。 |
+| **macOS (Apple Silicon)** | [ChatGPT-API-Provider-3.2.0-macos-arm64.dmg](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.0/ChatGPT-API-Provider-3.2.0-macos-arm64.dmg) | 打开 DMG 镜像，将对应的启动入口与控制台 App 拖到“应用程序”文件夹。（详见 [macOS 说明](docs/macos-dmg-readme.md)） |
+| **Linux x64** | [ChatGPT-API-Provider-3.2.0-linux-x64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.0/ChatGPT-API-Provider-3.2.0-linux-x64.tar.gz) | 解压压缩包，以桌面用户身份执行 `./install.sh`。（详见 [Linux 说明](docs/linux-readme.md)） |
+| **Linux ARM64** | [ChatGPT-API-Provider-3.2.0-linux-arm64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.0/ChatGPT-API-Provider-3.2.0-linux-arm64.tar.gz) | 解压后同样执行 `./install.sh` 即可。 |
 
 ### 2. 配置你的 API 来源
 
@@ -131,7 +131,10 @@ flowchart LR
 
 1. 在 **API 来源** 中添加并启用提供图片服务的 URL / Key，保存后进入 **模型与上下文**，点击 **刷新模型目录**。上游需要提供适配器支持的 Images 生成或编辑接口；模型名称出现在列表里，不代表接口一定可用。
 2. 发现图片模型后会自动选好默认项，可直接在聊天中提出画图请求。图片模型的“已知容量”和“单模型上限”留空，无需填写文本上下文容量。
-3. 如需指定其他模型，在 **模型与上下文** 的 **当前配置** 列勾选所需模型的 **默认生图**，点击 **保存**，完全退出客户端，再从对应入口重新打开。点击 **恢复自动** 可重新使用自动选择。
+3. 在 **所有来源** 右侧选择 **官方生图设置** 或 **自定义生图设置**。官方设置使用订阅账号原生生图；自定义设置使用下方的 API 模型。纯 API 模式始终使用自定义设置。
+4. 如需指定其他 API 生图模型，在 **当前配置** 列勾选所需模型的 **默认生图**；取消手动选择可恢复自动。在末尾 **思考强度** 列分别设置图片思考与画质，默认使用可确认的最高档位。点击 **保存**，完全退出客户端，再从对应入口打开。
+
+**强度自动识别，无法确认就如实显示。** 模型目录中的明确声明优先，也可匹配官方模型目录与准确型号规格；来源可在提示中查看。没有足够信息时显示“无法检测”，明确不支持时显示“不支持”。检测随模型目录加载或手动刷新进行，不额外生成聊天或图片。普通聊天只列出档位，仍在原生客户端选择思考强度。
 
 > [!IMPORTANT]
 > **在聊天里说“用某某模型画图”，目前不能可靠切换生图模型。** 原生 `image_gen` 工具没有 `model` 参数，适配层无法从工具调用中收到所选模型；当前请通过控制台切换默认。通过 **Images API 直接发请求** 时，可以用 `model` 字段明确指定其他模型，适配层优先使用请求中指定的模型。这是接口能力，与在聊天文字中提名字不同。
@@ -139,8 +142,8 @@ flowchart LR
 | 启动入口 | 生图请求使用哪个通道？ |
 | :--- | :--- |
 | **`ChatGPT` / `chatgpt-official`** | 使用官方图片服务。 |
-| **`chatgpt-api`** | 已设置默认 API 生图模型时使用该模型；未设置时，有官方登录则优先官方，明确不可用后再尝试 API；无官方登录则使用 API。 |
-| **`chatgpt-apionly`** | 使用自定义 API 的默认生图模型；未设置时自动选择可识别的图片模型，没有可用模型就报错。 |
+| **`chatgpt-api`** | 有官方登录时按“官方／自定义生图设置”选择通道。官方请求原样转发；自定义请求使用下方默认模型和强度。无官方登录时使用自定义设置。 |
+| **`chatgpt-apionly`** | 忽略官方生图选项，使用自定义 API 的默认模型与强度；未指定时自动选择，没有可用模型就报错。 |
 
 图片模型按上游目录中的能力信息与已知模型名称自动识别；**仅图片编辑** 的模型不能设为默认生图。只有文本聊天模型、缺少图片接口或 Key 没有对应权限时，适配层无法补出图片生成能力。
 
