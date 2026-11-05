@@ -41,9 +41,11 @@ API 地址会补齐 `/v1`，不接受内嵌密码、查询参数或片段。保�
 | `BASE_URL`、`API_KEY` | 旧版默认来源与本机桥接的启动凭据 |
 | `SHIM_HOST` | `127.0.0.1`，本机监听 |
 | `SHIM_PORT` | `8102` |
-| `GATEWAY_TRANSPORT` | `direct`；保留旧默认来源的显式 SSH 隧道方式 |
+| `GATEWAY_TRANSPORT` | 默认按 API URL 连接，沿用系统路由；Windows 仅显式 `ssh` 启用旧默认来源的 SSH 隧道，其他值不阻止启动 |
 | `OFFICIAL_BASE` | 默认官方 Codex 地址，通常无需设置 |
 | `IMAGE_MODEL`、`IMAGE_EDIT_MODEL`、`IMAGE_EDIT_FORMAT` | 尚未保存多来源配置时的默认图片选项 |
+
+校园 VPN、TUN、局域网和公网无需填写不同的连接类型。`direct` 表示不额外建立 SSH 隧道，不会绕过系统 VPN。`GATEWAY_TRANSPORT` 可省略；`auto`、`vpn` 等旧值按普通 URL 连接处理，显式 `ssh` 兼容大小写、外围引号和行尾 `#` 注释。此设置不会启用或关闭系统代理、VPN、TUN；仅在浏览器中设置的代理也不会因此自动用于 API 请求。
 
 Windows / macOS 的旧 URL / Key 配置窗口仍可用；明确修改时同步控制台中的优先来源。多来源、单模型上下文和图片设置应在控制台管理。保存多来源配置后清空图片模型表示恢复自动选择，不会重新启用旧 `.env` 的图片别名。
 

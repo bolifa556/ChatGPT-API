@@ -44,7 +44,7 @@ peer.on('connection', socket => { sockets.add(socket); socket.on('error', () => 
 await new Promise(resolve => peer.listen(0, '127.0.0.1', resolve));
 const upstream = 'http://127.0.0.1:' + peer.address().port;
 const reserve = http.createServer(); await new Promise(resolve => reserve.listen(0, '127.0.0.1', resolve)); const port = reserve.address().port; await new Promise(resolve => reserve.close(resolve));
-fs.writeFileSync(path.join(fixture, 'data/.env'), 'BASE_URL=' + upstream + '/a/v1\nAPI_KEY=' + keys.a + '\nSHIM_PORT=' + port + '\nIMAGE_MODEL=legacy-image-alias\n');
+fs.writeFileSync(path.join(fixture, 'data/.env'), 'BASE_URL=' + upstream + '/a/v1\nAPI_KEY=' + keys.a + '\nSHIM_PORT=' + port + '\nIMAGE_MODEL=legacy-image-alias\nGATEWAY_TRANSPORT=vpn # existing OS route\n');
 fs.writeFileSync(path.join(fixture, 'data/state/route-state.json'), JSON.stringify({ entryMode: 'apionly', mode: 'gateway' }));
 const initial = readSettings(fixture), key = overrideKey('p_bbbbbbbb', models[0]);
 assert.deepEqual(initial.defaultImageModel, { providerId: 'default', modelId: 'legacy-image-alias' });
@@ -151,7 +151,12 @@ try {
   const saved = await request('settings', settings); assert.equal(saved.status, 200); assert.equal(readSettings(fixture).providers[1].apiKey, keys.b);
   assert.equal((await request('keys/reveal', revealBody)).status, 409, 'An outdated console must not reveal a changed source without refreshing');
   assert.equal((await request('settings', settings)).status, 409);
+  if (process.platform !== 'win32') {
+    const envFile = path.join(fixture, 'data/.env');
+    fs.writeFileSync(envFile, fs.readFileSync(envFile, 'utf8').replace('GATEWAY_TRANSPORT=vpn # existing OS route', 'GATEWAY_TRANSPORT=SSH'));
+  }
   state = await (await request('refresh', {})).json(); assert.equal(state.models.length, 6);
+  assert.equal(state.sources.find(source => source.id === 'default').ready, true, 'Console refresh must use the platform launcher route, not just a cached catalog');
   assert.equal(state.settings.providers[1].name, 'Renamed source');
   const preferredBeforeImage = state.settings.preferredProviderId;
   const defaultImage = { providerId: 'p_bbbbbbbb', modelId: 'qwen-image' };

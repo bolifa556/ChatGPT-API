@@ -11,6 +11,12 @@
     try { return ([BitConverter]::ToString($hash.ComputeHash($bytes.ToArray()))).Replace('-','').ToLowerInvariant() }
     finally { $hash.Dispose() }
 }
+function Get-GatewayTransport([string]$value) {
+    # This legacy setting only opts into our SSH tunnel. VPN/TUN and other
+    # network routes belong to the OS and must not block URL-based connections.
+    if ($value -match '^\s*(?:"ssh"|''ssh''|ssh)\s*(?:#.*)?$') { return 'ssh' }
+    return 'direct'
+}
 function Add-RouterHelper([string]$packageDir, $process, [string]$marker) {
     $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $process.Id)
     if(-not $p){throw 'Router helper exited during startup.'}
@@ -66,8 +72,7 @@ function Ensure-LocalRouter([string]$packageDir, [string]$routeMode = '', [strin
         }
         $clientVersion = if ($mode -eq 'mixed') { Get-NativeClientVersion } else { '' }
         $logDir=Join-Path $packageDir 'data\logs';[void](New-Item -ItemType Directory -Path $logDir -Force)
-        $transport=if($settings['GATEWAY_TRANSPORT']){[string]$settings['GATEWAY_TRANSPORT']}else{'direct'}
-        if($transport -notin @('direct','ssh')){throw 'GATEWAY_TRANSPORT must be direct or ssh.'}
+        $transport=Get-GatewayTransport $settings['GATEWAY_TRANSPORT']
         if($transport -eq 'ssh' -and $entryMode -ne 'official'){
             $uri=[Uri]$baseUrl
             $hostName=if($settings['SSH_HOST']){[string]$settings['SSH_HOST']}else{$uri.Host}

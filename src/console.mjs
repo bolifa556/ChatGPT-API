@@ -126,7 +126,9 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
         if (req.method === 'POST' && url.pathname === '/api/refresh') {
           if (!refresh) refresh = (async () => {
             env = readEnvFile(path.join(root, 'data/.env'));
-            const pool = new GatewaySources(root, env, { transport: env.GATEWAY_TRANSPORT || 'direct', tunnelPort: Number(env.GATEWAY_TUNNEL_PORT || 18003) });
+            // Match the launchers: only Windows owns the optional legacy SSH tunnel.
+            const transport = process.platform === 'win32' ? env.GATEWAY_TRANSPORT : 'direct';
+            const pool = new GatewaySources(root, env, { transport, tunnelPort: Number(env.GATEWAY_TUNNEL_PORT || 18003) });
             try { pool.loadCached(readJson(path.join(root, 'data/cache/catalog-state.json'), {})); await pool.discover(); }
             finally { await pool.close(); }
           })().finally(() => { refresh = null; });

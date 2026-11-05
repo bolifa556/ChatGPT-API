@@ -1,6 +1,8 @@
 import zlib from 'node:zlib';
 import { promisify } from 'node:util';
-import { Agent, ProxyAgent, request } from 'undici';
+import { isIP } from 'node:net';
+import { checkServerIdentity } from 'node:tls';
+import { Agent, ProxyAgent, buildConnector, request } from 'undici';
 
 export const MAX_REQUEST_BYTES = 256 * 1024 * 1024;
 export const CONNECT_TIMEOUT_MS = 10000;
@@ -9,6 +11,22 @@ export const CONNECT_TIMEOUT_MS = 10000;
 export const RESPONSE_TIMEOUTS = { headersTimeout: 0, bodyTimeout: 0 };
 export const NATIVE_RESPONSES_HEADER = 'x-openai-internal-codex-responses-lite';
 export const FORWARDED_NATIVE_RESPONSES_HEADER = 'x-bf-eh-' + NATIVE_RESPONSES_HEADER;
+
+export function normalizeGatewayTransport(value) {
+  // Match the Windows launcher's explicit SSH opt-in. Other values use the
+  // supplied URL through existing OS routes, including VPN/TUN interfaces.
+  return /^\s*(?:"ssh"|'ssh'|ssh)\s*(?:#.*)?$/i.test(String(value ?? '')) ? 'ssh' : 'direct';
+}
+
+export function gatewayDispatcherFor(base, transport, tunnelPort = 18003) {
+  if (normalizeGatewayTransport(transport) !== 'ssh') return new Agent();
+  const hostname = new URL(base).hostname.replace(/^\[|\]$/g, '');
+  const connect = buildConnector({ servername: isIP(hostname) ? undefined : hostname,
+    checkServerIdentity: (_host, certificate) => checkServerIdentity(hostname, certificate) });
+  // Connector factory options do not override the per-request destination.
+  // Redirect the socket to the tunnel, keeping the original TLS identity/Host.
+  return new Agent({ connect: (options, callback) => connect({ ...options, hostname: '127.0.0.1', port: tunnelPort }, callback) });
+}
 
 export function gatewayResponseHeaders(headers, native) {
   const result = { ...headers };

@@ -1,0 +1,21 @@
+[
+  [null, "direct"],
+  ["", "direct"],
+  ["direct", "direct"],
+  [" DIRECT ", "direct"],
+  ["\"direct\"", "direct"],
+  ["direct # existing route", "direct"],
+  ["auto", "direct"],
+  ["vpn", "direct"],
+  ["tun", "direct"],
+  ["system", "direct"],
+  ["wireguard", "direct"],
+  ["other-network", "direct"],
+  ["ssh", "ssh"],
+  ["SSH", "ssh"],
+  [" ssh ", "ssh"],
+  ["'ssh'", "ssh"],
+  ["\"SsH\" # optional tunnel", "ssh"],
+  ["ssh # optional tunnel", "ssh"],
+  ["ssh-proxy", "direct"]
+]

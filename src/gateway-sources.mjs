@@ -1,8 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { Agent } from 'undici';
-import { requestWithAbort as request } from './transport.mjs';
+import { requestWithAbort as request, normalizeGatewayTransport, gatewayDispatcherFor } from './transport.mjs';
 import { contextFields } from './model-context.mjs';
 import { readSettings, settingsRevision, publicModelId, atomicPrivate, redact } from './settings.mjs';
 
@@ -13,7 +12,7 @@ const readJson = file => { try { return JSON.parse(fs.readFileSync(file, 'utf8')
 const fingerprint = profile => crypto.createHash('sha256').update(profile.baseUrl + '\n' + profile.apiKey).digest('hex');
 export class GatewaySources {
   constructor(root, env, { transport = 'direct', tunnelPort = 18003, baseOverride = '' } = {}) {
-    this.root = root; this.env = env; this.transport = transport; this.tunnelPort = tunnelPort;
+    this.root = root; this.env = env; this.transport = normalizeGatewayTransport(transport); this.tunnelPort = tunnelPort;
     this.baseOverride = baseOverride;
     this.agents = new Map(); this.settings = readSettings(root, env); this.revision = settingsRevision(this.settings);
     this.secrets = new Set(this.settings.providers.map(profile => profile.apiKey).filter(Boolean));
@@ -30,9 +29,7 @@ export class GatewaySources {
   dispatcher(profile) {
     const key = profile.baseUrl + '\n' + (profile.id === 'default' ? this.transport : 'direct');
     if (!this.agents.has(key)) {
-      const url = new URL(profile.baseUrl);
-      this.agents.set(key, new Agent(profile.id === 'default' && this.transport === 'ssh'
-        ? { connect: { hostname: '127.0.0.1', port: this.tunnelPort, servername: url.hostname } } : {}));
+      this.agents.set(key, gatewayDispatcherFor(profile.baseUrl, profile.id === 'default' ? this.transport : 'direct', this.tunnelPort));
     }
     return this.agents.get(key);
   }

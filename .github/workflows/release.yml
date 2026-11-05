@@ -41,6 +41,7 @@ jobs:
           . .\install\Bootstrap-Runtime.ps1
           Ensure-LauncherRuntime (Get-Location).Path
       - run: npm test
+      - run: python scripts/ci-run.py powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/gateway-transport-test.ps1
       - run: python scripts/ci-run.py powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/launcher-test.ps1
       - run: python scripts/ci-run.py powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/gateway-recovery-test.ps1
       - run: python scripts/ci-run.py powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/install-deferred-test.ps1
@@ -104,6 +105,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - run: npm ci --ignore-scripts
       - run: python3 scripts/ci-run.py node tests/macos-platform-test.mjs
+      - run: node tests/gateway-transport-test.mjs
       - run: node tests/responses-images-test.mjs
       - run: node tests/configuration-update-test.mjs
       - run: node tests/feature-matrix-test.mjs

@@ -6,7 +6,6 @@ import os from 'node:os';
 import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { Agent } from 'undici';
 import WebSocket, { WebSocketServer } from 'ws';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { normalizeGptHistory, normalizeOfficialHistory, isGptModel, ResponseOutput } from './history-compat.mjs';
@@ -18,7 +17,7 @@ import { ResponseImages, restoreHostedImageHistory } from './responses-images.mj
 import { contextFields, rememberContexts, contextKey, applyContext } from './model-context.mjs';
 import { officialDispatcherFor, readEncodedBody, outgoingBody, writeChunk, relayClose,
   requestWithAbort as request, protocolError, releaseResponseBody, RESPONSE_TIMEOUTS, MAX_REQUEST_BYTES,
-  gatewayResponseHeaders, FORWARDED_NATIVE_RESPONSES_HEADER } from './transport.mjs';
+  gatewayResponseHeaders, FORWARDED_NATIVE_RESPONSES_HEADER, normalizeGatewayTransport, gatewayDispatcherFor } from './transport.mjs';
 import { PendingResponses, HistoryCache, laneOf } from './response-state.mjs';
 import { GatewaySources } from './gateway-sources.mjs';
 import { overrideKey, redact } from './settings.mjs';
@@ -50,11 +49,10 @@ const gatewayBase = (process.env.CHATGPT_GATEWAY_BASE || env.BASE_URL || '').rep
 const officialBase = (env.OFFICIAL_BASE || 'https://chatgpt.com/backend-api/codex').replace(/\/+$/, '');
 if (gatewayEnabled && (!/^https?:\/\//.test(gatewayBase) || !env.API_KEY)) throw new Error('BASE_URL or API_KEY is missing.');
 const officialProxy = runtime.officialProxy ?? '';
-const transport = runtime.gatewayTransport || env.GATEWAY_TRANSPORT || 'direct';
+const transport = normalizeGatewayTransport(runtime.gatewayTransport || env.GATEWAY_TRANSPORT);
 const tunnelPort = Number(env.GATEWAY_TUNNEL_PORT || 18003);
 const sources = new GatewaySources(root, env, { transport, tunnelPort, baseOverride: process.env.CHATGPT_GATEWAY_BASE || '' });
-const gatewayUrl = gatewayEnabled ? new URL(gatewayBase) : new URL('http://127.0.0.1');
-const gatewayDispatcher = new Agent(transport === 'ssh' ? { connect: { hostname: '127.0.0.1', port: tunnelPort, servername: gatewayUrl.hostname } } : {});
+const gatewayDispatcher = gatewayDispatcherFor(gatewayEnabled ? gatewayBase : 'http://127.0.0.1', transport, tunnelPort);
 const officialDispatcher = officialDispatcherFor(officialProxy);
 const sourceId = crypto.createHash('sha256').update(gatewayBase + '\n' + (env.API_KEY || '')).digest('hex');
 const buildHash = crypto.createHash('sha256');
