@@ -16,6 +16,7 @@ fs.mkdirSync(path.join(root, 'data/testing'), { recursive: true });
 const fixture = fs.mkdtempSync(path.join(root, 'data/testing/responses-images-'));
 const home = path.join(fixture, 'client home 图片');
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
+const gif = 'R0lGODlhEAAQAIEAAP8AAAAAAAAAAAAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQACgAAACwAAAAAEAAQAAAIHQABCBxIsKDBgwgTKlzIsKHDhxAjSpxIsaLFgQEBACH5BAEKAAEALAAAAAAQABAAgQAA/wAAAAAAAAAAAAgdAAEIHEiwoMGDCBMqXMiwocOHECNKnEixosWBAQEAOw==';
 const image = (id = 'ig_fixture', result = png) => ({ type: 'image_generation_call', id, status: 'completed', result, output_format: 'png' });
 const message = { type: 'message', id: 'msg_text', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'Original text', annotations: [] }] };
 const response = output => ({ id: 'resp_fixture', object: 'response', model: 'GPT/gpt-test', status: 'completed', output });
@@ -86,7 +87,21 @@ for (const result of [undefined, null, '', '!bad', 'abcd=', Buffer.from('<svg/>'
 }
 const blocked = path.join(fixture, 'blocked'); fs.writeFileSync(blocked, 'not a directory');
 assert.throws(() => new ResponseImages(blocked).response(response([image()])), error => error.code === 'image_storage_unavailable');
-checks.push('PNG/JPEG/WebP bytes are kept; invalid, missing and unsupported image data or unwritable storage produce explicit errors');
+const animation = { ...image('ig_animated', gif), output_format: 'gif', frame_count: 2, frame_duration_ms: 100 };
+const animationItem = new ResponseImages(home).response(response([animation])).output[0];
+assert(savedPath(animationItem).endsWith('.gif'));
+assert.equal(animationItem.content[1].image_url, 'data:image/gif;base64,' + gif);
+assert(fs.readFileSync(savedPath(animationItem)).equals(Buffer.from(gif, 'base64')));
+assert.deepEqual(restoreHostedImageHistory({ input: [animationItem] }, home).payload.input[0], animation);
+const nativeGifStill = { ...animationItem, content: [animationItem.content[0], { type: 'input_image', image_url: 'data:image/png;base64,' + png }] };
+assert.deepEqual(restoreHostedImageHistory({ input: [nativeGifStill] }, home).payload.input[0], animation, 'Native GIF-to-PNG vision normalization must not replace the canonical animated result');
+assert.equal(restoreHostedImageHistory({ input: [nativeGifStill] }, path.join(fixture, 'unregistered')).changed, false, 'A normalized GIF must have a matching registered artifact');
+const animationFile = savedPath(animationItem), animationBytes = fs.readFileSync(animationFile);
+fs.writeFileSync(animationFile, Buffer.from(png, 'base64'));
+assert.equal(restoreHostedImageHistory({ input: [nativeGifStill] }, home).changed, false, 'A changed GIF artifact must not be used to rewrite history');
+fs.writeFileSync(animationFile, animationBytes);
+checks.push('Animated GIF bytes, extension, MIME, timing metadata and canonical history survive without conversion to a still image');
+checks.push('PNG/JPEG/WebP/GIF bytes are kept; invalid, missing and unsupported image data or unwritable storage produce explicit errors');
 
 function eventsFor(output, variant = 'full') {
   const events = [{ type: 'response.created', response: { ...response([]), status: 'in_progress' } }];

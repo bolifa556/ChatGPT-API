@@ -33,23 +33,31 @@ export function restoreHostedImageHistory(payload, codexHome) {
         item.status && item.status !== 'completed' || !Array.isArray(item.content) || item.content.length !== 2) return item;
     const [text, image] = item.content;
     if (text?.type !== 'output_text' || image?.type !== 'input_image') return item;
-    const reference = /^!\[\]\(<[^\r\n]+\/generated_images\/chatgpt-api\/([a-f0-9]{64})\.(png|jpeg|webp)>\)$/.exec(text.text);
-    const data = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(image.image_url || '');
-    if (!reference || !data || reference[2] !== data[1]) return item;
-    const bytes = Buffer.from(data[2], 'base64'), digest = crypto.createHash('sha256').update(bytes).digest('hex');
-    if (digest !== reference[1]) return item;
+    const reference = /^!\[\]\(<[^\r\n]+\/generated_images\/chatgpt-api\/([a-f0-9]{64})\.(png|jpeg|webp|gif)>\)$/.exec(text.text);
+    const data = /^data:image\/(png|jpeg|webp|gif);base64,([A-Za-z0-9+/]+={0,2})$/.exec(image.image_url || '');
+    if (!reference || !data) return item;
+    const digest = reference[1]; let bytes = Buffer.from(data[2], 'base64'), saved;
+    if (codexHome) {
+      try {
+        const record = JSON.parse(fs.readFileSync(path.resolve(codexHome, 'generated_images', 'chatgpt-api', item.id + '.response.json'), 'utf8'));
+        if (record.version === 1 && record.digest === digest && record.item?.type === 'image_generation_call' &&
+            record.item.status === 'completed' && typeof record.item.id === 'string') saved = record.item;
+      } catch {} // Older records can still use their self-contained bytes.
+    }
+    if (reference[2] !== data[1] || crypto.createHash('sha256').update(bytes).digest('hex') !== digest) {
+      // The native core converts a GIF's vision input to a PNG still when it
+      // resumes history. Restore only our registered GIF carrier, using its
+      // original local bytes and verified digest, never a caller-provided path.
+      if (!saved || reference[2] !== 'gif' || data[1] !== 'png') return item;
+      try { bytes = fs.readFileSync(path.resolve(codexHome, 'generated_images', 'chatgpt-api', digest + '.gif')); } catch { return item; }
+      if (imageFormat(bytes) !== 'gif' || crypto.createHash('sha256').update(bytes).digest('hex') !== digest) return item;
+    }
     // 3.1.8 did not keep the original result metadata. Its image bytes still
     // suffice for the documented result schema; use a stable result ID.
     let result = { type: 'image_generation_call', id: 'ig_' + item.id.slice(4), status: 'completed' };
-    if (codexHome) {
-      try {
-        const saved = JSON.parse(fs.readFileSync(path.resolve(codexHome, 'generated_images', 'chatgpt-api', item.id + '.response.json'), 'utf8'));
-        if (saved.version === 1 && saved.digest === digest && saved.item?.type === 'image_generation_call' &&
-            saved.item.status === 'completed' && typeof saved.item.id === 'string') result = saved.item;
-      } catch {} // A moved/older image retains the self-contained result above.
-    }
+    if (saved) result = saved;
     changed = true; ids.set(item.id, result.id);
-    return { ...result, result: data[2] };
+    return { ...result, result: bytes.toString('base64') };
   });
   if (!changed) return { payload, changed: false };
   input = input.map(item => item?.type === 'item_reference' && ids.has(item.id) ? { ...item, id: ids.get(item.id) } : item);
@@ -59,7 +67,8 @@ export function restoreHostedImageHistory(payload, codexHome) {
 export function imageFormat(bytes) {
   return bytes.length >= 24 && bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')) ? 'png'
     : bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff ? 'jpeg'
-      : bytes.length >= 16 && bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP' ? 'webp' : null;
+      : bytes.length >= 16 && bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP' ? 'webp'
+        : bytes.length >= 14 && ['GIF87a', 'GIF89a'].includes(bytes.toString('ascii', 0, 6)) && bytes.readUInt16LE(6) > 0 && bytes.readUInt16LE(8) > 0 ? 'gif' : null;
 }
 
 function imageBytes(result) {
@@ -69,7 +78,7 @@ function imageBytes(result) {
   const bytes = Buffer.from(result, 'base64');
   if (bytes.toString('base64').replace(/=+$/, '') !== result.replace(/=+$/, '')) throw invalid('The image result contains invalid base64 data.');
   const format = imageFormat(bytes);
-  if (!format) throw invalid('The image result is not a supported PNG, JPEG or WebP image.');
+  if (!format) throw invalid('The image result is not a supported PNG, JPEG, WebP or GIF image.');
   return { bytes, format };
 }
 

@@ -11,7 +11,7 @@ import { processIdentity, alive, runningClients, requireClosedClient, clientExec
 import { hasChatGPTLogin, nativeVersion } from './native.mjs';
 import { repairThreadProviders } from '../src/repair-thread-providers.mjs';
 import { prepareWithRecovery, updateEnv, restoreRootLine } from '../src/gateway-recovery.mjs';
-import { syncLegacySettings, userApiSettings, initializeDeferredSettings, requireApiConfiguration } from '../src/settings.mjs';
+import { syncLegacySettings, userApiSettings, initializeDeferredSettings, requireApiConfiguration, officialProviders } from '../src/settings.mjs';
 export { requireClosedClient } from './platform.mjs';
 
 const run = promisify(execFile), delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -177,6 +177,9 @@ export function getTable(text, name) { return text.match(tablePattern(name))?.[0
 export function setTable(text, name, value) { const pattern = tablePattern(name); return pattern.test(text) ? text.replace(pattern, () => value) : value ? text.trimEnd() + '\n\n' + value : text; }
 export function applyConfig(ctx, selection = { entryMode: 'apionly', mode: 'gateway' }) {
   const settings = routerSettings(ctx, selection), signedIn = selection.mode === 'mixed';
+  const officialOnly = selection.entryMode === 'official';
+  const selectedProvider = officialOnly ? readJson(path.join(ctx.data, 'providers.json'), {}).officialProvider ?? providerId : providerId;
+  if (!officialProviders.includes(selectedProvider)) throw new Error('Official history provider is invalid.');
   const catalog = readJson(path.join(ctx.data, 'cache/catalog-state.json'), {});
   const officialIds = signedIn ? (catalog.official || []).map(model => model.slug) : [];
   const models = readJson(path.join(ctx.data, 'cache/models-smr.json'))?.models
@@ -188,18 +191,21 @@ export function applyConfig(ctx, selection = { entryMode: 'apionly', mode: 'gate
   let text = original, selected = ids.includes(remembered?.model) ? remembered.model : rootString(text, 'model');
   if (!ids.includes(selected)) selected = ids[0];
   const base = 'http://127.0.0.1:' + settings.SHIM_PORT + '/v1';
-  const tables = ['chatgpt_api_launcher', 'chatgpt_api_mixed', ...(getTable(original, 'model_providers.smr') ? ['smr'] : [])];
+  const tables = ['chatgpt_api_launcher', 'chatgpt_api_mixed', ...(getTable(original, 'model_providers.smr') || selectedProvider === 'smr' ? ['smr'] : [])];
   const tableNames = tables.flatMap(id => ['model_providers.' + id, 'model_providers.' + id + '.auth']);
   const imageHeader = signedIn ? '' : 'http_headers = { "x-openai-actor-authorization" = "chatgpt-api-local" }\n';
   for (const id of tables) {
     const table = 'model_providers.' + id;
-    const body = `[${table}]\nname = "ChatGPT API compatibility"\nbase_url = ${JSON.stringify(base)}\nwire_api = "responses"\nrequires_openai_auth = ${signedIn}\n${imageHeader}supports_websockets = ${signedIn}\n\n`;
+    const name = officialOnly && id === selectedProvider ? 'OpenAI' : 'ChatGPT API compatibility';
+    const body = `[${table}]\nname = ${JSON.stringify(name)}\nbase_url = ${JSON.stringify(base)}\nwire_api = "responses"\nrequires_openai_auth = ${signedIn}\n${imageHeader}supports_websockets = ${signedIn}\n\n`;
     const auth = signedIn ? '' : `[${table}.auth]\ncommand = ${JSON.stringify(ctx.node)}\nargs = ${JSON.stringify([path.join(ctx.root, 'macos/provider.mjs'), 'auth'])}\ntimeout_ms = 45000\nrefresh_interval_ms = 0\n\n`;
     text = setTable(setTable(text, table + '.auth', auth), table, body);
   }
-  const values = { openai_base_url: base, model_provider: selection.entryMode === 'official' || officialIds.includes(selected) ? 'openai' : signedIn ? 'chatgpt_api_mixed' : providerId,
+  // Keep the shared ID; legacy official-entry choices select an existing
+  // conversation's provider without changing any stored conversation data.
+  const values = { openai_base_url: base, model_provider: selectedProvider,
     model_catalog_json: selection.entryMode === 'official' ? null : path.join(ctx.data, 'cache/models-smr.json'), model: selected || null };
-  if (values.model_provider !== 'openai') Object.assign(values, { model_context_window: null, model_auto_compact_token_limit: null });
+  if (!officialOnly) Object.assign(values, { model_context_window: null, model_auto_compact_token_limit: null });
   for (const [key, value] of Object.entries(values)) text = setRoot(text, key, value === null ? '' : key + ' = ' + JSON.stringify(value) + '\n');
   if (remembered?.effort) text = setRoot(text, 'model_reasoning_effort', 'model_reasoning_effort = ' + JSON.stringify(remembered.effort) + '\n');
   const file = statePath(ctx, 'config'), prior = readJson(file);
@@ -272,7 +278,7 @@ export async function launchEntry(ctx, entryMode, args = [], options = {}) {
         const repair = await repairThreadProviders({ cli, home: ctx.home,
           gatewayIds: entryMode === 'official' ? [] : catalog.gatewayIds || [],
           officialIds: selection.mode === 'mixed' ? (catalog.official || []).map(model => model.slug) : [],
-          provider: selection.mode === 'mixed' ? 'chatgpt_api_mixed' : providerId });
+          provider: providerId });
         atomic(statePath(ctx, 'provider-repair-result'), repair);
         if (repair.failed.length) throw new Error('Some conversations could not switch their native provider. See data/state/provider-repair-result.json.');
       }

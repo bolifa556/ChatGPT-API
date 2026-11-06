@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { modelStrengths, applyImageStrengths } from '../src/model-strength.mjs';
+import { modelStrengths, applyImageStrengths, canRequestFast } from '../src/model-strength.mjs';
 import { normalizeSettings, overrideKey } from '../src/settings.mjs';
 
 const current = { id: 'GPT/gpt-image-2.6-sunburst' }, previous = { id: 'GPT/gpt-image-2.5-flare' };
@@ -36,6 +36,7 @@ assert.equal(older.complexity, undefined); assert.equal(older.quality, 'max');
 const unknown = applyImageStrengths(structuredClone(original), { id: 'custom-image' }, {}, true);
 assert.equal(unknown.complexity, undefined); assert.equal(unknown.quality, 'auto');
 assert.equal(applyImageStrengths({ complexity: 'low', quality: 'high' }, current, { complexity: 'high', quality: 'max' }, false).complexity, 'low');
+assert.equal(applyImageStrengths({ quality: 'high' }, current, { quality: 'max' }, true).quality, 'high', 'An explicit native quality must take precedence over console defaults');
 assert.throws(() => applyImageStrengths({ complexity: 'max' }, current, {}, false), error => error.status === 400 && error.code === 'unsupported_image_strength');
 assert.equal(applyImageStrengths({ complexity: 'max' }, { id: 'custom-image' }, {}, false).complexity, 'max');
 const key = overrideKey('default', 'same-name'), second = overrideKey('p_12345678', 'same-name');
@@ -44,11 +45,21 @@ const baseline = { version: 1, providers: [{ id: 'default', baseUrl: 'https://ex
 const normalized = normalizeSettings(baseline);
 assert.deepEqual(normalized.imageStrengths, baseline.imageStrengths);
 assert.equal(normalized.imageRouting, 'official');
+assert.equal(normalized.officialProvider, 'chatgpt_api_launcher');
+for (const provider of ['openai', 'chatgpt_api_mixed', 'smr']) assert.equal(normalizeSettings({ ...baseline, officialProvider: provider }).officialProvider, provider);
+assert.throws(() => normalizeSettings({ ...baseline, officialProvider: 'unknown' }));
 assert.equal(normalizeSettings({ ...baseline, defaultImageModel: { providerId: 'default', modelId: 'same-name' } }).imageRouting, 'custom');
 assert.equal(normalizeSettings({ ...baseline, imageRouting: 'official', defaultImageModel: { providerId: 'default', modelId: 'same-name' } }).imageRouting, 'official');
 assert.throws(() => normalizeSettings({ ...baseline, imageRouting: 'unexpected' }));
 assert.deepEqual(normalizeSettings({ ...baseline, imageStrengths: undefined }, normalized).imageStrengths, baseline.imageStrengths);
 assert.deepEqual(normalizeSettings({ ...baseline, imageStrengths: {} }, normalized).imageStrengths, {});
+assert.deepEqual(normalizeSettings({ ...baseline, imageStrengths: { [key]: { quality: 'auto' } } }).imageStrengths, {}, 'Removed automatic UI selection must resolve to the actual supported maximum');
+assert.equal(canRequestFast({ id: 'GPT/gpt-6-sol' }), true);
+assert.equal(canRequestFast({ id: 'GPT/gpt-6-sol', service_tiers: [] }), false);
+assert.equal(canRequestFast({ id: 'GPT/gpt-6-sol', additional_speed_tiers: ['fast'] }), true);
+assert.equal(canRequestFast({ id: 'Vendor/glm', service_tiers: [{ id: 'priority' }] }), false);
+assert.equal(canRequestFast({ id: 'GPT/gpt-image-2.6-sunburst' }), false);
+assert(!Object.hasOwn(normalizeSettings({ ...baseline, fastModels: { [key]: true, [second]: false } }), 'fastModels'));
 assert.throws(() => normalizeSettings({ ...baseline, imageStrengths: { [key]: { temperature: 1 } } }));
 assert.throws(() => normalizeSettings({ ...baseline, imageStrengths: { [key]: { complexity: 'high\nmodel=other' } } }));
 console.log(JSON.stringify({ passed: true, checks: ['declared levels override exact documented specifications', 'unknown capabilities stay unknown', 'native image defaults use independent supported maxima', 'manual selections and separate API sources preserved', 'unsupported native complexity omitted', 'explicit API parameters preserved or rejected before forwarding'] }));

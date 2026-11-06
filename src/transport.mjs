@@ -11,6 +11,12 @@ export const CONNECT_TIMEOUT_MS = 10000;
 export const RESPONSE_TIMEOUTS = { headersTimeout: 0, bodyTimeout: 0 };
 export const NATIVE_RESPONSES_HEADER = 'x-openai-internal-codex-responses-lite';
 export const FORWARDED_NATIVE_RESPONSES_HEADER = 'x-bf-eh-' + NATIVE_RESPONSES_HEADER;
+// Protocol metadata only: credentials and account/organization identities must
+// never be copied into Bifrost's explicit upstream-header mechanism.
+export const NATIVE_PROTOCOL_HEADERS = [NATIVE_RESPONSES_HEADER, 'user-agent', 'originator', 'version',
+  'x-codex-beta-features', 'x-codex-turn-metadata', 'x-codex-turn-state', 'x-client-request-id',
+  'x-codex-window-id', 'thread-id', 'session-id', 'x-codex-image-turn-id'];
+export const FORWARDED_NATIVE_HEADERS = new Set(NATIVE_PROTOCOL_HEADERS.map(name => 'x-bf-eh-' + name));
 
 export function normalizeGatewayTransport(value) {
   // Match the Windows launcher's explicit SSH opt-in. Other values use the
@@ -30,14 +36,16 @@ export function gatewayDispatcherFor(base, transport, tunnelPort = 18003) {
 
 export function gatewayResponseHeaders(headers, native) {
   const result = { ...headers };
-  delete result[FORWARDED_NATIVE_RESPONSES_HEADER];
+  for (const name of FORWARDED_NATIVE_HEADERS) delete result[name];
   if (!native) delete result[NATIVE_RESPONSES_HEADER];
-  // Bifrost forwards explicit x-bf-eh-* headers to its provider. Losing the
-  // client's native protocol marker makes CLIProxyAPI inject a hosted image
-  // tool instead of leaving generation to the client's existing image_gen.
-  // Copy only a marker the client actually supplied; never invent one.
-  else if (result[NATIVE_RESPONSES_HEADER] !== undefined)
-    result[FORWARDED_NATIVE_RESPONSES_HEADER] = result[NATIVE_RESPONSES_HEADER];
+  // Bifrost only forwards explicit x-bf-eh-* metadata. Preserve the client's
+  // protocol/version/turn fields and its real user agent on native requests.
+  // An ordinary API request must not acquire a native client identity.
+  else if ([NATIVE_RESPONSES_HEADER, 'x-codex-turn-metadata', 'x-codex-image-turn-id'].some(name => result[name] !== undefined)) {
+    for (const name of NATIVE_PROTOCOL_HEADERS) {
+      if (result[name] !== undefined) result['x-bf-eh-' + name] = result[name];
+    }
+  }
   return result;
 }
 const codecs = {

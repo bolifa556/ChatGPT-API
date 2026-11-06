@@ -106,13 +106,26 @@ function Get-NativeClientVersion([string]$installLocation = '') {
     if ($LASTEXITCODE -eq 0 -and $version -match '^codex-cli (\d+\.\d+\.\d+)(?:[-+\s]|$)') { return $Matches[1] }
     return ''
 }
-function Set-LauncherMixedProvider([string]$content, [string]$baseUrl, [string]$packageDir, [bool]$signedIn) {
-    if (-not $signedIn) { return Set-LauncherProvider $content 'chatgpt_api_mixed' $baseUrl $packageDir $false }
+function Get-OfficialProviderId([string]$packageDir) {
+    $settingsPath = Join-Path $packageDir 'data\providers.json'
+    $selected = 'chatgpt_api_launcher'
+    if (Test-Path -LiteralPath $settingsPath) {
+        $settings = [IO.File]::ReadAllText($settingsPath) | ConvertFrom-Json
+        if ($settings.officialProvider) { $selected = [string]$settings.officialProvider }
+    }
+    if (@('chatgpt_api_launcher','openai','chatgpt_api_mixed','smr') -cnotcontains $selected) { throw '官方入口的历史兼容通道无效。' }
+    return $selected
+}
+function Set-LauncherMixedProvider([string]$content, [string]$baseUrl, [string]$packageDir, [bool]$signedIn, [string]$id = 'chatgpt_api_mixed', [bool]$officialOnly = $false) {
+    if (-not $signedIn) { return Set-LauncherProvider $content $id $baseUrl $packageDir $false }
     # Keep native account authentication while selecting native text compaction.
     # The router still sends official models directly to OpenAI and replaces
     # authentication only on requests sent to the external API.
-    $table = 'model_providers.chatgpt_api_mixed'
-    $body = @(('[' + $table + ']'), 'name = "ChatGPT API compatibility"', ('base_url = ' + (Quote-TomlString $baseUrl)), 'wire_api = "responses"', 'requires_openai_auth = true', 'supports_websockets = true', '') -join [Environment]::NewLine
+    $table = 'model_providers.' + $id
+    # Native OpenAI provider behavior (including remote compaction) is selected
+    # by its name. Use it only for the entry whose router is official-only.
+    $name = if ($officialOnly) { 'OpenAI' } else { 'ChatGPT API compatibility' }
+    $body = @(('[' + $table + ']'), ('name = ' + (Quote-TomlString $name)), ('base_url = ' + (Quote-TomlString $baseUrl)), 'wire_api = "responses"', 'requires_openai_auth = true', 'supports_websockets = true', '') -join [Environment]::NewLine
     $content = Set-TableText $content ($table + '.auth') $null
     return Set-TableText $content $table $body
 }
@@ -134,6 +147,18 @@ function Restore-LauncherRootLine([string]$content, [string]$key, [string]$line,
     }
     return $content.Insert($head.Length, $line)
 }
+function Restore-LauncherTable([string]$content, [string]$name, [string]$original) {
+    $table = Get-TableText $original $name
+    if (-not $table -or (Get-TableText $content $name)) { return Set-TableText $content $name $table }
+    # Signing in temporarily removes the API-key auth table. Restore it in its
+    # original position even when the user changed another setting meanwhile.
+    $old = [regex]::Match($original, (Get-TablePattern $name))
+    foreach ($next in [regex]::Matches($original.Substring($old.Index + $old.Length), '(?m)^[ \t]*(\[[^\r\n]+\])')) {
+        $position = [regex]::Match($content, '(?m)^[ \t]*' + [regex]::Escape($next.Groups[1].Value))
+        if ($position.Success) { return $content.Insert($position.Index, $table) }
+    }
+    return Set-TableText $content $name $table
+}
 function Restore-LauncherConfig([string]$packageDir, [string]$configPath) {
     $state = Read-LauncherState $packageDir
     if (-not $state -or -not $state.active) { return }
@@ -149,7 +174,7 @@ function Restore-LauncherConfig([string]$packageDir, [string]$configPath) {
     if ($current -ceq $state.applied) { $restored = [string]$state.original } else {
         $restored = $current
         foreach ($key in $script:LauncherRootKeys) { $restored = Restore-LauncherRootLine $restored $key (Get-RootLine $state.original $key) $state.original }
-        foreach ($table in $script:LauncherTables) { $restored = Set-TableText $restored $table (Get-TableText $state.original $table) }
+        foreach ($table in $script:LauncherTables) { $restored = Restore-LauncherTable $restored $table $state.original }
         $restored = $restored.TrimEnd() + [regex]::Match($state.original, '[\r\n\t ]*\z').Value
     }
     Write-Utf8File $configPath $restored
@@ -173,6 +198,13 @@ function Apply-LauncherConfig([string]$packageDir, [string]$configPath, [string]
     foreach ($id in @('chatgpt_api_launcher','smr')) {
         if (Get-TableText $content ('model_providers.' + $id)) { $content = Set-LauncherProvider $content $id $shimBase $packageDir ($mode -eq 'mixed') }
     }
+    if ($entryMode -eq 'api' -and $mode -eq 'mixed') {
+        $content = Set-LauncherMixedProvider $content $shimBase $packageDir $true 'chatgpt_api_launcher'
+    }
+    $provider = if ($entryMode -eq 'official') { Get-OfficialProviderId $packageDir } else { 'chatgpt_api_launcher' }
+    if ($entryMode -eq 'official' -and $provider -ne 'openai') {
+        $content = Set-LauncherMixedProvider $content $shimBase $packageDir $true $provider $true
+    }
     if ($entryMode -eq 'official') {
         $catalog = [IO.File]::ReadAllText((Get-LauncherDataPath $packageDir 'catalog-state.json')) | ConvertFrom-Json
         $ids = @($catalog.official | ForEach-Object { [string]$_.slug })
@@ -188,13 +220,10 @@ function Apply-LauncherConfig([string]$packageDir, [string]$configPath, [string]
         else { $selected = $ids[0] }
         $content = Set-RootString $content 'model' $selected
     }
-    $routingCatalog = [IO.File]::ReadAllText((Get-LauncherDataPath $packageDir 'catalog-state.json')) | ConvertFrom-Json
-    $officialIds = @($routingCatalog.official | ForEach-Object { [string]$_.slug })
-    # Select the provider for the initial model, never downgrade all official
-    # conversations to a custom provider merely because the API entry is used.
-    $provider = if ($entryMode -eq 'official' -or ($mode -eq 'mixed' -and $officialIds -ccontains $selected)) { 'openai' } elseif ($mode -eq 'mixed') { 'chatgpt_api_mixed' } else { 'chatgpt_api_launcher' }
+    # Keep the shared ID across entries. The official entry can select a legacy
+    # ID to resume older records, while its router still accepts official models only.
     $content = Set-RootString $content 'model_provider' $provider
-    if ($provider -ne 'openai') {
+    if ($entryMode -ne 'official') {
         # Model-specific catalog limits must not be overridden by a global GPT window.
         $content = Set-RootLine $content 'model_context_window' $null
         $content = Set-RootLine $content 'model_auto_compact_token_limit' $null

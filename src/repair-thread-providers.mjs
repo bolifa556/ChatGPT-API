@@ -3,10 +3,20 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 
 export async function repairThreadProviders({ cli, home, gatewayIds, officialIds = [], provider, ids, dryRun = false }) {
+  // Since 0.166 the native API intentionally binds a thread to its saved
+  // provider, before processing resume overrides. Do not attempt a migration
+  // with a stale CLI, rewrite storage, or fork a replacement conversation.
+  const versionOutput = await promisify(execFile)(cli, ['--version'], { windowsHide: true, timeout: 10000 });
+  const version = versionOutput.stdout.match(/codex-cli (\d+)\.(\d+)\.(\d+)/);
+  if (!version || Number(version[1]) > 0 || Number(version[2]) >= 166) {
+    return { dryRun, provider, candidates: [], repaired: [], failed: [],
+      skipped: version ? 'native_provider_binding' : 'unknown_native_version' };
+  }
   const models = new Set(gatewayIds.filter(id => !officialIds.includes(id)));
   const officialModels = new Set(officialIds);
   const managedProviders = new Set(['openai', 'chatgpt_api_launcher', 'chatgpt_api_mixed', 'smr']);

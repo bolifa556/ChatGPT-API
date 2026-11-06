@@ -6,6 +6,7 @@ import { validStrength } from './model-strength.mjs';
 
 export const DEFAULT_CONTEXT_LIMIT = 500000;
 export const MAX_CONTEXT_LIMIT = 2000000;
+export const officialProviders = ['chatgpt_api_launcher', 'openai', 'chatgpt_api_mixed', 'smr'];
 export const settingsPath = root => path.join(root, 'data/providers.json');
 export function readEnvFile(file) {
   let text; try { text = fs.readFileSync(file, 'utf8'); } catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
@@ -74,6 +75,8 @@ export function normalizeSettings(value, previous, { allowEmpty = false } = {}) 
   }
   const imageRouting = value.imageRouting ?? previous?.imageRouting ?? (defaultImageModel || legacy?.imageModel ? 'custom' : 'official');
   if (!['official', 'custom'].includes(imageRouting)) throw new Error('请选择官方或自定义生图设置。');
+  const officialProvider = value.officialProvider ?? previous?.officialProvider ?? 'chatgpt_api_launcher';
+  if (!officialProviders.includes(officialProvider)) throw new Error('官方入口的历史兼容通道无效。');
   const selections = value.imageStrengths ?? previous?.imageStrengths ?? {};
   if (!selections || typeof selections !== 'object' || Array.isArray(selections) || Object.keys(selections).length > 2000) throw new Error('图片强度设置无效。');
   const imageStrengths = {};
@@ -82,19 +85,27 @@ export function normalizeSettings(value, previous, { allowEmpty = false } = {}) 
     if (!Array.isArray(identity) || identity.length !== 2 || !ids.has(identity[0]) || typeof identity[1] !== 'string' || !identity[1] || identity[1].length > 500
       || !choice || typeof choice !== 'object' || Array.isArray(choice) || Object.keys(choice).some(name => !['complexity', 'quality'].includes(name))) throw new Error('图片强度设置无效。');
     const selected = {};
-    for (const field of ['complexity', 'quality']) if (choice[field] != null && choice[field] !== '') {
+    for (const field of ['complexity', 'quality']) if (choice[field] != null && choice[field] !== '' && choice[field] !== 'auto') {
       if (!validStrength(choice[field])) throw new Error('图片强度档位无效。');
       selected[field] = choice[field];
     }
     if (Object.keys(selected).length) imageStrengths[key] = selected;
   }
-  return { version: 1, providers, preferredProviderId, defaultImageModel, imageRouting, contextLimit, contextOverrides, imageStrengths };
+  // Speed belongs to the native client's per-turn setting. Obsolete console
+  // preferences are deliberately ignored, including when loading old files.
+  return { version: 1, providers, preferredProviderId, defaultImageModel, imageRouting, officialProvider, contextLimit, contextOverrides, imageStrengths };
 }
 export function readSettings(root, env = readEnvFile(path.join(root, 'data/.env'))) {
   const file = settingsPath(root);
-  if (fs.existsSync(file)) return normalizeSettings(JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')), undefined, { allowEmpty: false });
+  if (fs.existsSync(file)) {
+    const value = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+    return normalizeSettings(value, undefined, { allowEmpty: emptyApiSettings(value) });
+  }
   return normalizeSettings({ version: 1, providers: [{ id: 'default', name: '默认 API', baseUrl: env.BASE_URL || '', apiKey: env.API_KEY || '', enabled: true,
     imageModel: env.IMAGE_MODEL, imageEditModel: env.IMAGE_EDIT_MODEL, imageEditFormat: env.IMAGE_EDIT_FORMAT }], contextLimit: DEFAULT_CONTEXT_LIMIT, contextOverrides: {}, preferredProviderId: 'default' }, undefined, { allowEmpty: true });
+}
+function emptyApiSettings(value) {
+  return Array.isArray(value?.providers) && value.providers.every(provider => !provider.baseUrl && !provider.apiKey);
 }
 export function publicSettings(value) {
   return { ...value, revision: settingsRevision(value), providers: value.providers.map(({ apiKey, ...provider }) => ({ ...provider, keyConfigured: Boolean(apiKey) })) };
@@ -118,13 +129,15 @@ export function requireApiConfiguration(root, env = readEnvFile(path.join(root, 
 export function saveSettings(root, value, env) {
   const previous = readSettings(root, env);
   if (value.revision && value.revision !== settingsRevision(previous)) throw Object.assign(new Error('配置已被另一个窗口修改，请重新载入后再保存。'), { status: 409 });
-  const normalized = normalizeSettings(value, previous);
+  // Official-only users must be able to choose a history provider without
+  // adding an API key. Partial API entries still receive normal validation.
+  const normalized = normalizeSettings(value, previous, { allowEmpty: emptyApiSettings(previous) && emptyApiSettings(value) });
   atomicPrivate(settingsPath(root), normalized);
   // The legacy helper authenticates only to our local bridge. Keep its existing
   // bootstrap credential stable while running; initialize it on a fresh install.
   const envFile = path.join(root, 'data/.env'), bootstrap = readEnvFile(envFile);
-  if (!bootstrap.BASE_URL || !bootstrap.API_KEY) {
-    const profile = normalized.providers.find(item => item.id === normalized.preferredProviderId);
+  const profile = normalized.providers.find(item => item.id === normalized.preferredProviderId);
+  if ((!bootstrap.BASE_URL || !bootstrap.API_KEY) && profile?.baseUrl && profile.apiKey) {
     const fields = { ...bootstrap, BASE_URL: profile.baseUrl, API_KEY: profile.apiKey, SHIM_HOST: '127.0.0.1', SHIM_PORT: bootstrap.SHIM_PORT || '8102', GATEWAY_TRANSPORT: bootstrap.GATEWAY_TRANSPORT || 'direct' };
     atomicPrivate(envFile, Object.entries(fields).map(([key, val]) => key + '=' + val).join('\n') + '\n');
   }

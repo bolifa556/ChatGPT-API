@@ -57,6 +57,11 @@ function showChoices(button, last = false) {
 document.addEventListener('pointerdown', event => { if (openChoice && !openChoice.menu.contains(event.target) && !openChoice.button.contains(event.target)) closeChoice(); });
 window.addEventListener('resize', () => closeChoice());
 window.addEventListener('scroll', event => { if (openChoice && !openChoice.menu.contains(event.target)) closeChoice(); }, true);
+const helpAnchor = document.querySelector('.help-anchor');
+helpAnchor.addEventListener('pointerenter', () => helpAnchor.classList.remove('help-dismissed'));
+helpAnchor.addEventListener('focusin', () => helpAnchor.classList.remove('help-dismissed'));
+$('#image-routing-help').onclick = () => helpAnchor.classList.remove('help-dismissed');
+document.addEventListener('keydown', event => { if (event.key === 'Escape') helpAnchor.classList.add('help-dismissed'); });
 async function api(route, body) {
   const response = await fetch('/api/' + route, { method: body === undefined ? 'GET' : 'POST', headers: { authorization: 'Bearer ' + token, ...(body === undefined ? {} : { 'content-type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const result = await response.json(); if (!response.ok) throw new Error(result.error || '操作未完成。'); return result;
@@ -186,19 +191,22 @@ function updateCounts() {
   $('#source-count').textContent = draft.providers.length;
   $('#model-count').textContent = data.models.filter(model => draft.providers.some(provider => provider.id === model.providerId && provider.enabled)).length;
 }
-const strengthLabel = value => ({ none: '关闭', off: '关闭', minimal: '最低', low: '低', medium: '中', high: '高', xhigh: '特高', max: '最高', ultra: '极高', auto: '模型默认', standard: '标准', hd: '高清' })[value] || value;
+const strengthLabel = value => value;
+const explicitStrengths = capability => (capability?.levels || []).filter(level => level !== 'auto');
 function strengthCell(model) {
   const title = capability => ({ catalog: '接口声明', 'native-catalog': '官方模型目录', documentation: '官方型号规格' })[capability?.source] || '';
   const text = capability => capability?.status === 'known' ? capability.levels.map(strengthLabel).join(' / ') : capability?.status === 'unsupported' ? '不支持' : '无法检测';
   if (model.kind !== 'image') return '<span class="strength-levels" title="' + escape(title(model.strengths?.reasoning) + '：' + (model.strengths?.reasoning?.levels || []).join(' / ')) + '">' + escape(text(model.strengths?.reasoning)) + '</span>';
   if (['complexity', 'quality'].every(field => !model.strengths?.[field] || model.strengths[field].status === 'unknown')) return '<span class="model-note">无法检测</span>';
   const choice = draft.imageStrengths?.[model.overrideKey] || {};
-  return ['complexity', 'quality'].map(field => {
+  return '<div class="image-strengths">' + ['complexity', 'quality'].map(field => {
     const capability = model.strengths?.[field], name = field === 'complexity' ? '思考' : '画质';
     if (capability?.status !== 'known') return '<div class="strength-control"><span>' + name + '</span><span class="model-note">' + escape(text(capability)) + '</span></div>';
-    const value = capability.levels.includes(choice[field]) ? choice[field] : '';
+    const levels = explicitStrengths(capability);
+    if (!levels.length) return '<div class="strength-control"><span>' + name + '</span><span class="model-note">无法检测</span></div>';
+    const value = levels.includes(choice[field]) ? choice[field] : levels.includes(capability.highest) ? capability.highest : '';
     return '<div class="strength-control" title="' + escape(title(capability) + '；默认使用可确认的最高档位') + '"><span>' + name + '</span><button type="button" class="choice-trigger compact image-strength" data-key="' + escape(model.overrideKey) + '" data-field="' + field + '" value="' + escape(value) + '" aria-label="' + escape(model.name + ' ' + name + '强度') + '"></button></div>';
-  }).join('');
+  }).join('') + '</div>';
 }
 function renderModels() {
   if (!data) return;
@@ -219,7 +227,7 @@ function renderModels() {
         : '<span class="model-note">仅图片编辑</span>';
       return '<tr class="image-model-row"><td><strong>' + escape(model.name) + '</strong><span class="model-kind">图片</span></td><td>' + escape(providerName) + '</td><td></td><td></td><td>' + control + '</td><td class="model-strength">' + strengthCell(model) + '</td></tr>';
     }
-    return '<tr><td><strong>' + escape(model.name) + '</strong></td><td>' + escape(providerName) + '</td><td>' + tokens(model.capacity) + '</td><td><input class="model-override" type="number" min="4096" max="2000000" data-key="' + escape(model.overrideKey) + '" value="' + override + '" placeholder="自动" aria-label="' + escape(model.name) + ' 的上下文上限"></td><td data-effective="' + escape(model.overrideKey) + '">' + tokens(Math.floor(actual * (model.effectivePercent ?? 95) / 100)) + '</td><td class="model-strength">' + strengthCell(model) + '</td></tr>';
+    return '<tr><td><strong>' + escape(model.name) + '</strong></td><td>' + escape(providerName) + '</td><td>' + tokens(model.capacity) + '</td><td><input class="model-override" type="number" min="4096" max="2000000" data-key="' + escape(model.overrideKey) + '" value="' + override + '" placeholder="自动" aria-label="' + escape(model.name) + ' 的上下文上限"></td><td><div class="model-current"><span data-effective="' + escape(model.overrideKey) + '">' + tokens(Math.floor(actual * (model.effectivePercent ?? 95) / 100)) + '</span></div></td><td class="model-strength">' + strengthCell(model) + '</td></tr>';
   }).join('');
   for (const input of document.querySelectorAll('.model-override')) input.oninput = () => {
     const model = models.find(item => item.overrideKey === input.dataset.key); draft.contextOverrides[input.dataset.key] = input.value ? Number(input.value) : null;
@@ -228,8 +236,9 @@ function renderModels() {
   };
   for (const select of document.querySelectorAll('.image-strength')) {
     const capability = models.find(item => item.overrideKey === select.dataset.key).strengths[select.dataset.field];
-    setChoices(select, [{ value: '', label: capability.highest ? '自动使用最高档位' : '使用模型默认', displayLabel: capability.highest ? strengthLabel(capability.highest) : '模型默认' },
-      ...capability.levels.map(level => ({ value: level, label: strengthLabel(level) + (level === 'auto' ? '' : '（' + level + '）'), displayLabel: strengthLabel(level) }))], select.value);
+    setChoices(select, explicitStrengths(capability).map(level => ({ value: level, label: strengthLabel(level) })), select.value);
+    // Unknown ordering must not display an invented default as the saved choice.
+    if (!select.value) select.querySelector('.choice-value').textContent = '未指定';
     select.onchange = () => {
       draft.imageStrengths ||= {};
       const key = select.dataset.key, field = select.dataset.field, choice = draft.imageStrengths[key] ||= {};
@@ -252,6 +261,13 @@ function render(result) {
   $('#notice').textContent = '设置已保存。完全退出并重新打开 ChatGPT 后，加载新的 API 来源、模型菜单和上下文设置。';
   renderSourceFilters();
   setChoices($('#image-routing'), [{ value: 'official', label: '官方生图设置' }, { value: 'custom', label: '自定义生图设置' }], draft.imageRouting);
+  $('#official-history-setting').hidden = result.officialEntryAvailable === false;
+  setChoices($('#official-provider'), [
+    { value: 'chatgpt_api_launcher', label: 'chatgpt_api_launcher · 默认', displayLabel: 'API 对话（默认）' },
+    { value: 'openai', label: 'openai · 原生官方', displayLabel: '原生官方对话' },
+    { value: 'chatgpt_api_mixed', label: 'chatgpt_api_mixed · 旧版混合', displayLabel: '旧版混合对话' },
+    { value: 'smr', label: 'smr · 旧版', displayLabel: '旧版 smr 对话' },
+  ], draft.officialProvider);
   renderSources(); renderModels(); updateCounts(); updateSavebar();
 }
 function view(name) {
@@ -273,6 +289,7 @@ $('#add-source').onclick = () => {
 $('#context-limit').oninput = event => { draft.contextLimit = Number(event.target.value); changed(); updateCounts(); renderModels(); };
 $('#model-search').oninput = renderModels; $('#model-source-filter').onchange = renderModels;
 $('#image-routing').onchange = () => { draft.imageRouting = $('#image-routing').value; changed(); };
+$('#official-provider').onchange = () => { draft.officialProvider = $('#official-provider').value; changed(); };
 $('#discard').onclick = () => render(data);
 $('#save-settings').onclick = async () => { busy = true; updateSavebar(); try { render(await api('settings', draft)); toast('已保存，重开客户端后应用。'); } catch (error) { toast(error.message); } finally { busy = false; updateSavebar(); } };
 $('#refresh-models').onclick = async () => { busy = true; updateSavebar(); const button = $('#refresh-models'); button.textContent = '正在加载…'; try { render(await api('refresh', {})); toast('模型目录已更新。'); } catch (error) { toast(error.message); } finally { busy = false; button.textContent = '刷新模型目录'; updateSavebar(); } };

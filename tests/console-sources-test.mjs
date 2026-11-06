@@ -128,6 +128,8 @@ try {
   assert.equal(state.models.find(model => model.name === models[0]).image.known, false);
   assert.deepEqual(state.models.find(model => model.name === models[0]).strengths.reasoning.levels, ['low', 'high']);
   assert.equal(state.models.find(model => model.name === models[1]).strengths.reasoning.status, 'unknown');
+  assert(state.models.every(model => !Object.hasOwn(model, 'fastAvailable')));
+  assert(!Object.hasOwn(state.settings, 'fastModels'));
   assert.equal(state.settings.defaultImageModel, null);
   assert.deepEqual(state.automaticImageModels, ['qwen-image', '@p_bbbbbbbb/qwen-image']);
   const automaticNativeImage = await fetch('http://127.0.0.1:' + port + '/v1/images/generations', {
@@ -167,13 +169,23 @@ try {
   const defaultImage = { providerId: 'p_bbbbbbbb', modelId: 'qwen-image' };
   const strengthKey = overrideKey('p_bbbbbbbb', 'qwen-image');
   state = await (await request('settings', { ...state.settings, defaultImageModel: defaultImage,
-    imageStrengths: { [strengthKey]: { complexity: 'low', quality: 'low' } } })).json();
+    imageStrengths: { [strengthKey]: { complexity: 'low', quality: 'low' } },
+    fastModels: { [overrideKey('p_bbbbbbbb', models[0])]: true } })).json();
   assert.deepEqual(readSettings(fixture).imageStrengths[strengthKey], { complexity: 'low', quality: 'low' });
   assert.deepEqual(state.settings.defaultImageModel, defaultImage);
   assert.equal(state.automaticImageModels[0], 'qwen-image', 'Manual selection must preserve the automatic fallback independently');
   assert.equal(state.settings.preferredProviderId, preferredBeforeImage);
   assert.equal(readSettings(fixture).providers[0].apiKey, keys.a); assert.equal(readSettings(fixture).providers[1].apiKey, keys.b);
   await fetch('http://127.0.0.1:' + port + '/readyz');
+  const fastRequest = (model, tier) => fetch('http://127.0.0.1:' + port + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model, input: [], ...(tier == null ? {} : { service_tier: tier }) }) });
+  let speedResponse = await fastRequest(alias, 'default'); await speedResponse.text();
+  assert.equal(records.at(-1).body.service_tier, 'default', 'Obsolete console settings must not override the native speed choice');
+  speedResponse = await fastRequest(alias, 'priority'); await speedResponse.text(); assert.equal(records.at(-1).body.service_tier, 'priority');
+  speedResponse = await fastRequest(models[0]); await speedResponse.text(); assert.equal(records.at(-1).body.service_tier, undefined, 'A same-name model at another source inherited Fast');
+  speedResponse = await fastRequest(alias, 'flex'); await speedResponse.text(); assert.equal(records.at(-1).body.service_tier, 'flex');
+  await wsTurn(alias); assert.equal(records.at(-1).body.service_tier, undefined, 'WebSocket requests inherited an obsolete console preference');
+  await wsTurn(chatAlias); assert.equal(records.at(-1).body.service_tier, undefined, 'Non-GPT model inherited Fast');
+  checks.push('Native speed choices are preserved; obsolete console Fast settings never override default or omitted tiers');
   const imageRequest = (model, native = false) => fetch('http://127.0.0.1:' + port + '/v1/images/generations', {
     method: 'POST', headers: { 'content-type': 'application/json', ...(native ? { 'x-codex-image-turn-id': 'fixture-native-image' } : {}) },
     body: JSON.stringify({ ...(model ? { model } : {}), prompt: 'Unchanged fixture image prompt' }),

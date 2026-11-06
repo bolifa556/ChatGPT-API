@@ -1,10 +1,18 @@
 // Capability discovery is read-only: use catalog declarations and exact,
 // documented model IDs. Never probe by generating text or images.
+import { isGptModel } from './history-compat.mjs';
 export const strengthMetadataFields = ['supported_reasoning_levels', 'supported_reasoning_efforts', 'reasoning_efforts',
   'supported_complexity_levels', 'complexity_levels', 'supported_quality_levels', 'quality_levels',
   'reasoning', 'complexity', 'quality', 'parameters', 'parameter_schema'];
 const ranks = { auto: -1, none: 0, off: 0, minimal: 1, low: 2, standard: 2, medium: 3, high: 4, hd: 4, xhigh: 5, max: 6, ultra: 7 };
 export const validStrength = value => typeof value === 'string' && /^[a-z0-9][a-z0-9_-]{0,31}$/i.test(value);
+export function canRequestFast(model) {
+  const id = model?._upstreamId || model?.id || model?.slug || '';
+  if (!isGptModel(id) || /^gpt-image/i.test(id.split('/').at(-1)) || model?.type === 'image') return false;
+  if (Object.hasOwn(model, 'service_tiers')) return Array.isArray(model.service_tiers) && model.service_tiers.some(tier => ['priority', 'fast'].includes(tier?.id));
+  if (Object.hasOwn(model, 'additional_speed_tiers')) return Array.isArray(model.additional_speed_tiers) && model.additional_speed_tiers.includes('fast');
+  return true;
+}
 const unknown = () => ({ status: 'unknown', levels: [], highest: null, source: '' });
 function enumeration(value, source) {
   if (value === false) return { status: 'unsupported', levels: [], highest: null, source };
@@ -71,9 +79,10 @@ export function applyImageStrengths(payload, model, selection = {}, native = fal
   const capabilities = modelStrengths(model);
   for (const field of ['complexity', 'quality']) {
     const capability = capabilities[field], selected = selectedStrength(capability, selection[field]);
-    if (native) {
+    if (native && (field === 'complexity' || payload[field] == null || payload[field] === 'auto')) {
       // Built-in image_gen exposes no intensity argument. Its defaults belong
       // to its original model, not to the API model selected by this launcher.
+      // Preserve an explicit quality when a native client supplies one.
       if (field === 'complexity' || capability.status !== 'unknown') delete payload[field];
       if (selected != null) payload[field] = selected;
     } else if (payload[field] == null) {

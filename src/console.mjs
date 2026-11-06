@@ -88,7 +88,7 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
         const profile = pool.profile(model._providerId);
         return [profile.imageModel, profile.imageEditModel].includes(model._upstreamId) ? { ...model, type: 'image' } : model;
       });
-      return { version, configurationSaved: fs.existsSync(path.join(root, 'data/providers.json')), settings: publicSettings(settings), models: models(pool), runtime: await runtime(),
+      return { version, officialEntryAvailable: process.platform !== 'linux', configurationSaved: fs.existsSync(path.join(root, 'data/providers.json')), settings: publicSettings(settings), models: models(pool), runtime: await runtime(),
         automaticImageModels: automaticImageCandidates(imageModels, 'generations', 'gpt-image-2').map(model => model.id),
         sources: settings.providers.map(profile => {
           const cached = pool.sources.find(item => item.id === profile.id);

@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
 import { readRequestJson } from './http-fixture.mjs';
 import { context, atomic, launchEntry, stopRouter, health, setRoot } from '../macos/provider.mjs';
-import { shellQuote, startNativeClient } from '../macos/platform.mjs';
+import { shellQuote, startNativeClient, processIdentity, sameProcess } from '../macos/platform.mjs';
 
 assert(['linux', 'darwin'].includes(process.platform));
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -136,10 +136,14 @@ native.once('exit',(code)=>process.exit(code||0));
         assert.equal(state.entryMode, scenario.entry); assert.equal(state.mode, scenario.expectedMode); assert(!config.includes(key));
         assert.equal(state.clientVersion, scenario.expectedMode === 'mixed' ? '0.162.0' : null);
         assert.equal(state.officialModels, scenario.expectedMode === 'mixed' ? 1 : 0);
-        assert(config.includes(scenario.entry === 'official' ? 'model_provider = "openai"' : scenario.expectedMode === 'mixed' ? 'model_provider = "chatgpt_api_mixed"' : 'model_provider = "chatgpt_api_launcher"'));
+        assert(config.includes('model_provider = "chatgpt_api_launcher"'));
+        if (scenario.entry === 'official') assert.match(config, /\[model_providers\.chatgpt_api_launcher\]\nname = "OpenAI"/);
         assert.equal(config.includes('model_catalog_json = '), scenario.entry !== 'official');
         assert.equal(config.includes('requires_openai_auth = true'), scenario.expectedMode === 'mixed');
         await assert.rejects(launchEntry(ctx, scenario.entry === 'official' ? 'api' : 'official', [], { client, cli, runningClients: () => [child.pid] }), /Fully quit/);
+        const owner = JSON.parse(fs.readFileSync(path.join(ctx.data, 'state/config.json'))).owner;
+        const currentOwner = processIdentity(owner.pid);
+        assert(sameProcess(owner, currentOwner), 'POSIX owner identity changed while still running: ' + JSON.stringify({ owner, currentOwner }));
         await assert.rejects(launchEntry(ctx, scenario.entry === 'official' ? 'api' : 'official', [], { client, runningClients: () => [] }), /Fully quit/);
         const base = 'http://127.0.0.1:' + port;
         const menu = await (await fetch(base + '/v1/models')).json();
@@ -170,7 +174,11 @@ native.once('exit',(code)=>process.exit(code||0));
         const ended = once(child, 'exit'); child.kill(); await ended;
       }
     } });
-    assert.equal(await health(ctx), null);
+    const remainingRouter = await health(ctx);
+    if (remainingRouter) {
+      const record = JSON.parse(fs.readFileSync(path.join(ctx.data, 'state/router.json')));
+      assert.fail('Router remains after native exit: ' + JSON.stringify({ record, current: processIdentity(record?.pid) }));
+    }
     assert.equal(fs.readFileSync(ctx.config, 'utf8').trimEnd(), configBefore.replace('zh-CN', 'en-US').trimEnd());
     assert.equal(fs.existsSync(authFile) ? fs.readFileSync(authFile, 'utf8') : null, authBefore);
     assert.equal(fs.readFileSync(history, 'utf8'), originalHistory);

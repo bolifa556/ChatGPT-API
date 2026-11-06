@@ -109,22 +109,29 @@ try {
 
   const nativeProtocol = 'x-openai-internal-codex-responses-lite';
   const forwardedProtocol = 'x-bf-eh-' + nativeProtocol;
+  const nativeMetadata = { 'user-agent': 'Native client fixture', originator: 'Codex Desktop', version: '0.166.0',
+    'x-codex-turn-metadata': '{"turn_id":"native-turn"}', 'x-codex-turn-state': 'native-state',
+    'x-codex-beta-features': 'native-feature', 'x-client-request-id': 'native-request', 'session-id': 'native-session' };
   for (const selected of ['gpt-6-sol', 'GPT/gpt-6-sol', 'Other/test-model']) {
     const native = selected !== 'Other/test-model', gateway = selected.startsWith('GPT/');
     for (const stream of [false, true]) {
       const original = { model: selected, stream, input: [{ role: 'user', content: 'Use only the client tools.' }] };
-      const reply = await fetch(base + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json', [nativeProtocol]: 'true' }, body: JSON.stringify(original) });
+      const reply = await fetch(base + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json', [nativeProtocol]: 'true', ...nativeMetadata, authorization: 'Bearer mock-official', 'chatgpt-account-id': 'native-account' }, body: JSON.stringify(original) });
       assert.equal(reply.status, 200); await reply.arrayBuffer();
       const sent = records.at(-1);
       assert.equal(sent.headers[nativeProtocol], native ? 'true' : undefined);
       assert.equal(sent.headers[forwardedProtocol], gateway ? 'true' : undefined);
+      for (const [name, value] of Object.entries(nativeMetadata)) assert.equal(sent.headers['x-bf-eh-' + name], gateway ? value : undefined);
+      assert.equal(sent.headers['x-bf-eh-authorization'], undefined);
+      assert.equal(sent.headers['x-bf-eh-chatgpt-account-id'], undefined);
       assert.equal(sent.body.input[0].content, original.input[0].content);
       assert.equal(sent.body.tools, undefined);
     }
-    const ws = await connect({ [nativeProtocol]: 'true' });
+    const ws = await connect({ [nativeProtocol]: 'true', ...nativeMetadata });
     assert.equal((await turn(ws, { model: selected, input: [] })).type, 'response.completed');
     assert.equal(records.at(-1).headers[nativeProtocol], native ? 'true' : undefined);
     assert.equal(records.at(-1).headers[forwardedProtocol], gateway ? 'true' : undefined);
+    for (const [name, value] of Object.entries(nativeMetadata)) assert.equal(records.at(-1).headers['x-bf-eh-' + name], gateway ? value : undefined);
     ws.close();
   }
   await (await fetch(base + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json', [forwardedProtocol]: 'true' }, body: JSON.stringify({ model: 'GPT/gpt-6-sol', input: [] }) })).arrayBuffer();

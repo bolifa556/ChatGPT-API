@@ -10,6 +10,7 @@ import { readSettings, saveSettings } from '../src/settings.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fixture = path.join(root, 'data/testing/image-generation-' + process.pid);
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jK4kAAAAASUVORK5CYII=';
+const gif = 'R0lGODlhEAAQAIEAAP8AAAAAAAAAAAAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQACgAAACwAAAAAEAAQAAAIHQABCBxIsKDBgwgTKlzIsKHDhxAjSpxIsaLFgQEBACH5BAEKAAEALAAAAAAQABAAgQAA/wAAAAAAAAAAAAgdAAEIHEiwoMGDCBMqXMiwocOHECNKnEixosWBAQEAOw==';
 const dataUrl = 'data:image/png;base64,' + png;
 const nativeBody = { model: 'gpt-image-2', prompt: '保持这个中文提示词原样，不补充文字。', background: 'opaque', quality: 'auto', size: 'auto' };
 const nativeResult = { created: 1780000000, data: [{ b64_json: png, generation_id: 'native-generation-id' }], background: 'opaque', quality: 'high', size: '1024x1024' };
@@ -70,7 +71,7 @@ async function start(mode, options = {}) {
 async function send(router, operation = 'generations', extra = {}, routePrefix = '/v1', token = 'mock-api-key') {
   const payload = { ...nativeBody,...extra };
   const response = await fetch(router.base + routePrefix + '/images/' + operation, {
-    method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token, 'chatgpt-account-id': 'must-not-leak', 'openai-organization': 'must-not-leak', 'x-codex-image-turn-id': 'original-turn-id', 'x-openai-actor-authorization': 'chatgpt-api-local' },
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token, 'chatgpt-account-id': 'must-not-leak', 'openai-organization': 'must-not-leak', 'x-codex-image-turn-id': 'original-turn-id', originator: 'Codex Desktop', version: '0.166.0', 'x-openai-actor-authorization': 'chatgpt-api-local' },
     body: JSON.stringify(payload), signal: AbortSignal.timeout(10000),
   });
   return { status: response.status,headers: response.headers,raw: await response.text() };
@@ -89,6 +90,7 @@ try {
   assert.equal(records.at(-1).raw, JSON.stringify(nativeBody)); assert.equal(records.at(-1).headers.authorization, 'Bearer mock-native-oauth');
   assert.equal(records.at(-1).path, '/backend-api/codex/images/generations'); assert.equal(result.headers.get('x-native-image-peer'), 'official');
   assert.equal(records.at(-1).headers['x-openai-actor-authorization'], undefined);
+  assert.equal(records.at(-1).headers['x-bf-eh-originator'], undefined);
   checks.push('Official image model bypasses chat-menu allowlist; original body, output, headers and image metadata pass unchanged');
   result = await send(mixed, 'generations', { complexity: 'max', quality: 'high' });
   assert.equal(result.status, 200); assert.equal(records.at(-1).which, 'official');
@@ -123,6 +125,20 @@ try {
   assert(!menu.some(m => m.slug === '绘图/任意别名')); assert(menu.some(m => m.slug === 'Other/chat-model'));
   checks.push('Image-only models are not incorrectly advertised as conversational models');
 
+  gatewayModels.push({ id: 'GPT/gpt-image-2.6-sunburst' });
+  const nativeGptImage = await start('gateway', { settings: { IMAGE_MODEL: 'GPT/gpt-image-2.6-sunburst' } });
+  result = await send(nativeGptImage);
+  assert.equal(result.status, 200);
+  for (const [name, value] of Object.entries({ originator: 'Codex Desktop', version: '0.166.0', 'x-codex-image-turn-id': 'original-turn-id' })) {
+    assert.equal(records.at(-1).headers['x-bf-eh-' + name], value);
+  }
+  for (const name of ['authorization','chatgpt-account-id','openai-organization','x-openai-actor-authorization','x-openai-internal-codex-responses-lite']) {
+    assert.equal(records.at(-1).headers['x-bf-eh-' + name], undefined);
+  }
+  assert.equal(records.at(-1).body.prompt, nativeBody.prompt);
+  gatewayModels.pop();
+  checks.push('Native GPT image protocol metadata crosses Bifrost unchanged without copying account credentials or a Responses-only marker');
+
   const gatewayOnly = await start('gateway'); let beforeOfficial = count('official');
   result = await send(gatewayOnly, 'generations', { complexity: 'max' }); assert.equal(result.status, 200); assert.equal(count('official'), beforeOfficial);
   assert.equal(records.at(-1).body.complexity, undefined, 'Unverified API image model must not inherit native complexity');
@@ -130,6 +146,26 @@ try {
   const noLogin = await start('mixed', { login: false }); result = await send(noLogin, 'edits', { images: [{ image_url: dataUrl }] });
   assert.equal(result.status, 200); assert.equal(count('official'), beforeOfficial); assert.deepEqual(records.at(-1).body.images, [{ image_url: dataUrl }]);
   checks.push('Provider-only ignores saved official credentials; missing sign-in also uses API directly, for generation and editing');
+  gatewayData = { created: 1780000001, quality: 'medium', data: [{ b64_json: png }] };
+  const beforeQualityMismatch = count('gateway');
+  result = await send(gatewayOnly, 'generations', { quality: 'max' });
+  assert.equal(records.at(-1).body.quality, 'max');
+  assert.equal(result.status, 200); assert.equal(JSON.parse(result.raw).quality, 'medium');
+  assert.equal(count('gateway'), beforeQualityMismatch + 1, 'Quality mismatch retried an already-generated image');
+  result = await send(gatewayOnly, 'generations', { quality: 'auto' }); assert.equal(result.status, 200);
+  gatewayData = { created: 1780000001, quality: 'high', data: [{ b64_json: png }] };
+  result = await send(gatewayOnly, 'generations', { quality: 'high' }); assert.equal(result.status, 200);
+  checks.push('Explicit native quality survives conversion; the actual upstream quality is returned unchanged without synthetic errors, fallback or a second generation');
+  gatewayData = { created: 1780000001, output_format: 'gif', data: [{ b64_json: gif }] };
+  result = await send(gatewayOnly, 'generations', { output_format: 'gif', frame_count: 2, frame_duration_ms: 100 });
+  assert.equal(result.status, 200); assert.equal(JSON.parse(result.raw).data[0].b64_json, gif);
+  assert.equal(records.at(-1).body.output_format, 'gif'); assert.equal(records.at(-1).body.frame_count, 2); assert.equal(records.at(-1).body.frame_duration_ms, 100);
+  assert.equal(records.at(-1).body.prompt, nativeBody.prompt);
+  gatewayData = { created: 1780000001, output_format: 'gif', data: [{ b64_json: png }] };
+  const beforeFormatMismatch = count('gateway'); result = await send(gatewayOnly, 'generations', { output_format: 'gif' });
+  assert.equal(result.status, 200); assert.equal(JSON.parse(result.raw).data[0].b64_json, png); assert.equal(count('gateway'), beforeFormatMismatch + 1);
+  gatewayData = { created: 1780000001, data: [{ b64_json: png }] };
+  checks.push('Explicit GIF format and timing fields pass unchanged; returned bytes are never relabeled, regenerated or rejected solely because the upstream ignored an option');
   const pureOfficialPreference = await start('gateway', { imageRouting: 'official' });
   result = await send(pureOfficialPreference); assert.equal(result.status, 200); assert.equal(count('official'), beforeOfficial);
   const mixedOfficialPreference = await start('mixed', { imageRouting: 'official', settings: { IMAGE_MODEL: '绘图/任意别名' } });

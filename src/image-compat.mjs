@@ -1,4 +1,4 @@
-import { requestWithAbort as request, releaseResponseBody, RESPONSE_TIMEOUTS, writeChunk } from './transport.mjs';
+import { requestWithAbort as request, releaseResponseBody, RESPONSE_TIMEOUTS, writeChunk, gatewayResponseHeaders } from './transport.mjs';
 import { imageFormat } from './responses-images.mjs';
 import { applyImageStrengths } from './model-strength.mjs';
 
@@ -136,7 +136,8 @@ async function gatewayBody(original, model, operation, env, dispatcher, signal, 
     if (payload.mask?.file_id && !payload.mask.image_url) payload.mask = { image_url: await resolveFile(payload.mask.file_id) };
   }
   const format = env.IMAGE_EDIT_FORMAT || 'json';
-  if (operation !== 'edits' || format === 'json') return { body: Buffer.from(JSON.stringify(payload)), contentType: 'application/json' };
+  const imageOptions = { quality: payload.quality, output_format: payload.output_format };
+  if (operation !== 'edits' || format === 'json') return { body: Buffer.from(JSON.stringify(payload)), contentType: 'application/json', imageOptions };
   if (format !== 'multipart') throw fail('IMAGE_EDIT_FORMAT must be json or multipart.', 'invalid_image_configuration');
   if (!Array.isArray(payload.images) || !payload.images.length) throw fail('Image editing requires image references.', 'invalid_image_request');
   const form = new FormData();
@@ -154,7 +155,7 @@ async function gatewayBody(original, model, operation, env, dispatcher, signal, 
     form.append('mask', new Blob([bytes], { type }), 'mask.png');
   }
   const encoded = new Response(form);
-  return { body: Buffer.from(await encoded.arrayBuffer()), contentType: encoded.headers.get('content-type') };
+  return { body: Buffer.from(await encoded.arrayBuffer()), contentType: encoded.headers.get('content-type'), imageOptions };
 }
 async function nativeImageResponse(data, dispatcher, signal) {
   if (!Number.isInteger(data?.created) || !Array.isArray(data.data) || !data.data.length) throw fail('Image API did not return a valid Images response with created and data.', 'invalid_upstream_image_response', 502);
@@ -178,8 +179,11 @@ export async function forwardImages({ req,res,url,body,operation,env,hasLogin,al
   const nativeDefault = Boolean(req.headers['x-codex-image-turn-id']) && original.model === 'gpt-image-2';
   const nativeImage = Boolean(req.headers['x-codex-image-turn-id']);
   const forward = async (which, model, outgoing = { body, contentType: req.headers['content-type'] || 'application/json' }, gateway) => {
-    const headers = headersFor(req.headers, which, gateway?.profile); headers['content-type'] = outgoing.contentType;
-    if (which === 'gateway') delete headers['x-openai-internal-codex-responses-lite'];
+    let headers = headersFor(req.headers, which, gateway?.profile); headers['content-type'] = outgoing.contentType;
+    if (which === 'gateway') {
+      delete headers['x-openai-internal-codex-responses-lite'];
+      headers = gatewayResponseHeaders(headers, nativeImage && /^gpt-image(?:-|$)/i.test(leaf(model)));
+    }
     const upstream = await request(targetUrl(which, url, gateway), { method: 'POST', body: outgoing.body, headers, dispatcher: which === 'official' ? officialDispatcher : gateway?.dispatcher || gatewayDispatcher, signal, ...RESPONSE_TIMEOUTS });
     try {
       log(which + ' images operation=' + operation + ' model=' + model + ' status=' + upstream.statusCode);
@@ -193,6 +197,8 @@ export async function forwardImages({ req,res,url,body,operation,env,hasLogin,al
       let data; try { data = JSON.parse(decoded.toString('utf8')); } catch {}
       if (which === 'gateway' && ok(upstream.statusCode)) {
         const normalized = await nativeImageResponse(data, imageDispatcher, signal);
+        log('gateway image options model=' + model + ' requested=' + JSON.stringify(outgoing.imageOptions || {})
+          + ' returned=' + JSON.stringify({ quality: data.quality, output_format: data.output_format }));
         res.writeHead(upstream.statusCode, responseHeaders(upstream.headers, normalized.changed));
         res.end(normalized.changed ? JSON.stringify(normalized.data) : raw); return { completed: true };
       }

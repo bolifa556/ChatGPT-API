@@ -102,10 +102,10 @@ try {
     $shimPort = if ($settings['SHIM_PORT']) { [int]$settings['SHIM_PORT'] } else { 8102 }
     $shimBase = 'http://127.0.0.1:' + $shimPort + '/v1'
     Apply-LauncherConfig $packageDir $configPath $authMode $shimBase $baseUrl $Mode
-    # No desktop process is running here. Match each managed conversation's
-    # provider to its saved model through the native API, retaining its history/ID.
+    # Legacy clients support native provider repair. New clients bind saved
+    # conversations to their provider and the helper leaves them untouched.
     $nativeCli = Get-NativeRepairCli $package.InstallLocation
-    $repairProvider = if ($authMode -eq 'mixed') { 'chatgpt_api_mixed' } else { 'chatgpt_api_launcher' }
+    $repairProvider = 'chatgpt_api_launcher'
     if ($nativeCli) {
         $repair = & $nodePath (Join-Path $packageDir 'src\repair-thread-providers.mjs') $nativeCli (Get-CodexHome) $packageDir $repairProvider 2> (Join-Path $packageDir 'data\logs\provider-repair-stderr.log')
         if ($LASTEXITCODE -ne 0) { throw '对话的原生提供方切换未完成。聊天内容没有被重写，请查看 data\logs\provider-repair-stderr.log。' }

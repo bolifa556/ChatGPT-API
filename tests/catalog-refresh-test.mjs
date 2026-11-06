@@ -88,7 +88,7 @@ try {
     assert.equal(gatewayModel.default_service_tier, null);
   }
   assert.deepEqual(menu().slice(0, 2), [latest, old]);
-  checks.push('ID-only GPT gateways expose the native Fast request without invented speed guarantees; non-GPT stays capability-based and official metadata is unchanged');
+  checks.push('ID-only GPT gateways expose the native Fast request without invented speed guarantees; non-GPT has no Fast menu and official metadata is unchanged');
   const running = child();
   let ready = false;
   for (let n = 0; n < 80; n++) { try { if ((await fetch(base + '/healthz')).ok) { ready = true; break; } } catch {} await delay(40); }
@@ -98,13 +98,13 @@ try {
     additional_speed_tiers: ['fast'] } };
   await (await fetch(base + '/readyz')).json();
   const advertised = menu().find(model => model.slug === 'Vendor/model');
-  for (const key of Object.keys(gatewayMetadata['Vendor/model'])) assert.deepEqual(advertised[key], gatewayMetadata['Vendor/model'][key]);
+  assert.deepEqual(advertised.service_tiers, []); assert.deepEqual(advertised.additional_speed_tiers, []); assert.equal(advertised.default_service_tier, null);
   const cachedMetadata = JSON.parse(fs.readFileSync(path.join(fixture, 'data/cache/catalog-state.json'))).gatewayModels.find(model => model.id === 'Vendor/model');
-  for (const key of Object.keys(gatewayMetadata['Vendor/model'])) assert.deepEqual(cachedMetadata[key], advertised[key]);
+  for (const key of Object.keys(gatewayMetadata['Vendor/model'])) assert.deepEqual(cachedMetadata[key], gatewayMetadata['Vendor/model'][key]);
   gatewayMetadata = {};
   await (await fetch(base + '/readyz')).json();
   assert.deepEqual(menu().find(model => model.slug === 'Vendor/model').service_tiers, []);
-  checks.push('Explicit upstream Fast metadata is preserved through refresh and cache; withdrawing it removes stale speed claims');
+  checks.push('Raw upstream Fast metadata stays in the cache, but non-GPT never inherits a native Fast control');
   gatewayMetadata = { 'GPT/gpt-6.1-sol': { service_tiers: [], additional_speed_tiers: [] },
     'GPT/gpt-6-sol': { service_tiers: [{ id: 'fast', name: 'Gateway Fast', description: 'Gateway description' }], additional_speed_tiers: ['fast'] } };
   await (await fetch(base + '/readyz')).json();

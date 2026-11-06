@@ -17,10 +17,11 @@ import { ResponseImages, restoreHostedImageHistory } from './responses-images.mj
 import { contextFields, rememberContexts, contextKey, applyContext } from './model-context.mjs';
 import { officialDispatcherFor, readEncodedBody, outgoingBody, writeChunk, relayClose,
   requestWithAbort as request, protocolError, releaseResponseBody, RESPONSE_TIMEOUTS, MAX_REQUEST_BYTES,
-  gatewayResponseHeaders, FORWARDED_NATIVE_RESPONSES_HEADER, normalizeGatewayTransport, gatewayDispatcherFor } from './transport.mjs';
+  gatewayResponseHeaders, FORWARDED_NATIVE_HEADERS, normalizeGatewayTransport, gatewayDispatcherFor } from './transport.mjs';
 import { PendingResponses, HistoryCache, laneOf } from './response-state.mjs';
 import { GatewaySources } from './gateway-sources.mjs';
 import { overrideKey, redact } from './settings.mjs';
+import { canRequestFast } from './model-strength.mjs';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const root = process.env.CHATGPT_API_ROOT || path.dirname(dir);
@@ -194,11 +195,12 @@ function writeDesktopCatalog() {
     // the native priority request; missing catalog fields must not hide it.
     // An explicit upstream declaration (including an empty list) takes precedence.
     const declaredSpeed = upstream && ['service_tiers', 'additional_speed_tiers'].some(key => Object.hasOwn(upstream, key));
-    const requestFast = gpt && !declaredSpeed;
-    model.default_service_tier = upstream?.default_service_tier ?? null;
-    model.service_tiers = structuredClone(upstream?.service_tiers ?? (requestFast
-      ? [{ id: 'priority', name: 'Fast', description: 'Request priority processing; availability and usage depend on the gateway.' }] : []));
-    model.additional_speed_tiers = structuredClone(upstream?.additional_speed_tiers ?? (requestFast ? ['fast'] : []));
+    const requestFast = canRequestFast(upstream || { id }) && !declaredSpeed;
+    model.default_service_tier = gpt ? upstream?.default_service_tier ?? null : null;
+    model.service_tiers = gpt ? structuredClone(upstream?.service_tiers ?? (requestFast
+      ? [{ id: 'priority', name: 'Fast', description: 'Request priority processing; availability and usage depend on the gateway.' }] : []))
+      : [];
+    model.additional_speed_tiers = gpt ? structuredClone(upstream?.additional_speed_tiers ?? (requestFast ? ['fast'] : [])) : [];
     // Let the native client assemble all instruction sections for every model.
     // Only the wire/tool capabilities required by the converter differ.
     if (!gpt) Object.assign(model, { use_responses_lite: false, tool_mode: 'code_mode_only', shell_type: 'unified_exec', apply_patch_tool_type: 'freeform' });
@@ -267,7 +269,7 @@ function isGatewayKey(token) { return token === env.API_KEY || sources.secrets.h
 function headersFor(incoming, target, profile) {
   const headers = {};
   for (const [k, v] of Object.entries(incoming)) {
-    if (['host','connection','content-length','transfer-encoding','content-encoding','upgrade','proxy-authorization',FORWARDED_NATIVE_RESPONSES_HEADER].includes(k) || k.startsWith('sec-websocket-')) continue;
+    if (['host','connection','content-length','transfer-encoding','content-encoding','upgrade','proxy-authorization'].includes(k) || FORWARDED_NATIVE_HEADERS.has(k) || k.startsWith('sec-websocket-')) continue;
     headers[k] = v;
   }
   if (target !== 'official') headers['accept-encoding'] = 'identity';
@@ -294,7 +296,10 @@ function targetUrl(which, url, gateway) {
   const suffix = url.pathname.replace(/^\/v1(?=\/|$)/, '');
   return (which === 'official' ? officialBase : gateway?.base || gatewayBase) + (suffix || '/') + url.search;
 }
-function gatewayRequest(payload, gateway) { return payload.model === gateway.model ? payload : { ...payload, model: gateway.model }; }
+function gatewayRequest(payload, gateway) {
+  // Preserve the native speed choice, including an explicit default/off value.
+  return payload.model === gateway.model ? payload : { ...payload, model: gateway.model };
+}
 function clientEvent(event, model, gateway) {
   return gateway && gateway.model !== model && event.response?.model ? { ...event, response: { ...event.response, model } } : event;
 }

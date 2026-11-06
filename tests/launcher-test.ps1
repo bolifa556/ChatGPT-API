@@ -53,10 +53,10 @@ foreach($mode in @('mixed','gateway')) {
     $provider=Get-RootString $applied 'model_provider'
     if($mode -eq 'gateway'){Assert ($provider -eq 'chatgpt_api_launcher') 'No-login provider was not selected.'; Assert (-not (Get-RootLine $applied 'model_context_window')) 'Global context override bypassed per-model capacity.'; Assert (-not (Get-RootLine $applied 'model_auto_compact_token_limit')) 'Global compaction threshold bypassed native defaults.'}
     else{
-        Assert ($provider -eq 'openai') 'An official initial model must retain the official provider even in the API entry.'
-        Assert ((Get-RootLine $applied 'model_context_window').Contains('500000')) 'Official model context setting changed.'
-        Assert ((Get-TableText $applied 'model_providers.chatgpt_api_mixed').Contains('requires_openai_auth = true')) 'Mixed entry lost native account authentication.'
-        Assert (-not (Get-TableText $applied 'model_providers.chatgpt_api_mixed.auth')) 'OAuth provider must not also use an API-key auth helper.'
+        Assert ($provider -eq 'chatgpt_api_launcher') 'Mixed entry must keep the same provider as API-only even with an official initial model.'
+        Assert (-not (Get-RootLine $applied 'model_context_window')) 'Mixed catalog model limits were overridden globally.'
+        Assert ((Get-TableText $applied 'model_providers.chatgpt_api_launcher').Contains('requires_openai_auth = true')) 'Mixed entry lost native account authentication.'
+        Assert (-not (Get-TableText $applied 'model_providers.chatgpt_api_launcher.auth')) 'OAuth provider must not also use an API-key auth helper.'
     }
     Restore-LauncherConfig $fixture $config
     Assert ([IO.File]::ReadAllText($config) -ceq $baseline) 'Exact restore failed.'
@@ -68,20 +68,36 @@ foreach($mode in @('mixed','gateway')) {
 Write-Utf8File $catalog ($models|ConvertTo-Json -Depth 5)
 Write-Utf8File $config (Set-RootString $baseline 'model' 'Example/model')
 Apply-LauncherConfig $fixture $config 'mixed' 'http://127.0.0.1:8102/v1' 'https://example.invalid/v1'
-Assert ((Get-RootString ([IO.File]::ReadAllText($config)) 'model_provider') -eq 'chatgpt_api_mixed') 'A gateway initial model must use native text compaction.'
+Assert ((Get-RootString ([IO.File]::ReadAllText($config)) 'model_provider') -eq 'chatgpt_api_launcher') 'Model selection must not change the API provider.'
 Restore-LauncherConfig $fixture $config
 $legacyBaseline=Set-LauncherProvider $baseline 'smr' 'http://old.invalid/v1' $fixture $false
 Write-Utf8File $config $legacyBaseline
 Apply-LauncherConfig $fixture $config 'mixed' 'http://127.0.0.1:8102/v1' 'https://example.invalid/v1' 'official'
 $officialApplied=[IO.File]::ReadAllText($config)
 Assert ((Get-RootString $officialApplied 'openai_base_url') -eq 'http://127.0.0.1:8102/v1') 'Official entry bypassed mixed-history compatibility.'
-Assert ((Get-RootString $officialApplied 'model_provider') -in @('', 'openai')) 'Official entry lost its native provider.'
+Assert ((Get-RootString $officialApplied 'model_provider') -eq 'chatgpt_api_launcher') 'Official entry must share the API conversation provider by default.'
+Assert ((Get-TableText $officialApplied 'model_providers.chatgpt_api_launcher').Contains('name = "OpenAI"')) 'Official compatibility provider lost native OpenAI behavior.'
+Assert ((Get-TableText $officialApplied 'model_providers.chatgpt_api_launcher').Contains('requires_openai_auth = true')) 'Official entry lost native sign-in.'
+Assert (-not (Get-TableText $officialApplied 'model_providers.chatgpt_api_launcher.auth')) 'Official compatibility must not use a gateway API key helper.'
 Assert (-not (Get-RootString $officialApplied 'model_catalog_json')) 'Official entry should use the native rich model catalog.'
+Assert ((Get-RootLine $officialApplied 'model_context_window').Contains('500000')) 'Official entry must retain native context settings.'
 Assert ($officialApplied.Contains('localeOverride = "zh-CN"')) 'Official entry changed language preference.'
 Assert ((Get-TableText $officialApplied 'model_providers.smr').Contains('http://127.0.0.1:8102/v1')) 'Legacy provider bypassed compatibility.'
 Assert ((Read-LauncherState $fixture).entryMode -eq 'official') 'Entry mode was not journaled.'
 Restore-LauncherConfig $fixture $config
 Assert (-not (Get-RootString ([IO.File]::ReadAllText($config)) 'openai_base_url')) 'Official entry did not restore its root override.'
+$preferencePath=Join-Path $fixture 'data\providers.json'
+foreach ($legacyProvider in @('openai','chatgpt_api_mixed','smr')) {
+    Write-Utf8File $preferencePath (@{officialProvider=$legacyProvider}|ConvertTo-Json)
+    Write-Utf8File $config $baseline
+    Apply-LauncherConfig $fixture $config 'mixed' 'http://127.0.0.1:8102/v1' '' 'official'
+    $selectedConfig=[IO.File]::ReadAllText($config)
+    Assert ((Get-RootString $selectedConfig 'model_provider') -ceq $legacyProvider) 'Legacy official history selection was ignored.'
+    if ($legacyProvider -ne 'openai') { Assert ((Get-TableText $selectedConfig ('model_providers.'+$legacyProvider)).Contains('name = "OpenAI"')) 'Legacy provider did not use official behavior.' }
+    Assert (-not (Get-RootString $selectedConfig 'model_catalog_json')) 'Legacy official selection exposed the gateway catalog.'
+    Restore-LauncherConfig $fixture $config
+}
+Remove-Item -LiteralPath $preferencePath
 $before=@(Get-ChildItem -LiteralPath $fixture -Recurse -File).Count
 for($i=0;$i -lt 8;$i++) {
     Write-Utf8File $config $baseline
