@@ -224,7 +224,15 @@ export function restoreConfig(ctx) {
     const memories = readJson(statePath(ctx, 'entry-models'), {});
     atomic(statePath(ctx, 'entry-models'), { ...memories, [saved.entryMode]: { model: rootString(text, 'model'), effort: rootString(text, 'model_reasoning_effort') } });
   }
-  if (text === saved.applied) text = saved.original;
+  const exactOriginal = typeof saved.original === 'string'
+    && Object.entries(saved.roots).every(([key, value]) => getRoot(saved.original, key) === value)
+    && Object.entries(saved.tables).every(([name, value]) => getTable(saved.original, name) === value);
+  const unmanaged = value => {
+    for (const key of Object.keys(saved.roots)) value = setRoot(value, key, '');
+    for (const name of Object.keys(saved.tables)) value = setTable(value, name, '');
+    return value.trim();
+  };
+  if (text === saved.applied && exactOriginal && unmanaged(text) === unmanaged(saved.original)) text = saved.original;
   else {
     for (const [key, value] of Object.entries(saved.roots)) if (getRoot(text, key) === getRoot(saved.applied, key) || ['model', 'model_reasoning_effort'].includes(key) && ownsProvider) text = restoreRootLine(text, key, value, saved.original) ?? setRoot(text, key, value);
     for (const [name, value] of Object.entries(saved.tables)) if (getTable(text, name) === getTable(saved.applied, name)) text = setTable(text, name, value);

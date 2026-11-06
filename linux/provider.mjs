@@ -197,7 +197,15 @@ export function restoreConfig(ctx) {
   if (saved.configPath !== ctx.config) throw new Error('Saved configuration belongs to another CODEX_HOME.');
   let text = fs.readFileSync(ctx.config, 'utf8');
   const ownsProvider = rootString(text, 'model_provider') === rootString(saved.applied, 'model_provider');
-  if (text === saved.applied) text = saved.original;
+  const exactOriginal = typeof saved.original === 'string'
+    && Object.entries(saved.roots).every(([key, value]) => getRoot(saved.original, key) === value)
+    && Object.entries(saved.tables).every(([name, value]) => getTable(saved.original, name) === value);
+  const unmanaged = value => {
+    for (const key of Object.keys(saved.roots)) value = setRoot(value, key, '');
+    for (const name of Object.keys(saved.tables)) value = setTable(value, name, '');
+    return value.trim();
+  };
+  if (text === saved.applied && exactOriginal && unmanaged(text) === unmanaged(saved.original)) text = saved.original;
   else {
     for (const key of rootKeys) if (Object.hasOwn(saved.roots, key) && (getRoot(text, key) === getRoot(saved.applied, key) || key === 'model' && ownsProvider)) text = restoreRootLine(text, key, saved.roots[key], saved.original) ?? setRoot(text, key, saved.roots[key]);
     for (const [name, value] of Object.entries(saved.tables)) if (getTable(text, name) === getTable(saved.applied, name)) text = setTable(text, name, value);

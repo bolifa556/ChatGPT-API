@@ -88,6 +88,18 @@ try {
     const original = '# Original formatting\r\nmodel = "keep"\r\n[app]\r\nlocaleOverride = "zh-CN"\r\n\r\n';
     fs.writeFileSync(projected.config, original); applyConfig(projected); restoreConfig(projected);
     assert.equal(fs.readFileSync(projected.config, 'utf8'), original, platform + ' did not restore exact configuration bytes');
+    applyConfig(projected);
+    const legacyJournal = path.join(data, 'state/config.json'), legacy = JSON.parse(fs.readFileSync(legacyJournal));
+    delete legacy.original; fs.writeFileSync(legacyJournal, JSON.stringify(legacy));
+    applyConfig(projected); restoreConfig(projected);
+    const legacyRestored = fs.readFileSync(projected.config, 'utf8');
+    assert(!legacyRestored.includes('model_catalog_json'), platform + ' restored an already-overlaid legacy backup');
+    assert(!legacyRestored.includes('[model_providers.chatgpt_api_launcher]'));
+    assert(legacyRestored.includes('localeOverride = "zh-CN"'));
+    fs.writeFileSync(projected.config, original); applyConfig(projected);
+    fs.writeFileSync(projected.config, fs.readFileSync(projected.config, 'utf8').replace('zh-CN', 'en-US'));
+    applyConfig(projected); restoreConfig(projected);
+    assert(fs.readFileSync(projected.config, 'utf8').includes('localeOverride = "en-US"'), platform + ' discarded a preference edited before reconfiguration');
   }
   checks.push('macOS/Linux runtime configuration restores exact bytes or original absence, with no leftover provider definitions');
   console.log(JSON.stringify({ passed: true, checks }));
