@@ -102,18 +102,8 @@ try {
     $shimPort = if ($settings['SHIM_PORT']) { [int]$settings['SHIM_PORT'] } else { 8102 }
     $shimBase = 'http://127.0.0.1:' + $shimPort + '/v1'
     Apply-LauncherConfig $packageDir $configPath $authMode $shimBase $baseUrl $Mode
-    # Legacy clients support native provider repair. New clients bind saved
-    # conversations to their provider and the helper leaves them untouched.
-    $nativeCli = Get-NativeRepairCli $package.InstallLocation
-    $repairProvider = 'chatgpt_api_launcher'
-    if ($nativeCli) {
-        $repair = & $nodePath (Join-Path $packageDir 'src\repair-thread-providers.mjs') $nativeCli (Get-CodexHome) $packageDir $repairProvider 2> (Join-Path $packageDir 'data\logs\provider-repair-stderr.log')
-        if ($LASTEXITCODE -ne 0) { throw '对话的原生提供方切换未完成。聊天内容没有被重写，请查看 data\logs\provider-repair-stderr.log。' }
-    } else {
-        # A just-updated client populates its own executable cache on first open.
-        # Never run an older binary against new sessions or copy/patch the client.
-        Write-Utf8File (Join-Path $packageDir 'data\logs\provider-repair-stderr.log') 'Matching native CLI cache is not ready. Reopen the launcher after the updated client has initialized once to repair existing gateway conversations.'
-    }
+    $repair = & $nodePath (Join-Path $packageDir 'src\repair-thread-providers.mjs') 'begin' (Get-CodexHome) $packageDir 2> (Join-Path $packageDir 'data\logs\provider-repair-stderr.log')
+    if ($LASTEXITCODE -ne 0) { throw '对话兼容准备未完成，请查看 data\logs\provider-repair-stderr.log。' }
     $sessionStartedAt = (Read-LauncherState $packageDir).startedAt
     if($Mode -ne 'official' -and -not $prepared.gateway.ready){
         $notice = if ($authMode -eq 'mixed') { '网关目前不可用。有效缓存中的网关模型请求可能失败；已登录的官方模型仍使用官方通道。' } else { '网关目前不可用。此入口只使用网关模型，请检查网关连接。' }

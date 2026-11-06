@@ -75,6 +75,8 @@ API 入口根据启动时选中的模型选择提供方：官方模型使用 `op
 | `src/history-compat.mjs` | 思考上下文保留、跨模型 ID 修正 |
 | `src/sse.mjs` | SSE 解码、压缩流、Unicode 分片 |
 | `src/Launcher-State.ps1` | 登录判断、临时配置和恢复 |
-| `src/repair-thread-providers.mjs` | 通过原生会话 API 更正旧网关对话的 provider 元数据 |
+| `src/repair-thread-providers.mjs` | 启动期间临时兼容旧对话通道元数据，退出后恢复；恢复日志仅在适配层保存 |
 | `src/Router-Control.ps1` | 路由进程复用、启动与就绪检查 |
 | `src/Package-Paths.ps1` | 数据位置与旧版一次性迁移 |
+
+旧对话兼容参考了 [CC Switch 的统一会话方案](https://github.com/farion1231/cc-switch/blob/main/docs/guides/codex-unified-session-history-guide-zh.md) 和 [OpenCodex 的历史处理实现](https://github.com/lidge-jun/opencodex/blob/main/src/codex/history-provider.ts)。本项目只在应用运行期间临时匹配通道，并在退出后恢复。处理范围包括记录头、`thread_settings_applied` 和 SQLite 索引，避免 [只同步头部导致恢复旧通道的问题](https://github.com/farion1231/cc-switch/issues/5922)。消息内容不参与重建，也不新增对话或提示词。

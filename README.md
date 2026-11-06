@@ -7,7 +7,7 @@
 支持接入 **DeepSeek** · **Claude** · **Gemini** · **OpenAI 全系/中转** · **本地 Ollama / vLLM** 与任意兼容 API  
 **原版丝滑体验 · 零修改客户端 · 三种灵活模式 · 深度思考与生图全面适配**
 
-[![Version](https://img.shields.io/badge/Release-v3.2.0-blue.svg)](release/README.md)
+[![Version](https://img.shields.io/badge/Release-v3.2.1-blue.svg)](release/README.md)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-brightgreen.svg)](#-极速上手)
 [![Zero Intrusion](https://img.shields.io/badge/Security-Zero%20Intrusion%20(No%20Patching)-success.svg)](#-核心特性与优势)
 [![Node Runtime](https://img.shields.io/badge/Runtime-Built--in%20Node.js-orange.svg)](#-极速上手)
@@ -65,10 +65,10 @@
 
 | 平台 | 下载发布包 | 极速安装方式 |
 | :--- | :--- | :--- |
-| **Windows x64** | [ChatGPT-API-Launcher-3.2.0-win-x64.zip](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.0/ChatGPT-API-Launcher-3.2.0-win-x64.zip) | 完整解压后双击运行 `安装.cmd`，选择程序目录完成安装。 |
-| **macOS (Apple Silicon)** | [ChatGPT-API-Provider-3.2.0-macos-arm64.dmg](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.0/ChatGPT-API-Provider-3.2.0-macos-arm64.dmg) | 打开 DMG 镜像，将对应的启动入口与控制台 App 拖到“应用程序”文件夹。（详见 [macOS 说明](docs/macos-dmg-readme.md)） |
-| **Linux x64** | [ChatGPT-API-Provider-3.2.0-linux-x64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.0/ChatGPT-API-Provider-3.2.0-linux-x64.tar.gz) | 解压压缩包，以桌面用户身份执行 `./install.sh`。（详见 [Linux 说明](docs/linux-readme.md)） |
-| **Linux ARM64** | [ChatGPT-API-Provider-3.2.0-linux-arm64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.0/ChatGPT-API-Provider-3.2.0-linux-arm64.tar.gz) | 解压后同样执行 `./install.sh` 即可。 |
+| **Windows x64** | [ChatGPT-API-Launcher-3.2.1-win-x64.zip](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.1/ChatGPT-API-Launcher-3.2.1-win-x64.zip) | 完整解压后双击运行 `安装.cmd`，选择程序目录完成安装。 |
+| **macOS (Apple Silicon)** | [ChatGPT-API-Provider-3.2.1-macos-arm64.dmg](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.1/ChatGPT-API-Provider-3.2.1-macos-arm64.dmg) | 打开 DMG 镜像，将对应的启动入口与控制台 App 拖到“应用程序”文件夹。（详见 [macOS 说明](docs/macos-dmg-readme.md)） |
+| **Linux x64** | [ChatGPT-API-Provider-3.2.1-linux-x64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.1/ChatGPT-API-Provider-3.2.1-linux-x64.tar.gz) | 解压压缩包，以桌面用户身份执行 `./install.sh`。（详见 [Linux 说明](docs/linux-readme.md)） |
+| **Linux ARM64** | [ChatGPT-API-Provider-3.2.1-linux-arm64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.1/ChatGPT-API-Provider-3.2.1-linux-arm64.tar.gz) | 解压后同样执行 `./install.sh` 即可。 |
 
 ### 2. 配置你的 API 来源
 
@@ -95,7 +95,7 @@ flowchart LR
     A["你当前的使用场景"] --> B{"是否有官方账号 / 会员额度？"}
     B -- "有，且这局只想用官方模型" --> C["👑 纯血官方模式<br/>(ChatGPT / chatgpt-official)"]
     B -- "有，但想混用第三方高性价比模型" --> D["⚡ 双持混合模式<br/>(chatgpt-api)"]
-    B -- "没有，或额度已用光，只用自定义 API" --> E["🚀 纯 API 自由模式<br/>(chatgpt-apionly)"]
+    B -- "没有，或只想使用自定义 API" --> E["🚀 纯 API 自由模式<br/>(chatgpt-apionly)"]
 ```
 
 | 启动入口 | 适合人群与场景 | 实际运行机制 |
@@ -136,7 +136,7 @@ flowchart LR
 
 **强度自动识别，无法确认就如实显示。** 模型目录中的明确声明优先，也可匹配官方模型目录与准确型号规格；来源可在提示中查看。没有足够信息时显示“无法检测”，明确不支持时显示“不支持”。检测随模型目录加载或手动刷新进行，不额外生成聊天或图片。普通聊天只列出档位，仍在原生客户端选择思考强度。
 
-**Fast 使用客户端的小闪电。** GPT 模型的速度选项沿用原生菜单，适配层保留客户端发送的服务档位，控制台不再提供第二个开关。当前原生前端仅在 ChatGPT 登录下显示 Fast；纯 API 身份的界面限制保持原样。实际提速取决于上游支持与调度，不能仅凭响应中的 `service_tier` 判断是否生效。
+**Fast 使用客户端的小闪电。** GPT 模型的速度选项沿用原生菜单，适配层保留客户端发送的服务档位，控制台不提供第二个开关。纯 API 入口保留已有的 ChatGPT 登录身份，因此项目、引导状态、工作区偏好和 Fast 仍按原账号加载，模型请求始终只走自定义 API。没有登录时仍可只用 API Key；当前原生前端对未登录身份不显示 Fast。实际提速取决于上游支持与调度，不能仅凭响应中的 `service_tier` 判断是否生效。
 
 > [!IMPORTANT]
 > **在聊天里说“用某某模型画图”，目前不能可靠切换生图模型。** 原生 `image_gen` 工具没有 `model` 参数，适配层无法从工具调用中收到所选模型；当前请通过控制台切换默认。通过 **Images API 直接发请求** 时，可以用 `model` 字段明确指定其他模型，适配层优先使用请求中指定的模型。这是接口能力，与在聊天文字中提名字不同。
@@ -211,17 +211,17 @@ flowchart TD
 <details>
 <summary><b>🔄 用自己的 API 聊过，再从官方入口打开，能接着聊吗？</b></summary>
 
-> **三个入口默认共用同一个 provider，可以接续这类对话。**
+> **三个入口自动兼容本机已有对话，无需选择历史通道。**
 >
 > 官方兼容入口沿用 `chatgpt_api_launcher` 恢复历史，但只使用官方账号、官方模型与官方通道，并保留原生远程压缩。打开后请选择一个官方模型；进入纯 API 入口时请选择自定义模型。混合入口内可来回切换官方和自定义模型。
 >
-> **旧记录报 provider 不匹配时**：在控制台 **使用说明 → 官方入口的历史兼容** 中，选择报错里的 `openai`、`chatgpt_api_mixed` 或 `smr`，保存并完全退出重开官方入口。所有选项仍只走官方。当前客户端每次启动只能恢复同一 provider 的记录；启动器不会改写绑定或自动创建副本。直接从系统打开未经启动器配置的原版客户端，不保证可恢复自定义 provider 的历史。
+> **旧对话自动兼容**：三个入口运行期间临时统一本机旧对话的通道元数据，退出后恢复原值，无需手动选择 provider。对话 ID、消息、工具记录、项目归属保持原样；恢复记录仅放在适配层目录，完成恢复后清除。异常中断后，下次启动会先恢复再准备兼容。直接从系统打开未经启动器配置的原版客户端，仍受它自身的 provider 限制。
 </details>
 
 <details>
 <summary><b>🗜️ 换模型后，压缩和上下文一定能同步吗？</b></summary>
 
-> **压缩方式由原生 provider 决定。** 官方入口保持官方远程压缩；两个 API 入口使用客户端原生文本压缩，包括混合入口中选中的官方模型。这样可保持同一对话在官方与 API 模型间切换，但不等同于所有功能都采用纯官方入口的处理方式。官方加密思考和加密压缩块不能被其他厂商模型解密；缺少可读历史时会明确报错，不会偷偷编造摘要或丢弃上下文。
+> **压缩方式由原生 provider 决定。** 官方入口保持官方远程压缩；两个 API 入口使用客户端原生文本压缩，包括混合入口中选中的官方模型。官方加密思考和加密压缩块不能被其他厂商模型解密；缺少可读历史时会明确报错，不会偷偷编造摘要或丢弃上下文。
 >
 > 模型菜单和上下文设置也在重开后加载，用量浮窗随客户端新一轮统计刷新。设置更大的窗口不会增加上游模型的实际容量。
 </details>

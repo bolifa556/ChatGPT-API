@@ -14,6 +14,14 @@ export function parseProcessIdentity(output, pid) {
 export function processIdentity(pid) {
   if (!Number.isSafeInteger(Number(pid)) || Number(pid) <= 0) return null;
   try {
+    // POSIX integration tests also run on Linux/WSL. Kernel start ticks remain
+    // stable there when the host corrects its wall clock; ps lstart does not.
+    if (process.platform === 'linux') {
+      const base = '/proc/' + pid, stat = fs.readFileSync(base + '/stat', 'utf8');
+      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      return fields[0] === 'Z' ? null : { pid: Number(pid), start: fields[19], uid: fs.statSync(base).uid,
+        command: fs.readFileSync(base + '/cmdline', 'utf8').split('\0').filter(Boolean).join(' ') };
+    }
     return parseProcessIdentity(execFileSync('/bin/ps', ['-ww', '-p', String(pid), '-o', 'lstart=', '-o', 'uid=', '-o', 'stat=', '-o', 'args='],
       { encoding: 'utf8', timeout: 5000, env: psEnv(), stdio: ['ignore', 'pipe', 'ignore'] }), pid);
   } catch { return null; }

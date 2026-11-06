@@ -9,9 +9,9 @@ import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { processIdentity, alive, runningClients, requireClosedClient, clientExecutable, nativeCli, officialProxy, startNativeClient } from './platform.mjs';
 import { hasChatGPTLogin, nativeVersion } from './native.mjs';
-import { repairThreadProviders } from '../src/repair-thread-providers.mjs';
+import { repairThreadProviders, restoreThreadProviders } from '../src/repair-thread-providers.mjs';
 import { prepareWithRecovery, updateEnv, restoreRootLine } from '../src/gateway-recovery.mjs';
-import { syncLegacySettings, userApiSettings, initializeDeferredSettings, requireApiConfiguration, officialProviders } from '../src/settings.mjs';
+import { syncLegacySettings, userApiSettings, initializeDeferredSettings, requireApiConfiguration } from '../src/settings.mjs';
 export { requireClosedClient } from './platform.mjs';
 
 const run = promisify(execFile), delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -95,11 +95,11 @@ export async function stopRouter(ctx) {
 }
 export async function entrySelection(ctx, entryMode = 'apionly', options = {}) {
   if (!entryModes.includes(entryMode)) throw new Error('Unknown launcher entry.');
-  const signedIn = entryMode === 'api' && await hasChatGPTLogin(ctx.home, options.cli);
-  const mode = entryMode === 'official' || signedIn ? 'mixed' : 'gateway';
+  const signedIn = await hasChatGPTLogin(ctx.home, options.cli, { loadModels: entryMode !== 'apionly' });
+  const mode = entryMode === 'official' || entryMode === 'api' && signedIn ? 'mixed' : 'gateway';
   return { entryMode, mode, nativeAccount: signedIn, gatewayTransport: 'direct',
-    clientVersion: mode === 'mixed' ? nativeVersion(options.cli) : '',
-    officialProxy: mode === 'mixed' ? options.officialProxy ?? officialProxy(readSettings(ctx)) : '' };
+    clientVersion: mode === 'mixed' || signedIn ? nativeVersion(options.cli) : '',
+    officialProxy: mode === 'mixed' || signedIn ? options.officialProxy ?? officialProxy(readSettings(ctx)) : '' };
 }
 function routerSettings(ctx, selection) {
   const raw = readSettings(ctx);
@@ -116,12 +116,13 @@ async function prepare(ctx, settings, selection) {
     const extra = readSettings(ctx).OFFICIAL_BASE;
     atomic(envPath, 'SHIM_HOST=127.0.0.1\nSHIM_PORT=' + settings.SHIM_PORT + '\n' + (extra ? 'OFFICIAL_BASE=' + extra + '\n' : ''));
   }
-  const env = { ...process.env, CHATGPT_API_ROOT: ctx.root, CODEX_HOME: selection.mode === 'mixed' ? ctx.home : path.join(ctx.data, 'provider-only'), CHATGPT_API_ENV_PATH: envPath, CHATGPT_SHIM_PORT: String(settings.SHIM_PORT) };
+  const env = { ...process.env, CHATGPT_API_ROOT: ctx.root, CODEX_HOME: selection.mode === 'mixed' || selection.nativeAccount ? ctx.home : path.join(ctx.data, 'provider-only'), CHATGPT_API_ENV_PATH: envPath, CHATGPT_SHIM_PORT: String(settings.SHIM_PORT) };
   delete env.CHATGPT_GATEWAY_BASE;
   const result = await run(ctx.node, [path.join(ctx.root, 'src/shim.mjs'), '--prepare'], { env, timeout: 30000, maxBuffer: 2 * 1024 * 1024 });
   return { env, prepared: JSON.parse(result.stdout) };
 }
-export async function ensureRouter(ctx, refresh = false, selection = { entryMode: 'apionly', mode: 'gateway', gatewayTransport: 'direct', officialProxy: '' }) {
+export async function ensureRouter(ctx, refresh = false, selection) {
+  selection ??= await entrySelection(ctx, 'apionly');
   return locked(ctx, async () => {
     const settings = routerSettings(ctx, selection);
     const expectedSource = crypto.createHash('sha256').update(settings.BASE_URL + '\n' + settings.API_KEY).digest('hex');
@@ -176,16 +177,16 @@ export function setRoot(text, key, line) {
 export function getTable(text, name) { return text.match(tablePattern(name))?.[0] || ''; }
 export function setTable(text, name, value) { const pattern = tablePattern(name); return pattern.test(text) ? text.replace(pattern, () => value) : value ? text.trimEnd() + '\n\n' + value : text; }
 export function applyConfig(ctx, selection = { entryMode: 'apionly', mode: 'gateway' }) {
-  const settings = routerSettings(ctx, selection), signedIn = selection.mode === 'mixed';
+  const settings = routerSettings(ctx, selection), signedIn = selection.mode === 'mixed' || selection.nativeAccount === true;
   const officialOnly = selection.entryMode === 'official';
-  const selectedProvider = officialOnly ? readJson(path.join(ctx.data, 'providers.json'), {}).officialProvider ?? providerId : providerId;
-  if (!officialProviders.includes(selectedProvider)) throw new Error('Official history provider is invalid.');
+  const selectedProvider = providerId;
   const catalog = readJson(path.join(ctx.data, 'cache/catalog-state.json'), {});
   const officialIds = signedIn ? (catalog.official || []).map(model => model.slug) : [];
   const models = readJson(path.join(ctx.data, 'cache/models-smr.json'))?.models
     || readJson(path.join(ctx.data, 'cache/models-gateway.json'))?.models || [];
   const ids = selection.entryMode === 'official' ? officialIds : models.map(model => model.slug);
   if (!ids.length && selection.entryMode !== 'official') throw new Error('No models are available.');
+  const configExisted = fs.existsSync(ctx.config);
   let original = ''; try { original = fs.readFileSync(ctx.config, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const remembered = readJson(statePath(ctx, 'entry-models'), {})[selection.entryMode];
   let text = original, selected = ids.includes(remembered?.model) ? remembered.model : rootString(text, 'model');
@@ -201,8 +202,7 @@ export function applyConfig(ctx, selection = { entryMode: 'apionly', mode: 'gate
     const auth = signedIn ? '' : `[${table}.auth]\ncommand = ${JSON.stringify(ctx.node)}\nargs = ${JSON.stringify([path.join(ctx.root, 'macos/provider.mjs'), 'auth'])}\ntimeout_ms = 45000\nrefresh_interval_ms = 0\n\n`;
     text = setTable(setTable(text, table + '.auth', auth), table, body);
   }
-  // Keep the shared ID; legacy official-entry choices select an existing
-  // conversation's provider without changing any stored conversation data.
+  // All entries share a runtime binding; routing still follows the entry/model.
   const values = { openai_base_url: base, model_provider: selectedProvider,
     model_catalog_json: selection.entryMode === 'official' ? null : path.join(ctx.data, 'cache/models-smr.json'), model: selected || null };
   if (!officialOnly) Object.assign(values, { model_context_window: null, model_auto_compact_token_limit: null });
@@ -210,7 +210,7 @@ export function applyConfig(ctx, selection = { entryMode: 'apionly', mode: 'gate
   if (remembered?.effort) text = setRoot(text, 'model_reasoning_effort', 'model_reasoning_effort = ' + JSON.stringify(remembered.effort) + '\n');
   const file = statePath(ctx, 'config'), prior = readJson(file);
   if (prior && prior.configPath !== ctx.config) throw new Error('This installation is bound to another CODEX_HOME.');
-  const saved = { configPath: ctx.config, original: prior?.original ?? original, roots: { ...Object.fromEntries(rootKeys.map(key => [key, getRoot(original, key)])), ...prior?.roots },
+  const saved = { configPath: ctx.config, configExisted: prior ? prior.configExisted !== false : configExisted, original: prior?.original ?? original, roots: { ...Object.fromEntries(rootKeys.map(key => [key, getRoot(original, key)])), ...prior?.roots },
     tables: { ...Object.fromEntries(tableNames.map(name => [name, getTable(original, name)])), ...prior?.tables } };
   atomic(file, { ...saved, active: true, entryMode: selection.entryMode, mode: selection.mode, owner: processIdentity(process.pid), sessionId: crypto.randomUUID(), applied: text }); atomic(ctx.config, text);
   return { models: ids.length, model: selected, provider: values.model_provider };
@@ -224,9 +224,13 @@ export function restoreConfig(ctx) {
     const memories = readJson(statePath(ctx, 'entry-models'), {});
     atomic(statePath(ctx, 'entry-models'), { ...memories, [saved.entryMode]: { model: rootString(text, 'model'), effort: rootString(text, 'model_reasoning_effort') } });
   }
-  for (const [key, value] of Object.entries(saved.roots)) if (getRoot(text, key) === getRoot(saved.applied, key) || ['model', 'model_reasoning_effort'].includes(key) && ownsProvider) text = restoreRootLine(text, key, value, saved.original) ?? setRoot(text, key, value);
-  for (const [name, value] of Object.entries(saved.tables)) if (getTable(text, name) === getTable(saved.applied, name)) text = setTable(text, name, value);
-  atomic(ctx.config, text); fs.unlinkSync(file);
+  if (text === saved.applied) text = saved.original;
+  else {
+    for (const [key, value] of Object.entries(saved.roots)) if (getRoot(text, key) === getRoot(saved.applied, key) || ['model', 'model_reasoning_effort'].includes(key) && ownsProvider) text = restoreRootLine(text, key, value, saved.original) ?? setRoot(text, key, value);
+    for (const [name, value] of Object.entries(saved.tables)) if (getTable(text, name) === getTable(saved.applied, name)) text = setTable(text, name, value);
+  }
+  if (saved.configExisted === false && text === '') fs.unlinkSync(ctx.config); else atomic(ctx.config, text);
+  fs.unlinkSync(file);
 }
 async function prompt(label, hidden = false) {
   if (!process.stdin.isTTY) throw new Error('Set CHATGPT_API_BASE_URL and CHATGPT_API_KEY for unattended installation, or run in a terminal.');
@@ -251,7 +255,8 @@ export async function configure(ctx, askExisting = false, apply = true, { skipAp
   atomic(envFile, updateEnv(original, { ...settings, SHIM_HOST: current.SHIM_HOST || '127.0.0.1', GATEWAY_TRANSPORT: current.GATEWAY_TRANSPORT || 'direct' }));
   if (base !== current.BASE_URL || key !== current.API_KEY) syncLegacySettings(ctx.root, settings.BASE_URL, settings.API_KEY);
   if (!apply) return { configured: true };
-  await ensureRouter(ctx, true); return applyConfig(ctx);
+  const selection = await entrySelection(ctx, 'apionly');
+  await ensureRouter(ctx, true, selection); return applyConfig(ctx, selection);
 }
 
 export async function launchEntry(ctx, entryMode, args = [], options = {}) {
@@ -267,24 +272,16 @@ export async function launchEntry(ctx, entryMode, args = [], options = {}) {
     if (entryMode !== 'official') requireApiConfiguration(ctx.root, readSettings(ctx));
     client = options.client || clientExecutable();
     cli = options.cli === undefined ? nativeCli(client) : options.cli;
-    restoreConfig(ctx);
+    await restoreThreadProviders(ctx); restoreConfig(ctx);
     selection = await entrySelection(ctx, entryMode, { cli, ...options });
     await prepareWithRecovery(() => ensureRouter(ctx, true, selection), entryMode === 'official' ? null : options.recoverGateway);
     try {
-      applyConfig(ctx, selection);
+      const applied = applyConfig(ctx, selection);
       sessionId = readJson(statePath(ctx, 'config')).sessionId;
-      if (cli) {
-        const catalog = readJson(path.join(ctx.data, 'cache/catalog-state.json'), {});
-        const repair = await repairThreadProviders({ cli, home: ctx.home,
-          gatewayIds: entryMode === 'official' ? [] : catalog.gatewayIds || [],
-          officialIds: selection.mode === 'mixed' ? (catalog.official || []).map(model => model.slug) : [],
-          provider: providerId });
-        atomic(statePath(ctx, 'provider-repair-result'), repair);
-        if (repair.failed.length) throw new Error('Some conversations could not switch their native provider. See data/state/provider-repair-result.json.');
-      }
+      await repairThreadProviders({ ...ctx, provider: applied.provider });
       child = await launchClient(client, args, ctx.home, { wait: true });
     } catch (error) {
-      restoreConfig(ctx); await stopRouter(ctx); throw error;
+      await restoreThreadProviders(ctx); restoreConfig(ctx); await stopRouter(ctx); throw error;
     }
   }, 'launch-lock');
   if (reused) {
@@ -305,7 +302,7 @@ export async function launchEntry(ctx, entryMode, args = [], options = {}) {
     await locked(ctx, async () => {
       const current = readJson(statePath(ctx, 'config'));
       if (current?.sessionId === sessionId && !clients().length) {
-        restoreConfig(ctx); await locked(ctx, () => stopRouter(ctx));
+        await restoreThreadProviders(ctx); restoreConfig(ctx); await locked(ctx, () => stopRouter(ctx));
       }
     }, 'launch-lock');
   }
@@ -325,7 +322,7 @@ export async function main(args = process.argv.slice(2), options = {}) {
     await ensureRouter(ctx, false, selection); process.stdout.write(settingsChecked(readSettings(ctx)).API_KEY + '\n'); return;
   }
   if (command === 'configure') { const result = await configure(ctx, true); console.log('Provider configured; gateway models: ' + result.models); return; }
-  if (command === 'stop' || command === 'restore') { requireClosedClient(); await locked(ctx, () => stopRouter(ctx)); if (command === 'restore') restoreConfig(ctx); console.log('Provider ' + (command === 'restore' ? 'configuration restored.' : 'router stopped.')); return; }
+  if (command === 'stop' || command === 'restore') { requireClosedClient(); await locked(ctx, () => stopRouter(ctx)); await restoreThreadProviders(ctx); if (command === 'restore') restoreConfig(ctx); console.log('Provider ' + (command === 'restore' ? 'configuration restored.' : 'router stopped.')); return; }
   if (command === 'status') { console.log(JSON.stringify(await health(ctx), null, 2)); return; }
   if (command !== 'launch') throw new Error('Usage: chatgpt-apionly [launch | configure | status | stop | restore]');
   return launchEntry(ctx, entryMode, args.slice(1), options);

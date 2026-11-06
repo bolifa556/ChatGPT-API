@@ -6,7 +6,6 @@ import { validStrength } from './model-strength.mjs';
 
 export const DEFAULT_CONTEXT_LIMIT = 500000;
 export const MAX_CONTEXT_LIMIT = 2000000;
-export const officialProviders = ['chatgpt_api_launcher', 'openai', 'chatgpt_api_mixed', 'smr'];
 export const settingsPath = root => path.join(root, 'data/providers.json');
 export function readEnvFile(file) {
   let text; try { text = fs.readFileSync(file, 'utf8'); } catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
@@ -75,8 +74,6 @@ export function normalizeSettings(value, previous, { allowEmpty = false } = {}) 
   }
   const imageRouting = value.imageRouting ?? previous?.imageRouting ?? (defaultImageModel || legacy?.imageModel ? 'custom' : 'official');
   if (!['official', 'custom'].includes(imageRouting)) throw new Error('请选择官方或自定义生图设置。');
-  const officialProvider = value.officialProvider ?? previous?.officialProvider ?? 'chatgpt_api_launcher';
-  if (!officialProviders.includes(officialProvider)) throw new Error('官方入口的历史兼容通道无效。');
   const selections = value.imageStrengths ?? previous?.imageStrengths ?? {};
   if (!selections || typeof selections !== 'object' || Array.isArray(selections) || Object.keys(selections).length > 2000) throw new Error('图片强度设置无效。');
   const imageStrengths = {};
@@ -93,7 +90,7 @@ export function normalizeSettings(value, previous, { allowEmpty = false } = {}) 
   }
   // Speed belongs to the native client's per-turn setting. Obsolete console
   // preferences are deliberately ignored, including when loading old files.
-  return { version: 1, providers, preferredProviderId, defaultImageModel, imageRouting, officialProvider, contextLimit, contextOverrides, imageStrengths };
+  return { version: 1, providers, preferredProviderId, defaultImageModel, imageRouting, contextLimit, contextOverrides, imageStrengths };
 }
 export function readSettings(root, env = readEnvFile(path.join(root, 'data/.env'))) {
   const file = settingsPath(root);

@@ -70,7 +70,8 @@ function Ensure-LocalRouter([string]$packageDir, [string]$routeMode = '', [strin
             if($health.service -eq 'chatgpt-api-router' -and $health.sourceId -eq $sourceId -and ($health.buildId -eq $buildId -or (Test-LegacyRouter $packageDir $health)) -and $health.mode -eq $mode -and $healthEntry -eq $entryMode){return $health}
             throw 'The router on this port uses a different version or configuration. Fully exit ChatGPT and reopen chatgpt-api.'
         }
-        $clientVersion = if ($mode -eq 'mixed') { Get-NativeClientVersion } else { '' }
+        $nativeAccount = ($mode -eq 'mixed') -or (Get-SavedChatGPTLogin (Get-CodexHome))
+        $clientVersion = if ($nativeAccount) { Get-NativeClientVersion } else { '' }
         $logDir=Join-Path $packageDir 'data\logs';[void](New-Item -ItemType Directory -Path $logDir -Force)
         $transport=Get-GatewayTransport $settings['GATEWAY_TRANSPORT']
         if($transport -eq 'ssh' -and $entryMode -ne 'official'){
@@ -92,7 +93,7 @@ function Ensure-LocalRouter([string]$packageDir, [string]$routeMode = '', [strin
             }
             if(-not $connected){throw 'SSH tunnel was not ready.'}
         }
-        Write-Utf8File (Get-LauncherDataPath $packageDir 'route-state.json') (@{version=2;mode=$mode;entryMode=$entryMode;gatewayTransport=$transport;officialProxy=(Get-ExistingOfficialProxy);clientVersion=$clientVersion}|ConvertTo-Json -Compress)
+        Write-Utf8File (Get-LauncherDataPath $packageDir 'route-state.json') (@{version=2;mode=$mode;entryMode=$entryMode;nativeAccount=$nativeAccount;gatewayTransport=$transport;officialProxy=(Get-ExistingOfficialProxy);clientVersion=$clientVersion}|ConvertTo-Json -Compress)
         $node=Join-Path $packageDir 'runtime\node.exe';$script=Join-Path $packageDir 'src\shim.mjs'
         $text=& $node $script --prepare 2> (Join-Path $logDir 'prepare-stderr.log')
         if($LASTEXITCODE -ne 0){throw ('Model refresh failed: '+[IO.File]::ReadAllText((Join-Path $logDir 'prepare-stderr.log')))}

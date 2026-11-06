@@ -10,14 +10,14 @@ import { once } from 'node:events';
 import { WebSocketServer } from 'ws';
 import { readRequestJson } from './http-fixture.mjs';
 import { root, delay } from './live-support.mjs';
-import { repairThreadProviders } from '../src/repair-thread-providers.mjs';
+import { repairThreadProviders, restoreThreadProviders } from '../src/repair-thread-providers.mjs';
 import { applyConfig as applyMacConfig, restoreConfig as restoreMacConfig } from '../macos/provider.mjs';
 
 const models = process.env.NATIVE_TEST_MODELS ? JSON.parse(process.env.NATIVE_TEST_MODELS) : JSON.parse(fs.readFileSync(path.join(root,'data/cache/catalog-state.json'),'utf8')).gatewayIds;
 const fixture = fs.mkdtempSync(path.join(root,'data/testing/native-switch-'));
 const home = path.join(fixture,'home'), cwd = path.join(fixture,'workspace');
 const reportFile=path.join(root,'data/diagnostics',(process.env.NATIVE_SWITCH_REPORT_NAME||'native-switch-result')+'.json');
-const provider=process.env.NATIVE_TEST_PROVIDER||'chatgpt_api_mixed';
+const provider='chatgpt_api_launcher';
 const extended=process.env.EXTENDED_NATIVE==='true';
 const apiOnly=process.env.NATIVE_API_ONLY==='true';
 const macConfig=process.env.NATIVE_MACOS_CONFIG==='true';
@@ -54,7 +54,7 @@ function events(body, url, send) {
   emit({type:'response.created',response:base});
   if(body.generate===false){emit({type:'response.completed',response:{...base,status:'completed'}});return;}
   const count=++phase.requests;
-  if(fastProbe&&!phase.compaction)assert.equal(body.service_tier,'priority','Native Fast choice did not reach the upstream request');
+  if(fastProbe&&!phase.compaction&&(body.model===official.slug||/(?:^|\/)gpt-/i.test(body.model)))assert.equal(body.service_tier,'priority','Native Fast choice did not reach the upstream request');
   if(phase.interrupt)return;
   if(phase.compaction){
     const remote=url.startsWith('/backend-api')&&input.some(i=>i.type==='compaction_trigger');
@@ -160,7 +160,7 @@ async function stopClient(){
 async function doTurn(threadId,model,options){
   phase={requests:0,...options};const offset=notifications.length,recordOffset=records.length;
   const started=await rpc('turn/start',{threadId,model,effort:'low',sandboxPolicy:{type:'dangerFullAccess'},input:[{type:'text',text:phase.marker+'; exercise existing tools.'}],
-    ...(fastProbe?{serviceTier:'priority'}:{}),
+    ...(fastProbe&&(model===official.slug||/(?:^|\/)gpt-/i.test(model))?{serviceTier:'priority'}:{}),
     ...(phase.plan?{collaborationMode:{mode:'plan',settings:{model,reasoning_effort:'low',developer_instructions:null}}}:{})});
   if(phase.interrupt){
     for(let n=0;n<100&&!phase.requests;n++)await delay(30);
@@ -204,13 +204,14 @@ async function doCompact(threadId,marker,{remote=false}={}){
   return{status:'completed',nativeTextCompaction:!remote,nativeRemoteCompaction:remote,requests:phase.requests};
 }
 async function applyEntry(entry){
+  await restoreThreadProviders({root:fixture,home});
   if(macConfig){
     const ctx={root:fixture,data:path.join(fixture,'data'),home,config:path.join(home,'config.toml'),node:process.execPath};
     fs.mkdirSync(path.join(fixture,'macos'),{recursive:true});
     // The Darwin-only credential helper is exercised by the POSIX Mac tests.
     // This Windows native-core projection supplies the same inert fixture key.
     fs.writeFileSync(path.join(fixture,'macos/provider.mjs'),"if(process.argv[2]!=='auth')process.exit(1);process.stdout.write('inert-gateway\\n');\n");
-    restoreMacConfig(ctx);applyMacConfig(ctx,{entryMode:apiOnly?'apionly':entry,mode:apiOnly?'gateway':'mixed'});return;
+    restoreMacConfig(ctx);applyMacConfig(ctx,{entryMode:apiOnly?'apionly':entry,mode:apiOnly?'gateway':'mixed'});await repairThreadProviders({root:fixture,home});return;
   }
   const script=path.join(fixture,'apply-entry.ps1');
   const quote=s=>"'"+s.replaceAll("'","''")+"'";
@@ -218,6 +219,7 @@ async function applyEntry(entry){
     'Restore-LauncherConfig '+quote(fixture)+' '+quote(path.join(home,'config.toml')),
     'Apply-LauncherConfig '+quote(fixture)+' '+quote(path.join(home,'config.toml'))+" '"+(apiOnly?'gateway':'mixed')+"' "+quote(routerBase+'/v1')+" 'http://isolated.invalid/v1' "+quote(entry)].join('\n'));
   await processRun('powershell.exe',['-NoProfile','-ExecutionPolicy','Bypass','-File',script],{...process.env,CODEX_HOME:home});
+  await repairThreadProviders({root:fixture,home});
 }
 try{
   server.listen(0,'127.0.0.1');await once(server,'listening');const peerBase='http://127.0.0.1:'+server.address().port;
@@ -235,33 +237,6 @@ try{
   fs.writeFileSync(path.join(home,'config.toml'),['model="gpt-6-astra"','approval_policy="never"','sandbox_mode="workspace-write"','web_search="disabled"','[features]','code_mode_host=true','[analytics]','enabled=false','[model_providers.smr]','name="Legacy test"',
     ...(extended?['[mcp_servers.fixture_echo]','command='+JSON.stringify(process.execPath),'args=['+JSON.stringify(path.join(root,'tests/fixtures/mcp-echo.mjs'))+']']:[]),''].join('\n'));
   await applyEntry('api');await startClient();
-  // Repair a persisted old OpenAI-provider conversation through native APIs.
-  // The test server does not supply an opaque compaction capability.
-  if(!apiOnly&&!process.env.NATIVE_TEST_PROVIDER){
-    const oldModel=models.find(m=>m.startsWith('阿里云订阅/')&&m.endsWith('qwen3.8-max'));
-    assert(oldModel);const marker='NATIVE_OLD_PROVIDER',file=path.join(cwd,'old-provider.txt');fs.writeFileSync(file,marker);
-    const old=await rpc('thread/start',{model:oldModel,modelProvider:'openai',cwd,approvalPolicy:'never',sandbox:'danger-full-access',runtimeWorkspaceRoots:[cwd]});
-    await doTurn(old.thread.id,oldModel,{marker,file});
-    // The fixed router must reject the incompatible control request explicitly.
-    phase={requests:0,compaction:true,marker};const offset=notifications.length;
-    await rpc('thread/compact/start',{threadId:old.thread.id});
-    let failed;for(let n=0;n<500;n++){failed=notifications.slice(offset).find(v=>v.method==='turn/completed');if(failed)break;await delay(30);}
-    assert.match(failed?.params.turn.error?.message||'',/native text-compaction provider repair/);assert.equal(phase.requests,0);
-    const untouched=await rpc('thread/start',{model:official.slug,modelProvider:'openai',cwd,approvalPolicy:'never',sandbox:'danger-full-access',runtimeWorkspaceRoots:[cwd]});
-    await doTurn(untouched.thread.id,official.slug,{marker,file});
-    const nativePath=old.thread.path;await stopClient();
-    const originalItems=()=>fs.readFileSync(nativePath,'utf8').split('\n').filter(Boolean).map(JSON.parse).filter(x=>['response_item','compacted'].includes(x.type)).map(JSON.stringify);
-    const before=originalItems();
-    const repaired=await repairThreadProviders({cli:process.env.CODEX_CLI_PATH||path.join(process.env.LOCALAPPDATA,'OpenAI/Codex/bin/faa963e871dd422c/codex.exe'),home,gatewayIds:models,officialIds:[official.slug],provider});
-    assert.deepEqual(repaired.failed,[]);assert(repaired.repaired.some(r=>r.threadId===old.thread.id));assert.deepEqual(originalItems(),before);
-    assert(!repaired.candidates.some(r=>r.threadId===untouched.thread.id));
-    const repeated=await repairThreadProviders({cli:process.env.CODEX_CLI_PATH||path.join(process.env.LOCALAPPDATA,'OpenAI/Codex/bin/faa963e871dd422c/codex.exe'),home,gatewayIds:models,officialIds:[official.slug],provider});
-    assert.deepEqual(repeated.candidates,[]);assert.deepEqual(repeated.failed,[]);assert.deepEqual(originalItems(),before);
-    await startClient();const resumed=await rpc('thread/resume',{threadId:old.thread.id});assert.equal(resumed.modelProvider,provider);assert.equal(resumed.thread.id,old.thread.id);
-    assert.equal((await rpc('thread/read',{threadId:untouched.thread.id})).thread.modelProvider,'openai');
-    await doCompact(old.thread.id,marker);await doTurn(old.thread.id,oldModel,{marker,file});
-    console.log(JSON.stringify({phase:'old_provider_repair',sameThreadId:true,originalHistoryUnchanged:true,officialThreadUnchanged:true,idempotent:true,nativeCompaction:true}));
-  }
   const selected=process.argv.slice(2);
   for(const model of models.filter(m=>!selected.length||selected.some(v=>m.includes(v)))){
     const row={model,steps:[]};cases.push(row);const marker='NATIVE_'+cases.length,file=path.join(cwd,'marker-'+cases.length+'.txt');
@@ -289,15 +264,11 @@ try{
         fs.writeFileSync(reportFile,JSON.stringify({cases,errors,fixture},null,2));
         continue;
       }
-      const started=await rpc('thread/start',{model:official.slug,modelProvider:'openai',cwd,approvalPolicy:'never',sandbox:'danger-full-access',runtimeWorkspaceRoots:[cwd]});const threadId=started.thread.id;
+      const started=await rpc('thread/start',{model:official.slug,modelProvider:provider,cwd,approvalPolicy:'never',sandbox:'danger-full-access',runtimeWorkspaceRoots:[cwd]});const threadId=started.thread.id;
       row.permissions={sandbox:started.sandbox,profile:started.activePermissionProfile};console.log(JSON.stringify({phase:'resolved_permissions',...row.permissions}));
       row.steps.push(await doTurn(threadId,official.slug,{marker,file,write:true}));
       row.steps.push(await doTurn(threadId,model,{marker,file}));
-      // The native GUI only changes the model. Reloading the provider at startup
-      // is still required; this test must not pretend the selector does it.
-      await stopClient();
-      const gatewayAligned=await repairThreadProviders({cli:process.env.CODEX_CLI_PATH||path.join(process.env.LOCALAPPDATA,'OpenAI/Codex/bin/faa963e871dd422c/codex.exe'),home,gatewayIds:models,officialIds:[official.slug],provider});
-      assert.deepEqual(gatewayAligned.failed,[]);assert(gatewayAligned.repaired.some(r=>r.threadId===threadId&&r.targetProvider===provider));
+      await stopClient();await applyEntry('api');
       await startClient();assert.equal((await rpc('thread/resume',{threadId,excludeTurns:true})).modelProvider,provider);
       row.gatewayProviderRestoredAfterReload=true;
       row.gatewayCompaction=await doCompact(threadId,marker);
@@ -316,20 +287,18 @@ try{
       }
       // Restore this exact persisted conversation via the other launcher config.
       await stopClient();await applyEntry('official');
-      const synchronized=await repairThreadProviders({cli:process.env.CODEX_CLI_PATH||path.join(process.env.LOCALAPPDATA,'OpenAI/Codex/bin/faa963e871dd422c/codex.exe'),home,gatewayIds:models,officialIds:[official.slug],provider});
-      assert.deepEqual(synchronized.failed,[]);assert(synchronized.repaired.some(r=>r.threadId===threadId&&r.targetProvider==='openai'));
       await startClient();
       const resumed=await rpc('thread/resume',{threadId,excludeTurns:true});assert.equal(resumed.thread.id,threadId);
       row.steps.push(await doTurn(threadId,official.slug,{marker,file}));row.sameThreadAfterEntrySwitch=true;
       // Verify native cancellation, then continued tool use in the same thread.
       row.steps.push(await doTurn(threadId,official.slug,{marker,file,interrupt:true}));
       row.steps.push(await doTurn(threadId,official.slug,{marker,file}));
-      assert.equal(resumed.modelProvider,'openai');
+      assert.equal(resumed.modelProvider,provider);
       row.afterEntryChangeCompaction=await doCompact(threadId,marker,{remote:true});
       row.officialProviderRestored=true;
       // New official conversations retain the genuine remote-v2 path.
       const officialThread=await rpc('thread/start',{model:official.slug,cwd,approvalPolicy:'never',sandbox:'danger-full-access',runtimeWorkspaceRoots:[cwd]});
-      assert.equal(officialThread.modelProvider,'openai');await doTurn(officialThread.thread.id,official.slug,{marker,file});
+      assert.equal(officialThread.modelProvider,provider);await doTurn(officialThread.thread.id,official.slug,{marker,file});
       row.newOfficialThreadCompaction=await doCompact(officialThread.thread.id,marker,{remote:true});
       await stopClient();await applyEntry('api');await startClient();
       row.passed=true;
@@ -339,7 +308,7 @@ try{
     if(!row.passed)break;
   }
 }finally{
-  await stopClient();for(const c of children){c.kill();c.stdin?.destroy();c.stdout?.destroy();c.stderr?.destroy();}for(const ws of wss.clients)ws.terminate();for(const s of sockets)s.destroy();server.close();
+  await stopClient();await restoreThreadProviders({root:fixture,home});for(const c of children){c.kill();c.stdin?.destroy();c.stdout?.destroy();c.stderr?.destroy();}for(const ws of wss.clients)ws.terminate();for(const s of sockets)s.destroy();server.close();
   const report={at:new Date().toISOString(),passed:cases.length>0&&cases.every(c=>c.passed)&&errors.length===0,fixture,provider:apiOnly?'chatgpt_api_launcher':provider,apiOnly,macConfig,fastProbe,syntheticAudioCapability:extended,scope:(macConfig?'Mac-generated provider configuration projected onto the unmodified Windows native core; ':'')+'Unmodified native app-server plus production router with isolated upstreams; real patch and terminal tools execute only in fixture',cases,errors};
   fs.writeFileSync(reportFile,JSON.stringify(report,null,2));
   if(!report.passed)process.exitCode=1;

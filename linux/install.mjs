@@ -36,7 +36,7 @@ async function install() {
     if (![0o644, 0o755].includes(entry.mode)) throw new Error('Invalid release permissions.');
     copies.push({ target, bytes, mode: entry.mode });
   }
-  for (const required of ['runtime/node','linux/provider.mjs','linux/console','linux/settings.mjs','linux/chatgpt-api','src/shim.mjs','src/transport.mjs','src/response-state.mjs','src/settings.mjs','src/gateway-sources.mjs','src/console.mjs','assets/console/index.html','assets/console/console.css','assets/console/console.js','assets/console/icon.svg','src/model-context.mjs','src/model-strength.mjs','src/gateway-recovery.mjs','assets/model-template.json','assets/model-contexts.json','package-lock.json']) if (!seen.has(required)) throw new Error('Incomplete release: ' + required);
+  for (const required of ['runtime/node','linux/provider.mjs','linux/console','linux/settings.mjs','linux/chatgpt-api','src/shim.mjs','src/transport.mjs','src/response-state.mjs','src/settings.mjs','src/gateway-sources.mjs','src/console.mjs','assets/console/index.html','assets/console/console.css','assets/console/console.js','assets/console/icon.svg','src/model-context.mjs','src/model-strength.mjs','src/gateway-recovery.mjs','src/repair-thread-providers.mjs','assets/model-template.json','assets/model-contexts.json','package-lock.json']) if (!seen.has(required)) throw new Error('Incomplete release: ' + required);
   const ctx = context(destination);
   const current = flags.includes('--skip-api') ? {} : userApiSettings(destination);
   let choice = flags.includes('--skip-api') ? { skip: true } : null;

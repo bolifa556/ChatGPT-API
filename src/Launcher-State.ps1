@@ -106,16 +106,6 @@ function Get-NativeClientVersion([string]$installLocation = '') {
     if ($LASTEXITCODE -eq 0 -and $version -match '^codex-cli (\d+\.\d+\.\d+)(?:[-+\s]|$)') { return $Matches[1] }
     return ''
 }
-function Get-OfficialProviderId([string]$packageDir) {
-    $settingsPath = Join-Path $packageDir 'data\providers.json'
-    $selected = 'chatgpt_api_launcher'
-    if (Test-Path -LiteralPath $settingsPath) {
-        $settings = [IO.File]::ReadAllText($settingsPath) | ConvertFrom-Json
-        if ($settings.officialProvider) { $selected = [string]$settings.officialProvider }
-    }
-    if (@('chatgpt_api_launcher','openai','chatgpt_api_mixed','smr') -cnotcontains $selected) { throw '官方入口的历史兼容通道无效。' }
-    return $selected
-}
 function Set-LauncherMixedProvider([string]$content, [string]$baseUrl, [string]$packageDir, [bool]$signedIn, [string]$id = 'chatgpt_api_mixed', [bool]$officialOnly = $false) {
     if (-not $signedIn) { return Set-LauncherProvider $content $id $baseUrl $packageDir $false }
     # Keep native account authentication while selecting native text compaction.
@@ -160,6 +150,11 @@ function Restore-LauncherTable([string]$content, [string]$name, [string]$origina
     return Set-TableText $content $name $table
 }
 function Restore-LauncherConfig([string]$packageDir, [string]$configPath) {
+    $compatibility = Join-Path $packageDir 'data\state\thread-provider-compatibility.json'
+    if (Test-Path -LiteralPath $compatibility) {
+        $restoredThreads = & (Join-Path $packageDir 'runtime\node.exe') (Join-Path $packageDir 'src\repair-thread-providers.mjs') 'restore' (Split-Path -Parent $configPath) $packageDir 2> (Join-Path $packageDir 'data\logs\provider-restore-stderr.log')
+        if ($LASTEXITCODE -ne 0) { throw '对话的临时通道设置尚未恢复，请查看 data\logs\provider-restore-stderr.log。' }
+    }
     $state = Read-LauncherState $packageDir
     if (-not $state -or -not $state.active) { return }
     if ([IO.Path]::GetFullPath($state.configPath) -ne [IO.Path]::GetFullPath($configPath)) { throw '切换记录属于另一个配置目录，已停止自动恢复。' }
@@ -177,34 +172,30 @@ function Restore-LauncherConfig([string]$packageDir, [string]$configPath) {
         foreach ($table in $script:LauncherTables) { $restored = Restore-LauncherTable $restored $table $state.original }
         $restored = $restored.TrimEnd() + [regex]::Match($state.original, '[\r\n\t ]*\z').Value
     }
-    Write-Utf8File $configPath $restored
+    if ($state.PSObject.Properties['originalExisted'] -and -not $state.originalExisted -and $restored.Length -eq 0) { Remove-Item -LiteralPath $configPath }
+    else { Write-Utf8File $configPath $restored }
     $state.active = $false
     $state.original = $null; $state.applied = $null
     Write-Utf8File (Get-LauncherDataPath $packageDir 'launcher-state.json') ($state | ConvertTo-Json -Depth 8)
 }
 function Apply-LauncherConfig([string]$packageDir, [string]$configPath, [string]$mode, [string]$shimBase, [string]$gatewayBase, [ValidateSet('api','official','apionly')][string]$entryMode = 'api') {
     if ($entryMode -eq 'apionly') { $mode = 'gateway' }
-    $original = if (Test-Path -LiteralPath $configPath) { [IO.File]::ReadAllText($configPath) } else { '' }
-    # Retain stable provider IDs for old conversations. Their auth helper lazily
-    # starts the local adapter; they must never bypass it by dialing Bifrost.
-    $original = Set-LauncherProvider $original 'chatgpt_api_launcher' $shimBase $packageDir $false
-    $original = Set-LauncherMixedProvider $original $shimBase $packageDir ($mode -eq 'mixed')
-    if(Get-TableText $original 'model_providers.smr'){$original=Set-LauncherProvider $original 'smr' $shimBase $packageDir $false}
-    Write-Utf8File $configPath $original
+    # Account identity owns projects, onboarding and desktop preferences. Keeping
+    # a real saved login must not enable official inference in the API-only router.
+    $signedIn = ($mode -eq 'mixed') -or (Get-SavedChatGPTLogin (Split-Path -Parent $configPath))
+    $originalExisted = Test-Path -LiteralPath $configPath
+    $original = if ($originalExisted) { [IO.File]::ReadAllText($configPath) } else { '' }
     $previous = Read-LauncherState $packageDir
     $content = Set-RootString $original 'openai_base_url' $shimBase
     if ($entryMode -eq 'official') { $content = Set-RootLine $content 'model_catalog_json' $null }
     else { $content = Set-RootString $content 'model_catalog_json' (Get-LauncherDataPath $packageDir 'models-smr.json') }
-    foreach ($id in @('chatgpt_api_launcher','smr')) {
-        if (Get-TableText $content ('model_providers.' + $id)) { $content = Set-LauncherProvider $content $id $shimBase $packageDir ($mode -eq 'mixed') }
+    foreach ($id in @('chatgpt_api_launcher','chatgpt_api_mixed','smr')) {
+        if ($id -eq 'chatgpt_api_launcher' -or (Get-TableText $content ('model_providers.' + $id))) { $content = Set-LauncherMixedProvider $content $shimBase $packageDir $signedIn $id }
     }
-    if ($entryMode -eq 'api' -and $mode -eq 'mixed') {
-        $content = Set-LauncherMixedProvider $content $shimBase $packageDir $true 'chatgpt_api_launcher'
-    }
-    $provider = if ($entryMode -eq 'official') { Get-OfficialProviderId $packageDir } else { 'chatgpt_api_launcher' }
-    if ($entryMode -eq 'official' -and $provider -ne 'openai') {
-        $content = Set-LauncherMixedProvider $content $shimBase $packageDir $true $provider $true
-    }
+    # One runtime binding across entries. Old bindings are temporarily overlaid
+    # by the launch helper and restored when the native client exits.
+    $provider = 'chatgpt_api_launcher'
+    $content = Set-LauncherMixedProvider $content $shimBase $packageDir $signedIn $provider ($entryMode -eq 'official')
     if ($entryMode -eq 'official') {
         $catalog = [IO.File]::ReadAllText((Get-LauncherDataPath $packageDir 'catalog-state.json')) | ConvertFrom-Json
         $ids = @($catalog.official | ForEach-Object { [string]$_.slug })
@@ -220,15 +211,14 @@ function Apply-LauncherConfig([string]$packageDir, [string]$configPath, [string]
         else { $selected = $ids[0] }
         $content = Set-RootString $content 'model' $selected
     }
-    # Keep the shared ID across entries. The official entry can select a legacy
-    # ID to resume older records, while its router still accepts official models only.
+    # The helper restores original bindings after the application lifetime.
     $content = Set-RootString $content 'model_provider' $provider
     if ($entryMode -ne 'official') {
         # Model-specific catalog limits must not be overridden by a global GPT window.
         $content = Set-RootLine $content 'model_context_window' $null
         $content = Set-RootLine $content 'model_auto_compact_token_limit' $null
     }
-    $state = [ordered]@{ version = 2; active = $true; mode = $mode; entryMode = $entryMode; configPath = $configPath; original = $original; applied = $content; startedAt = [DateTime]::UtcNow.ToString('o'); lastApiModel = $(if ($entryMode -eq 'api') { $selected } else { $previous.lastApiModel }); lastApiEffort = $(if ($entryMode -eq 'api') { Get-RootString $original 'model_reasoning_effort' } else { $previous.lastApiEffort }); lastApiOnlyModel = $(if ($entryMode -eq 'apionly') { $selected } else { $previous.lastApiOnlyModel }); lastApiOnlyEffort = $(if ($entryMode -eq 'apionly') { Get-RootString $original 'model_reasoning_effort' } else { $previous.lastApiOnlyEffort }) }
+    $state = [ordered]@{ version = 2; active = $true; mode = $mode; entryMode = $entryMode; configPath = $configPath; originalExisted = $originalExisted; original = $original; applied = $content; startedAt = [DateTime]::UtcNow.ToString('o'); lastApiModel = $(if ($entryMode -eq 'api') { $selected } else { $previous.lastApiModel }); lastApiEffort = $(if ($entryMode -eq 'api') { Get-RootString $original 'model_reasoning_effort' } else { $previous.lastApiEffort }); lastApiOnlyModel = $(if ($entryMode -eq 'apionly') { $selected } else { $previous.lastApiOnlyModel }); lastApiOnlyEffort = $(if ($entryMode -eq 'apionly') { Get-RootString $original 'model_reasoning_effort' } else { $previous.lastApiOnlyEffort }) }
     # Journal first, so a crash while switching can be recovered by either entry.
     Write-Utf8File (Get-LauncherDataPath $packageDir 'launcher-state.json') ($state | ConvertTo-Json -Depth 8)
     Write-Utf8File $configPath $content

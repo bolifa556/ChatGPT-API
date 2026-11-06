@@ -261,13 +261,6 @@ function render(result) {
   $('#notice').textContent = '设置已保存。完全退出并重新打开 ChatGPT 后，加载新的 API 来源、模型菜单和上下文设置。';
   renderSourceFilters();
   setChoices($('#image-routing'), [{ value: 'official', label: '官方生图设置' }, { value: 'custom', label: '自定义生图设置' }], draft.imageRouting);
-  $('#official-history-setting').hidden = result.officialEntryAvailable === false;
-  setChoices($('#official-provider'), [
-    { value: 'chatgpt_api_launcher', label: 'chatgpt_api_launcher · 默认', displayLabel: 'API 对话（默认）' },
-    { value: 'openai', label: 'openai · 原生官方', displayLabel: '原生官方对话' },
-    { value: 'chatgpt_api_mixed', label: 'chatgpt_api_mixed · 旧版混合', displayLabel: '旧版混合对话' },
-    { value: 'smr', label: 'smr · 旧版', displayLabel: '旧版 smr 对话' },
-  ], draft.officialProvider);
   renderSources(); renderModels(); updateCounts(); updateSavebar();
 }
 function view(name) {
@@ -289,7 +282,6 @@ $('#add-source').onclick = () => {
 $('#context-limit').oninput = event => { draft.contextLimit = Number(event.target.value); changed(); updateCounts(); renderModels(); };
 $('#model-search').oninput = renderModels; $('#model-source-filter').onchange = renderModels;
 $('#image-routing').onchange = () => { draft.imageRouting = $('#image-routing').value; changed(); };
-$('#official-provider').onchange = () => { draft.officialProvider = $('#official-provider').value; changed(); };
 $('#discard').onclick = () => render(data);
 $('#save-settings').onclick = async () => { busy = true; updateSavebar(); try { render(await api('settings', draft)); toast('已保存，重开客户端后应用。'); } catch (error) { toast(error.message); } finally { busy = false; updateSavebar(); } };
 $('#refresh-models').onclick = async () => { busy = true; updateSavebar(); const button = $('#refresh-models'); button.textContent = '正在加载…'; try { render(await api('refresh', {})); toast('模型目录已更新。'); } catch (error) { toast(error.message); } finally { busy = false; button.textContent = '刷新模型目录'; updateSavebar(); } };

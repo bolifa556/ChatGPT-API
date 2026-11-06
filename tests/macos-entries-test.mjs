@@ -7,6 +7,7 @@ import http from 'node:http';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
+import { DatabaseSync } from 'node:sqlite';
 import WebSocket, { WebSocketServer } from 'ws';
 import { readRequestJson } from './http-fixture.mjs';
 import { context, atomic, launchEntry, stopRouter, health, setRoot } from '../macos/provider.mjs';
@@ -100,7 +101,11 @@ native.once('exit',(code)=>process.exit(code||0));
   const baseline = 'model = "gpt-6-sol"\nmodel_reasoning_effort = "low"\n[app]\nlocaleOverride = "zh-CN"\n[model_providers.keep]\nname = "keep"\n';
   atomic(ctx.config, baseline);
   atomic(path.join(ctx.home, 'models_cache.json'), { client_version: '0.162.0', models: [official] });
-  const history = path.join(ctx.home, 'sessions/unchanged.jsonl'); atomic(history, '{"original":"history-must-remain-identical"}\n');
+  const history = path.join(ctx.home, 'sessions/unchanged.jsonl');
+  atomic(history, '{"type":"session_meta","payload":{"id":"legacy-official","model_provider":"openai"}}\n{"type":"response_item","payload":{"type":"message","role":"user","content":"history-must-remain-identical"}}\n');
+  const indexFile = path.join(ctx.home, 'state_5.sqlite');
+  const seedDb = new DatabaseSync(indexFile);
+  seedDb.exec("CREATE TABLE threads(id TEXT PRIMARY KEY, model_provider TEXT, project_id TEXT); INSERT INTO threads VALUES ('legacy-official','openai','keep-project')"); seedDb.close();
   const originalHistory = fs.readFileSync(history, 'utf8');
   const cases = [
     { entry: 'official', login: true, noKey: true, expectedMode: 'mixed' },
@@ -108,6 +113,7 @@ native.once('exit',(code)=>process.exit(code||0));
     { entry: 'api', login: true, expectedMode: 'mixed' },
     { entry: 'apionly', login: true, expectedMode: 'gateway' },
     { entry: 'api', login: false, keychain: true, expectedMode: 'mixed' },
+    { entry: 'apionly', login: false, keychain: true, expectedMode: 'gateway' },
     { entry: 'official', login: false, noKey: true, expectedMode: 'mixed' },
   ];
   for (const scenario of cases) {
@@ -134,12 +140,16 @@ native.once('exit',(code)=>process.exit(code||0));
         assert.equal(openCount(), checks.length + 1, 'The opener did not start the isolated application');
         const state = await health(ctx), config = fs.readFileSync(ctx.config, 'utf8');
         assert.equal(state.entryMode, scenario.entry); assert.equal(state.mode, scenario.expectedMode); assert(!config.includes(key));
-        assert.equal(state.clientVersion, scenario.expectedMode === 'mixed' ? '0.162.0' : null);
+        const nativeIdentity = scenario.expectedMode === 'mixed' || scenario.login || scenario.keychain;
+        assert.equal(state.clientVersion, nativeIdentity ? '0.162.0' : null);
         assert.equal(state.officialModels, scenario.expectedMode === 'mixed' ? 1 : 0);
         assert(config.includes('model_provider = "chatgpt_api_launcher"'));
+        assert.equal(JSON.parse(fs.readFileSync(history, 'utf8').split('\n')[0]).payload.model_provider, 'chatgpt_api_launcher');
+        const activeDb = new DatabaseSync(indexFile, { readOnly: true });
+        assert.equal(activeDb.prepare('SELECT model_provider FROM threads').get().model_provider, 'chatgpt_api_launcher'); activeDb.close();
         if (scenario.entry === 'official') assert.match(config, /\[model_providers\.chatgpt_api_launcher\]\nname = "OpenAI"/);
         assert.equal(config.includes('model_catalog_json = '), scenario.entry !== 'official');
-        assert.equal(config.includes('requires_openai_auth = true'), scenario.expectedMode === 'mixed');
+        assert.equal(config.includes('requires_openai_auth = true'), Boolean(nativeIdentity));
         await assert.rejects(launchEntry(ctx, scenario.entry === 'official' ? 'api' : 'official', [], { client, cli, runningClients: () => [child.pid] }), /Fully quit/);
         const owner = JSON.parse(fs.readFileSync(path.join(ctx.data, 'state/config.json'))).owner;
         const currentOwner = processIdentity(owner.pid);
@@ -182,6 +192,10 @@ native.once('exit',(code)=>process.exit(code||0));
     assert.equal(fs.readFileSync(ctx.config, 'utf8').trimEnd(), configBefore.replace('zh-CN', 'en-US').trimEnd());
     assert.equal(fs.existsSync(authFile) ? fs.readFileSync(authFile, 'utf8') : null, authBefore);
     assert.equal(fs.readFileSync(history, 'utf8'), originalHistory);
+    const restoredDb = new DatabaseSync(indexFile, { readOnly: true });
+    assert.deepEqual({ ...restoredDb.prepare('SELECT * FROM threads').get() }, { id: 'legacy-official', model_provider: 'openai', project_id: 'keep-project' }); restoredDb.close();
+    assert(!fs.existsSync(path.join(ctx.data, 'state/thread-provider-compatibility.json')));
+    assert(!fs.readdirSync(ctx.home, { recursive: true }).some(name => name.endsWith('.chatgpt-api-compat.tmp')));
     if (scenario.entry === 'official') assert(!records.slice(before).some(record => record.which === 'gateway'));
     if (scenario.expectedMode === 'gateway') assert(!records.slice(before).some(record => record.which === 'official'));
     checks.push({ ...scenario, passed: true });

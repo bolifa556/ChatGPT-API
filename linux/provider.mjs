@@ -10,15 +10,20 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { prepareWithRecovery, updateEnv, restoreRootLine } from '../src/gateway-recovery.mjs';
 import { requestSettings, showError } from './settings.mjs';
 import { syncLegacySettings, userApiSettings, initializeDeferredSettings, requireApiConfiguration } from '../src/settings.mjs';
+import { repairThreadProviders, restoreThreadProviders } from '../src/repair-thread-providers.mjs';
 
 const run = promisify(execFile), delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 export const providerId = 'chatgpt_api_launcher';
-export const rootKeys = ['model_provider', 'model_catalog_json', 'model', 'model_context_window', 'model_auto_compact_token_limit'];
+export const rootKeys = ['openai_base_url', 'model_provider', 'model_catalog_json', 'model', 'model_context_window', 'model_auto_compact_token_limit'];
 export function context(root = process.env.CHATGPT_API_ROOT || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')) {
   const home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
   return { root, home, data: path.join(root, 'data'), config: path.join(home, 'config.toml'), node: path.join(root, 'runtime/node') };
 }
 export function readJson(file, fallback = null) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } }
+function hasNativeAccount(ctx) {
+  const auth = readJson(path.join(ctx.home, 'auth.json'), {});
+  return (!auth.auth_mode || auth.auth_mode === 'chatgpt') && Boolean(auth.tokens?.access_token);
+}
 export function atomic(file, value, mode = 0o600) {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2) + '\n';
   if (fs.existsSync(file) && fs.lstatSync(file).isSymbolicLink()) throw new Error('Refusing to replace a symbolic link: ' + file);
@@ -107,9 +112,10 @@ export async function stopRouter(ctx) {
   atomic(statePath(ctx, 'router'), null);
 }
 async function prepare(ctx, settings) {
-  atomic(statePath(ctx, 'route-state'), { version: 2, mode: 'gateway', gatewayTransport: 'direct', officialProxy: '' });
-  // The router never reads the desktop's official login or official model cache.
-  const env = { ...process.env, CHATGPT_API_ROOT: ctx.root, CODEX_HOME: path.join(ctx.data, 'provider-only'), CHATGPT_API_ENV_PATH: path.join(ctx.data, '.env'), CHATGPT_SHIM_PORT: String(settings.SHIM_PORT) };
+  const nativeAccount = hasNativeAccount(ctx);
+  atomic(statePath(ctx, 'route-state'), { version: 2, entryMode: 'apionly', mode: 'gateway', nativeAccount, gatewayTransport: 'direct', officialProxy: '' });
+  // Keep an existing desktop identity; inference and model discovery remain API-only.
+  const env = { ...process.env, CHATGPT_API_ROOT: ctx.root, CODEX_HOME: nativeAccount ? ctx.home : path.join(ctx.data, 'provider-only'), CHATGPT_API_ENV_PATH: path.join(ctx.data, '.env'), CHATGPT_SHIM_PORT: String(settings.SHIM_PORT) };
   delete env.CHATGPT_GATEWAY_BASE;
   const result = await run(ctx.node, [path.join(ctx.root, 'src/shim.mjs'), '--prepare'], { env, timeout: 30000, maxBuffer: 2 * 1024 * 1024 });
   return { env, prepared: JSON.parse(result.stdout) };
@@ -166,30 +172,38 @@ export function applyConfig(ctx) {
   const settings = settingsChecked(readSettings(ctx));
   const models = readJson(path.join(ctx.data, 'cache/models-gateway.json'))?.models || [];
   const ids = models.map(model => model.slug); if (!ids.length) throw new Error('No gateway models are available.');
+  const configExisted = fs.existsSync(ctx.config);
   let original = ''; try { original = fs.readFileSync(ctx.config, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   let text = original, selected = rootString(text, 'model'); if (!ids.includes(selected)) selected = ids[0];
-  const table = 'model_providers.' + providerId;
-  const body = `[${table}]\nname = "ChatGPT API Provider"\nbase_url = "http://127.0.0.1:${settings.SHIM_PORT}/v1"\nwire_api = "responses"\nrequires_openai_auth = false\nhttp_headers = { "x-openai-actor-authorization" = "chatgpt-api-local" }\nsupports_websockets = false\n\n`;
-  const auth = `[${table}.auth]\ncommand = ${JSON.stringify(ctx.node)}\nargs = ${JSON.stringify([path.join(ctx.root, 'linux/provider.mjs'), 'auth'])}\ntimeout_ms = 45000\nrefresh_interval_ms = 0\n\n`;
+  const selectedProvider = providerId;
+  const signedIn = hasNativeAccount(ctx), base = `http://127.0.0.1:${settings.SHIM_PORT}/v1`;
+  const table = 'model_providers.' + selectedProvider;
+  const imageHeader = signedIn ? '' : 'http_headers = { "x-openai-actor-authorization" = "chatgpt-api-local" }\n';
+  const body = `[${table}]\nname = "ChatGPT API Provider"\nbase_url = ${JSON.stringify(base)}\nwire_api = "responses"\nrequires_openai_auth = ${signedIn}\n${imageHeader}supports_websockets = ${signedIn}\n\n`;
+  const auth = signedIn ? '' : `[${table}.auth]\ncommand = ${JSON.stringify(ctx.node)}\nargs = ${JSON.stringify([path.join(ctx.root, 'linux/provider.mjs'), 'auth'])}\ntimeout_ms = 45000\nrefresh_interval_ms = 0\n\n`;
   text = setTable(setTable(text, table + '.auth', auth), table, body);
-  const values = { model_provider: providerId, model_catalog_json: path.join(ctx.data, 'cache/models-gateway.json'), model: selected, model_context_window: null, model_auto_compact_token_limit: null };
+  const values = { openai_base_url: base, model_provider: selectedProvider, model_catalog_json: path.join(ctx.data, 'cache/models-gateway.json'), model: selected, model_context_window: null, model_auto_compact_token_limit: null };
   for (const key of rootKeys) text = setRoot(text, key, values[key] === null ? '' : key + ' = ' + JSON.stringify(values[key]) + '\n');
   const file = statePath(ctx, 'config'), prior = readJson(file);
   if (prior && prior.configPath !== ctx.config) throw new Error('This installation is bound to another CODEX_HOME.');
-  const saved = { configPath: ctx.config, original: prior?.original ?? original,
+  const saved = { configPath: ctx.config, configExisted: prior ? prior.configExisted !== false : configExisted, original: prior?.original ?? original,
     roots: { ...Object.fromEntries(rootKeys.map(key => [key, getRoot(original, key)])), ...prior?.roots },
-    tables: { ...Object.fromEntries([table, table + '.auth'].map(name => [name, getTable(original, name)])), ...prior?.tables } };
+    tables: { ...Object.fromEntries((selectedProvider === 'openai' ? [] : [table, table + '.auth']).map(name => [name, getTable(original, name)])), ...prior?.tables } };
   atomic(file, { ...saved, applied: text }); atomic(ctx.config, text);
-  return { models: ids.length, model: selected };
+  return { models: ids.length, model: selected, provider: selectedProvider };
 }
 export function restoreConfig(ctx) {
   const file = statePath(ctx, 'config'), saved = readJson(file); if (!saved) return;
   if (saved.configPath !== ctx.config) throw new Error('Saved configuration belongs to another CODEX_HOME.');
   let text = fs.readFileSync(ctx.config, 'utf8');
-  const ownsProvider = rootString(text, 'model_provider') === providerId;
-  for (const key of rootKeys) if (Object.hasOwn(saved.roots, key) && (getRoot(text, key) === getRoot(saved.applied, key) || key === 'model' && ownsProvider)) text = restoreRootLine(text, key, saved.roots[key], saved.original) ?? setRoot(text, key, saved.roots[key]);
-  for (const [name, value] of Object.entries(saved.tables)) if (getTable(text, name) === getTable(saved.applied, name)) text = setTable(text, name, value);
-  atomic(ctx.config, text); fs.unlinkSync(file);
+  const ownsProvider = rootString(text, 'model_provider') === rootString(saved.applied, 'model_provider');
+  if (text === saved.applied) text = saved.original;
+  else {
+    for (const key of rootKeys) if (Object.hasOwn(saved.roots, key) && (getRoot(text, key) === getRoot(saved.applied, key) || key === 'model' && ownsProvider)) text = restoreRootLine(text, key, saved.roots[key], saved.original) ?? setRoot(text, key, saved.roots[key]);
+    for (const [name, value] of Object.entries(saved.tables)) if (getTable(text, name) === getTable(saved.applied, name)) text = setTable(text, name, value);
+  }
+  if (saved.configExisted === false && text === '') fs.unlinkSync(ctx.config); else atomic(ctx.config, text);
+  fs.unlinkSync(file);
 }
 async function prompt(label, hidden = false) {
   if (!process.stdin.isTTY) throw new Error('Set CHATGPT_API_BASE_URL and CHATGPT_API_KEY for unattended installation, or run in a terminal.');
@@ -227,12 +241,13 @@ export async function main(args = process.argv.slice(2)) {
   if (command === 'console') { const { startConsole } = await import('../src/console.mjs'); await startConsole({ root: ctx.root }); return; }
   if (command === 'auth') { await ensureRouter(ctx); process.stdout.write(settingsChecked(readSettings(ctx)).API_KEY + '\n'); return; }
   if (command === 'configure') { const result = await configure(ctx, true); console.log('Provider configured; gateway models: ' + result.models); return; }
-  if (command === 'stop' || command === 'restore') { requireClosedClient(); await locked(ctx, () => stopRouter(ctx)); if (command === 'restore') restoreConfig(ctx); console.log('Provider ' + (command === 'restore' ? 'configuration restored.' : 'router stopped.')); return; }
+  if (command === 'stop' || command === 'restore') { requireClosedClient(); await locked(ctx, () => stopRouter(ctx)); await restoreThreadProviders(ctx); if (command === 'restore') restoreConfig(ctx); console.log('Provider ' + (command === 'restore' ? 'configuration restored.' : 'router stopped.')); return; }
   if (command === 'status') { console.log(JSON.stringify(await health(ctx), null, 2)); return; }
   if (command !== 'launch') throw new Error('Usage: chatgpt-api [launch | configure | status | stop | restore]');
   requireApiConfiguration(ctx.root, readSettings(ctx));
   const client = clientExecutable(), running = runningClients().length > 0;
   if (running && rootString(fs.readFileSync(ctx.config, 'utf8'), 'model_provider') !== providerId) throw new Error('Fully quit the current ChatGPT instance before opening the API provider.');
+  if (!running) await restoreThreadProviders(ctx);
   await prepareWithRecovery(() => ensureRouter(ctx, !running), running ? null : async () => {
     const values = await requestSettings(userApiSettings(ctx.root, readSettings(ctx)));
     if (!values) return false;
@@ -244,9 +259,20 @@ export async function main(args = process.argv.slice(2)) {
     } finally { for (const [name, value] of Object.entries(previous)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; } }
     return true;
   });
-  if (!running) applyConfig(ctx);
-  const child = spawn(client, args.slice(1), { detached: true, stdio: 'ignore' });
-  await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); }); child.unref();
+  if (running) {
+    const child = spawn(client, args.slice(1), { detached: true, stdio: 'ignore' });
+    await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); }); child.unref(); return;
+  }
+  try {
+    applyConfig(ctx); await repairThreadProviders(ctx);
+    const child = spawn(client, args.slice(1), { detached: true, stdio: 'ignore' });
+    await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+    if (child.exitCode === null) await new Promise(resolve => child.once('exit', resolve));
+    await delay(1200);
+    while (runningClients().length) await delay(1200);
+  } finally {
+    await restoreThreadProviders(ctx); restoreConfig(ctx); await locked(ctx, () => stopRouter(ctx));
+  }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   main().catch(async error => {

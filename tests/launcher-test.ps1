@@ -42,6 +42,16 @@ $models=@{models=@(@{slug='gpt-6-sol'},@{slug='Example/model'})}
 $catalog=Get-LauncherDataPath $fixture 'models-smr.json'
 Write-Utf8File $catalog ($models|ConvertTo-Json -Depth 5)
 Write-Utf8File (Get-LauncherDataPath $fixture 'catalog-state.json') (@{official=@(@{slug='gpt-6-sol'})}|ConvertTo-Json -Depth 5)
+$bareNative="model = `"gpt-6-sol`"`r`n[app]`r`nlocaleOverride = `"zh-CN`"`r`n"
+Write-Utf8File $config $bareNative
+Apply-LauncherConfig $fixture $config 'mixed' 'http://127.0.0.1:8102/v1' ''
+Restore-LauncherConfig $fixture $config
+Assert ([IO.File]::ReadAllText($config) -ceq $bareNative) 'Runtime provider definitions remained in the original native configuration.'
+$missingConfig=Join-Path $fixture 'previously-absent.toml'
+if(Test-Path -LiteralPath $missingConfig){Remove-Item -LiteralPath $missingConfig}
+Apply-LauncherConfig $fixture $missingConfig 'gateway' 'http://127.0.0.1:8102/v1' ''
+Restore-LauncherConfig $fixture $missingConfig
+Assert (-not (Test-Path -LiteralPath $missingConfig)) 'An empty native config remained after the runtime override was restored.'
 foreach($mode in @('mixed','gateway')) {
     $baseline=Set-LauncherMixedProvider $baseline 'http://127.0.0.1:8102/v1' $fixture ($mode -eq 'mixed')
     $catalogModels=if($mode -eq 'mixed'){$models}else{@{models=@(@{slug='Example/model'})}}
@@ -92,8 +102,8 @@ foreach ($legacyProvider in @('openai','chatgpt_api_mixed','smr')) {
     Write-Utf8File $config $baseline
     Apply-LauncherConfig $fixture $config 'mixed' 'http://127.0.0.1:8102/v1' '' 'official'
     $selectedConfig=[IO.File]::ReadAllText($config)
-    Assert ((Get-RootString $selectedConfig 'model_provider') -ceq $legacyProvider) 'Legacy official history selection was ignored.'
-    if ($legacyProvider -ne 'openai') { Assert ((Get-TableText $selectedConfig ('model_providers.'+$legacyProvider)).Contains('name = "OpenAI"')) 'Legacy provider did not use official behavior.' }
+    Assert ((Get-RootString $selectedConfig 'model_provider') -ceq 'chatgpt_api_launcher') 'Obsolete history selection changed the shared runtime provider.'
+    Assert ((Get-TableText $selectedConfig 'model_providers.chatgpt_api_launcher').Contains('name = "OpenAI"')) 'Official entry lost native provider behavior.'
     Assert (-not (Get-RootString $selectedConfig 'model_catalog_json')) 'Legacy official selection exposed the gateway catalog.'
     Restore-LauncherConfig $fixture $config
 }
@@ -124,7 +134,8 @@ Apply-LauncherConfig $fixture $config 'mixed' 'http://127.0.0.1:8102/v1' 'https:
 $apiOnlyApplied = [IO.File]::ReadAllText($config)
 Assert ((Get-RootString $apiOnlyApplied 'model_provider') -eq 'chatgpt_api_launcher') 'API-only selected official authentication.'
 Assert ((Get-RootString $apiOnlyApplied 'model') -in @('Example/model','Other/model')) 'API-only retained an official initial model.'
-Assert ((Get-TableText $apiOnlyApplied 'model_providers.chatgpt_api_launcher').Contains('requires_openai_auth = false')) 'API-only requires official sign-in.'
+Assert ((Get-TableText $apiOnlyApplied 'model_providers.chatgpt_api_launcher').Contains('requires_openai_auth = true')) 'API-only discarded an existing ChatGPT identity.'
+Assert (-not (Get-TableText $apiOnlyApplied 'model_providers.chatgpt_api_launcher.auth')) 'Saved ChatGPT identity was replaced by an API-key helper.'
 $helperSelection = Get-LauncherRouterSelection $fixture
 Assert ($helperSelection.mode -eq 'gateway' -and $helperSelection.entryMode -eq 'apionly') 'API-key helper did not retain the active API-only route.'
 Assert ((Read-LauncherState $fixture).lastApiModel -eq $mixedPreference) 'API-only overwrote the mixed entry model preference.'

@@ -10,9 +10,8 @@ import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { readRequestJson } from './http-fixture.mjs';
-import { applyConfig, restoreConfig } from '../macos/provider.mjs';
-import { repairThreadProviders } from '../src/repair-thread-providers.mjs';
-import { readSettings, saveSettings } from '../src/settings.mjs';
+import { applyConfig, restoreConfig, getTable, setTable, setRoot } from '../macos/provider.mjs';
+import { repairThreadProviders, restoreThreadProviders } from '../src/repair-thread-providers.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const cli = process.env.CODEX_CLI_PATH;
@@ -48,6 +47,9 @@ const server = http.createServer(async (req, res) => {
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify(req.url.startsWith('/backend-api') ? { models: [official] } : { data: gatewayModels.map(id => ({ id })) })); return;
   }
+  // Account/configuration lookups are not inference requests. Keep them on the
+  // isolated server without returning a fabricated model response for them.
+  if (!/\/responses(?:\/compact)?(?:\?|$)/.test(req.url)) { res.writeHead(404, { 'content-type': 'application/json' }); res.end('{}'); return; }
   try { const body = await readRequestJson(req); res.writeHead(200, { 'content-type': 'text/event-stream' }); events(body, req.url, event => res.write('data: ' + JSON.stringify(event) + '\n\n'), req.headers); res.end(); }
   catch (error) { res.end(String(error)); }
 });
@@ -80,7 +82,8 @@ async function startClient() {
   const config = (await rpc('config/read', { includeLayers: false })).config;
   const menu = await rpc('model/list', { includeHidden: true });
   const capabilities = await rpc('modelProvider/capabilities/read');
-  menus.push({ provider: config.model_provider, capabilities, models: menu.data.map(model => ({ model: model.model, serviceTiers: model.serviceTiers, hidden: model.hidden })) });
+  const identity = await rpc('getAuthStatus', { includeToken: false, refreshToken: false });
+  menus.push({ provider: config.model_provider, capabilities, identity, models: menu.data.map(model => ({ model: model.model, serviceTiers: model.serviceTiers, hidden: model.hidden })) });
   console.log(JSON.stringify({ provider: config.model_provider, menu: menus.at(-1).models }));
 }
 async function stop(child) {
@@ -89,8 +92,10 @@ async function stop(child) {
   child.kill(); await once(child, 'exit'); children.delete(child);
 }
 const ctx = { root: fixture, data: path.join(fixture, 'data'), home, cwd, config: path.join(home, 'config.toml'), node: process.execPath };
-async function entry(entryMode, mode) {
+async function entry(entryMode, mode, seedProvider = null) {
   await stop(client); client = null; await stop(router); router = null;
+  await restoreThreadProviders(ctx);
+  const nativeAccount = fs.existsSync(path.join(home, 'auth.json'));
   if (process.env.NATIVE_BINDING_PLATFORM === 'windows') {
     const quote = value => "'" + value.replaceAll("'", "''") + "'";
     const script = path.join(fixture, 'apply-entry.ps1');
@@ -98,7 +103,7 @@ async function entry(entryMode, mode) {
       'Restore-LauncherConfig ' + quote(fixture) + ' ' + quote(ctx.config)].join('\n'));
     await run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script], { ...process.env, CODEX_HOME: home });
   } else restoreConfig(ctx);
-  fs.writeFileSync(path.join(fixture, 'data/state/route-state.json'), JSON.stringify({ mode, entryMode, officialProxy: '', nativeAccount: mode === 'mixed', clientVersion: '0.166.0' }));
+  fs.writeFileSync(path.join(fixture, 'data/state/route-state.json'), JSON.stringify({ mode, entryMode, officialProxy: '', nativeAccount, clientVersion: '0.167.0' }));
   const env = { ...process.env, CODEX_HOME: home, CHATGPT_API_ROOT: fixture, CHATGPT_API_ENV_PATH: path.join(fixture, 'data/.env'), CHATGPT_SHIM_PORT: new URL(routerBase).port };
   await run(process.execPath, [path.join(root, 'src/shim.mjs'), '--prepare'], env);
   router = spawn(process.execPath, [path.join(root, 'src/shim.mjs')], { env, windowsHide: true, stdio: 'ignore' }); children.add(router);
@@ -107,7 +112,20 @@ async function entry(entryMode, mode) {
     const quote = value => "'" + value.replaceAll("'", "''") + "'", script = path.join(fixture, 'apply-entry.ps1');
     fs.appendFileSync(script, '\nApply-LauncherConfig ' + [fixture, ctx.config, mode, routerBase + '/v1', 'http://fixture.invalid/v1', entryMode].map(quote).join(' '));
     await run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script], { ...process.env, CODEX_HOME: home });
-  } else applyConfig(ctx, { entryMode, mode });
+  } else applyConfig(ctx, { entryMode, mode, nativeAccount });
+  if (seedProvider) {
+    // Build genuine pre-existing provider-bound conversations with native core,
+    // rather than changing a conversation's records to fake the test fixture.
+    let config = fs.readFileSync(ctx.config, 'utf8');
+    if (seedProvider !== 'openai') {
+      for (const suffix of ['', '.auth']) {
+        const table = getTable(config, 'model_providers.chatgpt_api_launcher' + suffix);
+        if (table) config = setTable(config, 'model_providers.' + seedProvider + suffix, table.replaceAll('model_providers.chatgpt_api_launcher', 'model_providers.' + seedProvider));
+      }
+    }
+    config = setRoot(config, 'model_provider', 'model_provider = ' + JSON.stringify(seedProvider) + '\n');
+    fs.writeFileSync(ctx.config, config);
+  } else await repairThreadProviders(ctx);
   await startClient();
 }
 async function turn(threadId, model, marker, fast = false) {
@@ -116,7 +134,7 @@ async function turn(threadId, model, marker, fast = false) {
   let result;
   for (let i = 0; i < 250; i++) { result = notes.slice(start).find(value => value.method === 'turn/completed' && value.params.turn.id === turn.id); if (result) break; await delay(50); }
   assert.equal(result?.params.turn.status, 'completed', JSON.stringify(result?.params.turn.error));
-  const record = requests.slice(offset).filter(record => record.body.generate !== false).at(-1);
+  const record = requests.slice(offset).filter(record => record.body.generate !== false && JSON.stringify(record.body).includes(marker)).at(-1);
   assert(record, 'No inference request'); assert.equal(record.model, model);
   assert.equal(record.url.startsWith('/backend-api'), model === official.slug);
   assert.equal(record.headers.authorization, model === official.slug ? 'Bearer inert-native' : 'Bearer inert-gateway');
@@ -141,14 +159,19 @@ try {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); const base = 'http://127.0.0.1:' + server.address().port;
   const reserve = http.createServer(); await new Promise(resolve => reserve.listen(0, '127.0.0.1', resolve)); routerBase = 'http://127.0.0.1:' + reserve.address().port; await new Promise(resolve => reserve.close(resolve));
   fs.writeFileSync(path.join(fixture, 'data/.env'), ['BASE_URL=' + base + '/v1', 'API_KEY=inert-gateway', 'OFFICIAL_BASE=' + base + '/backend-api/codex', 'SHIM_PORT=' + new URL(routerBase).port].join('\n'));
-  fs.writeFileSync(path.join(home, 'config.toml'), 'model="gpt-6-sol"\nservice_tier="default"\napproval_policy="never"\nsandbox_mode="read-only"\nweb_search="disabled"\n[features]\ncode_mode_host=true\n[analytics]\nenabled=false\n');
+  fs.writeFileSync(path.join(home, 'config.toml'), 'model="gpt-6-sol"\nchatgpt_base_url=' + JSON.stringify(base) + '\nservice_tier="default"\napproval_policy="never"\nsandbox_mode="read-only"\nweb_search="disabled"\n[features]\ncode_mode_host=true\n[analytics]\nenabled=false\n');
   fs.writeFileSync(path.join(home, 'models_cache.json'), JSON.stringify({ models: [official], client_version: '0.166.0' }));
   // A chat created through pure API must remain resumable after signing in and
   // selecting an official initial model in the mixed entry.
   await entry('apionly', 'gateway');
+  assert.equal(menus.at(-1).identity.requiresOpenaiAuth, false);
+  assert.equal(menus.at(-1).identity.authMethod, null);
   const started = await rpc('thread/start', { model: gatewayModels[0], cwd, approvalPolicy: 'never', sandbox: 'read-only' }); threadId = started.thread.id;
   await turn(threadId, gatewayModels[0], 'ORIGINAL_API_CONTEXT', true);
-  fs.writeFileSync(path.join(home, 'auth.json'), JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'inert-native', account_id: 'fixture-account' } }));
+  const fixtureIdToken = ['e30', Buffer.from(JSON.stringify({ email: 'fixture@example.invalid', exp: Math.floor(Date.now() / 1000) + 3600,
+    'https://api.openai.com/auth': { chatgpt_account_id: 'fixture-account', chatgpt_user_id: 'fixture-user', chatgpt_plan_type: 'plus' } })).toString('base64url'), 'inert'].join('.');
+  fs.writeFileSync(path.join(home, 'auth.json'), JSON.stringify({ auth_mode: 'chatgpt', OPENAI_API_KEY: null, last_refresh: new Date().toISOString(),
+    tokens: { id_token: fixtureIdToken, access_token: 'inert-native', refresh_token: '', account_id: 'fixture-account' } }));
   await entry('api', 'mixed');
   assert.equal(menus.at(-1).provider, 'chatgpt_api_launcher'); assert.equal(menus.at(-1).models.length, 3);
   const resumed = await rpc('thread/resume', { threadId, excludeTurns: true }); assert.equal(resumed.thread.id, threadId); assert.equal(resumed.modelProvider, 'chatgpt_api_launcher');
@@ -158,9 +181,13 @@ try {
   checks.push('API-only chat resumes in signed-in mixed entry and switches official → non-GPT → official with original context');
   await entry('apionly', 'gateway');
   assert.equal(menus.at(-1).models.length, 2);
+  assert.equal(menus.at(-1).identity.requiresOpenaiAuth, true);
+  assert.equal(menus.at(-1).identity.authMethod, 'chatgpt');
+  assert.equal(menus.at(-1).identity.authToken, null);
   const back = await rpc('thread/resume', { threadId, excludeTurns: true }); assert.equal(back.modelProvider, 'chatgpt_api_launcher');
   const last = await turn(threadId, gatewayModels[0], 'API_RETURN_CONTEXT', true); assert(JSON.stringify(last.body).includes('OFFICIAL_RETURN_CONTEXT')); assert.equal(last.body.service_tier, 'priority');
   checks.push('The same chat returns to API-only; model directory excludes official entries and keeps GPT Fast requests');
+  checks.push('API-only preserves a real saved ChatGPT identity for account-scoped desktop state; unsigned API-only remains login-free');
   await compact(threadId, false); checks.push('API provider uses native text compaction; no adapter-written prompt');
   finalHistory = await rpc('thread/turns/list', { threadId, limit: 20 });
   await entry('official', 'mixed');
@@ -184,26 +211,61 @@ try {
   const officialReturn = await turn(threadId, gatewayModels[0], 'BACK_FROM_OFFICIAL');
   assert(officialReturn.body.input.some(item => item.type === 'compaction'), 'Official compaction disappeared when returning to gateway GPT');
   checks.push('The same conversation returns from the official entry to mixed mode without a fork; opaque compaction is preserved for GPT');
-  for (const legacy of ['openai', 'chatgpt_api_mixed', 'smr']) {
-    saveSettings(fixture, { ...readSettings(fixture), officialProvider: legacy });
-    await entry('official', 'mixed'); assert.equal(menus.at(-1).provider, legacy); assert.deepEqual(menus.at(-1).capabilities, officialCapabilities);
+  const legacyThreads = [];
+  for (const legacy of ['openai', 'chatgpt_api_mixed', 'smr', 'user_custom']) {
+    await entry('official', 'mixed', legacy);
+    assert.equal(menus.at(-1).provider, legacy);
     const old = await rpc('thread/start', { model: official.slug, cwd, approvalPolicy: 'never', sandbox: 'read-only' });
     await turn(old.thread.id, official.slug, 'LEGACY_' + legacy);
-    await entry('official', 'mixed'); const restored = await rpc('thread/resume', { threadId: old.thread.id, excludeTurns: true });
-    assert.equal(restored.thread.id, old.thread.id); assert.equal(restored.modelProvider, legacy);
-    await compact(old.thread.id, true);
-    const count = requests.length;
-    await assert.rejects(rpc('thread/resume', { threadId }), error => error.data?.type === 'modelProviderMismatch');
-    assert.equal(requests.length, count);
+    legacyThreads.push({ provider: legacy, id: old.thread.id, history: await rpc('thread/turns/list', { threadId: old.thread.id, limit: 20 }) });
   }
-  checks.push('Legacy openai/mixed/smr selections resume their own unchanged IDs, retain native OpenAI capabilities, and respect mismatched-provider admission');
+  const beforeAuto = requests.length;
+  await entry('apionly', 'gateway');
+  assert.equal(menus.at(-1).provider, 'chatgpt_api_launcher');
+  assert.equal(menus.at(-1).identity.authMethod, 'chatgpt');
+  assert(menus.at(-1).models.every(model => gatewayModels.includes(model.model)));
+  assert.equal(requests.length, beforeAuto, 'Automatic compatibility sent an inference request');
+  for (const old of legacyThreads) {
+    const same = await rpc('thread/resume', { threadId: old.id, excludeTurns: true });
+    assert.equal(same.thread.id, old.id); assert.equal(same.modelProvider, 'chatgpt_api_launcher');
+    assert.deepEqual(await rpc('thread/turns/list', { threadId: old.id, limit: 20 }), old.history);
+  }
+  // Alternate and run separate old-provider conversations concurrently in one
+  // native process; no default switching, manual settings or forks are involved.
+  for (const model of gatewayModels) {
+    await Promise.all(legacyThreads.map(async old => {
+      const record = await turn(old.id, model, 'AUTO_' + old.provider + '_' + model, model === gatewayModels[0]);
+      assert(JSON.stringify(record.body).includes('LEGACY_' + old.provider));
+    }));
+  }
+  await compact(legacyThreads[0].id, false);
+  assert(requests.slice(beforeAuto).every(record => !record.url.startsWith('/backend-api')), 'API-only sent official inference');
+  checks.push('One API-only launch resumes openai/mixed/smr/arbitrary-provider original IDs and histories, including concurrent GPT/non-GPT turns, Fast and native text compaction');
+  await entry('api', 'mixed');
+  for (const old of legacyThreads) {
+    const same = await rpc('thread/resume', { threadId: old.id, excludeTurns: true }); assert.equal(same.thread.id, old.id);
+    await turn(old.id, official.slug, 'AUTO_OFFICIAL_' + old.provider, true);
+    await turn(old.id, gatewayModels[0], 'AUTO_GATEWAY_' + old.provider, true);
+  }
+  checks.push('One mixed launch alternates every original provider conversation between official and gateway models with no extra chats');
+  await entry('official', 'mixed');
+  for (const old of legacyThreads) { await rpc('thread/resume', { threadId: old.id, excludeTurns: true }); await turn(old.id, official.slug, 'OFFICIAL_ENTRY_' + old.provider); }
+  await compact(legacyThreads[0].id, true);
+  checks.push('Official entry resumes all original-provider chats and keeps official routing and native remote compaction');
   await stop(client); client = null;
-  const repair = await repairThreadProviders({ cli, home, gatewayIds: gatewayModels, officialIds: [official.slug], provider: 'chatgpt_api_launcher' });
-  assert.equal(repair.skipped, 'native_provider_binding'); assert.deepEqual(repair.repaired, []);
-  checks.push('Modern native clients skip obsolete provider migration without rewriting or forking conversations');
+  await restoreThreadProviders(ctx);
+  assert(!fs.existsSync(path.join(fixture, 'data/state/thread-provider-compatibility.json')));
+  const { DatabaseSync } = await import('node:sqlite');
+  const dbFile = fs.readdirSync(home).find(name => /^state_\d+\.sqlite$/.test(name));
+  const db = new DatabaseSync(path.join(home, dbFile), { readOnly: true });
+  for (const old of legacyThreads) assert.equal(db.prepare('SELECT model_provider FROM threads WHERE id=?').get(old.id).model_provider, old.provider);
+  db.close();
+  assert(!fs.readdirSync(home, { recursive: true }).some(name => /chatgpt-api.*\.tmp|provider-compatibility/.test(name)));
+  checks.push('Exit restores each original provider and removes compatibility scratch files; native messages and new turns remain');
   fs.writeFileSync(path.join(root, 'data/diagnostics/native-provider-binding-' + (process.env.NATIVE_BINDING_PLATFORM || 'macos') + '.json'), JSON.stringify({ passed: true, cli, fixture, threadId, checks, menus }, null, 2));
   console.log(JSON.stringify({ passed: true, checks }));
 } finally {
   for (const child of [...children]) await stop(child);
+  await restoreThreadProviders(ctx);
   for (const ws of wss.clients) ws.terminate(); wss.close(); server.closeAllConnections(); server.close();
 }

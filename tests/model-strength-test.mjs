@@ -45,9 +45,8 @@ const baseline = { version: 1, providers: [{ id: 'default', baseUrl: 'https://ex
 const normalized = normalizeSettings(baseline);
 assert.deepEqual(normalized.imageStrengths, baseline.imageStrengths);
 assert.equal(normalized.imageRouting, 'official');
-assert.equal(normalized.officialProvider, 'chatgpt_api_launcher');
-for (const provider of ['openai', 'chatgpt_api_mixed', 'smr']) assert.equal(normalizeSettings({ ...baseline, officialProvider: provider }).officialProvider, provider);
-assert.throws(() => normalizeSettings({ ...baseline, officialProvider: 'unknown' }));
+assert(!Object.hasOwn(normalized, 'officialProvider'));
+assert(!Object.hasOwn(normalizeSettings({ ...baseline, officialProvider: 'openai' }), 'officialProvider'), 'Removed history preference must be ignored when upgrading');
 assert.equal(normalizeSettings({ ...baseline, defaultImageModel: { providerId: 'default', modelId: 'same-name' } }).imageRouting, 'custom');
 assert.equal(normalizeSettings({ ...baseline, imageRouting: 'official', defaultImageModel: { providerId: 'default', modelId: 'same-name' } }).imageRouting, 'official');
 assert.throws(() => normalizeSettings({ ...baseline, imageRouting: 'unexpected' }));

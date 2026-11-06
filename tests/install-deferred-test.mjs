@@ -56,11 +56,11 @@ try {
   const historyOnly = path.join(root, 'official-without-api'); initializeDeferredSettings(historyOnly);
   const emptyEnvBefore = fs.readFileSync(path.join(historyOnly, 'data/.env'));
   saveSettings(historyOnly, { ...publicSettings(readSettings(historyOnly)), officialProvider: 'openai' });
-  assert.equal(readSettings(historyOnly).officialProvider, 'openai');
+  assert(!Object.hasOwn(readSettings(historyOnly), 'officialProvider'));
   assert.deepEqual(fs.readFileSync(path.join(historyOnly, 'data/.env')), emptyEnvBefore);
   assert.throws(() => requireApiConfiguration(historyOnly), error => error.code === 'api_not_configured');
   assert.throws(() => saveSettings(historyOnly, { ...publicSettings(readSettings(historyOnly)), providers: [{ id: 'default', baseUrl: 'https://example.invalid', apiKey: '' }] }));
-  checks.push('Official history provider can be saved without an API key; incomplete API sources remain invalid');
+  checks.push('Obsolete history preference is discarded without requiring an API key; incomplete API sources remain invalid');
 
   const envFile = path.join(ctx.data, '.env');
   fs.writeFileSync(envFile, 'BASE_URL=https://kept.invalid/v1\nAPI_KEY=private-existing-key\nCUSTOM=keep\n');

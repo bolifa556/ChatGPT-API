@@ -262,7 +262,7 @@ async function gatewayImageReferences(payload, incoming, signal) {
 }
 function hasOfficialAuth(incoming) {
   const token = String(incoming.authorization || '').replace(/^Bearer\s+/i, '');
-  return mode === 'mixed' && (!!auth().token ||
+  return (mode === 'mixed' || runtime.nativeAccount === true) && (!!auth().token ||
     ((entryMode === 'official' || runtime.nativeAccount === true) && !!token && !isGatewayKey(token)));
 }
 function isGatewayKey(token) { return token === env.API_KEY || sources.secrets.has(token); }

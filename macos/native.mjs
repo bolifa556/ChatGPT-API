@@ -11,7 +11,7 @@ export function nativeVersion(cli) {
   } catch { return ''; }
 }
 
-export async function readNativeAccount(cli, home) {
+export async function readNativeAccount(cli, home, { loadModels = true } = {}) {
   const child = spawn(cli, ['-c', 'model_provider="openai"', 'app-server', '--stdio'], {
     env: { ...process.env, CODEX_HOME: home }, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
   });
@@ -42,7 +42,7 @@ export async function readNativeAccount(cli, home) {
     await rpc('initialize', { clientInfo: { name: 'chatgpt-api-launcher', version: '3.1.3' }, capabilities: {} });
     send({ method: 'initialized', params: {} });
     const account = (await rpc('account/read', { refreshToken: false })).account;
-    if (account?.type === 'chatgpt') {
+    if (loadModels && account?.type === 'chatgpt') {
       // Let the native credential/model loader refresh its own model cache.
       // This also works when credentials live in Keychain rather than auth.json.
       try { await rpc('model/list', { includeHidden: true }); } catch {}
@@ -59,7 +59,7 @@ export async function readNativeAccount(cli, home) {
   }
 }
 
-export async function hasChatGPTLogin(home, cli) {
+export async function hasChatGPTLogin(home, cli, options) {
   try {
     const saved = JSON.parse(fs.readFileSync(path.join(home, 'auth.json'), 'utf8').replace(/^\uFEFF/, ''));
     if ((!saved.auth_mode || saved.auth_mode === 'chatgpt') && saved.tokens?.access_token) return true;
@@ -67,5 +67,5 @@ export async function hasChatGPTLogin(home, cli) {
   if (!cli) return false;
   // Ask the client's own credential loader, including its macOS Keychain store.
   // Do not extract tokens, log in/out, refresh credentials, or start a chat.
-  try { return (await readNativeAccount(cli, home))?.type === 'chatgpt'; } catch { return false; }
+  try { return (await readNativeAccount(cli, home, options))?.type === 'chatgpt'; } catch { return false; }
 }

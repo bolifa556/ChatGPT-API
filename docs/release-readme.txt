@@ -1,4 +1,4 @@
-ChatGPT API 3.2.0 — Windows x64
+ChatGPT API 3.2.1 — Windows x64
 
 安装
 1. 安装官方 ChatGPT/Codex 桌面客户端。

@@ -22,7 +22,7 @@
   "preferredProviderId": "default",
   "defaultImageModel": null,
   "imageRouting": "official",
-  "officialProvider": "chatgpt_api_launcher",
+
   "imageStrengths": {},
   "contextLimit": 500000,
   "contextOverrides": {}
@@ -35,7 +35,7 @@
 
 `imageRouting` 在控制台“所有来源”右侧选择。`official` 使用登录的订阅账号，原样转发官方生图请求，不受下方 API 模型及强度设置影响；官方错误仍原样返回。`custom` 使用下方默认 API 生图模型。纯 API 模式始终使用 `custom`，忽略保存的官方选项；原生官方入口始终使用官方通道。旧配置已有手动 API 生图模型时沿用自定义通道，否则保留登录时使用官方的选择。
 
-`officialProvider` 只决定官方入口恢复哪类历史，不改变请求去向。默认 `chatgpt_api_launcher`，与两个 API 入口一致；旧记录可在控制台“使用说明 → 官方入口的历史兼容”选择 `openai`、`chatgpt_api_mixed` 或 `smr`。保存并完全退出重开官方入口生效，未配置 API Key 也可保存此项。同一次启动仍只能恢复当前 provider 的记录。
+历史通道由启动器自动兼容，不提供手动选择。三个入口运行期间使用同一通道；旧对话的头部、持久化通道设置和 SQLite 索引仅在运行期间临时匹配，退出后恢复原值。消息、工具记录、ID、项目和原生设置不随之改写。恢复日志位于适配层 `data/state/thread-provider-compatibility.json`，恢复完成即删除；旧 `officialProvider` 配置被忽略。
 
 “思考强度”列在加载目录时读取接口声明、匹配的官方模型目录或已核实的准确型号规格。来源在提示信息中标明；接口声明优先，无法确认的显示“无法检测”，不会用 GPT 模板猜测其他模型，也不逐档生成内容试错。刷新沿用启动和手动刷新模型目录的时机，没有周期探测。
 
@@ -82,7 +82,7 @@ Windows / macOS 的旧 URL / Key 配置窗口仍可用；明确修改时同步�
 
 官方请求使用原生账号凭据，不向自定义 API 传递 OAuth 或账号头。各 API 请求使用选中来源的 Key。API-only 的模型、目录和图片请求不回退官方服务；存在旧登录文件不改变此规则。
 
-三个入口默认固定使用 `chatgpt_api_launcher`。两个 API 入口按登录状态加载目录和选择上游。官方入口将选中的兼容 provider 配置为原生 `OpenAI` 行为，启用官方认证，仅提供和转发官方模型，并保留原生远程压缩；该 ID 用于恢复历史，不代表流量发往 API 网关。旧记录通过 `officialProvider` 选择原绑定，CLI 0.166 起不再尝试迁移绑定或分叉原对话。两个 API 入口使用原生文本压缩。
+三个入口运行期间使用 `chatgpt_api_launcher`，自动兼容旧 provider 的本机对话，退出后恢复临时元数据。混合入口按登录状态加载模型；纯 API 入口始终只加载 API 模型，但保留已有真实登录供客户端读取原账号的项目、偏好和工作区。未登录时继续使用 API Key 认证助手。官方入口仅提供和转发官方模型，并保留原生远程压缩；两个 API 入口使用原生文本压缩。兼容过程不发送消息、不压缩、不分叉，不修改官方安装文件。
 
 浏览器、MCP 和插件运行时可能另外请求官方身份服务，模型 Key 不能代替它们需要的账号权限。启动器不修改系统代理模式、TUN、DNS 或浏览器插件。工具定义、输入、历史调用及结果只按其协议转换。
 
@@ -111,4 +111,4 @@ Images 接口独立于聊天转换。官方入口只使用官方服务；混合�
 
 macOS 程序目录为 `~/Library/Application Support/chatgpt-apionly`；Linux 默认 `~/.local/share/chatgpt-api-provider`；Windows 以安装时选定目录为准。POSIX 配置文件限制为当前用户读写，未接入系统钥匙串。
 
-Windows / macOS 在启动期间临时接管原生配置中的路由与目录项，退出后恢复；同一 `CODEX_HOME` 的其他 CLI 可能读到临时设置。Linux provider 持久配置，可执行 `restore`。不复制登录、不另建聊天库。分享时只分发 `release/<版本>/` 中的原始归档。
+三个平台在启动期间临时接管原生配置中的路由、目录项和旧对话通道标记，退出后恢复；同一 `CODEX_HOME` 的其他 CLI 可能读到临时设置。Linux 的 `configure` 可提前准备配置，也可执行 `restore` 恢复。不复制登录、不另建聊天库。分享时只分发 `release/<版本>/` 中的原始归档。
