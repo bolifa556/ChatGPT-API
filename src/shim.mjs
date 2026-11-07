@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import zlib from 'node:zlib';
 import crypto from 'node:crypto';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { normalizeGptHistory, normalizeOfficialHistory, isGptModel, ResponseOutput } from './history-compat.mjs';
@@ -70,6 +70,8 @@ let status = { gateway: { ready: false }, official: { ready: false } };
 let refreshInFlight;
 let observedClientVersion, configuredVersionAtObservation;
 const controllers = new Set();
+export let routerReady;
+export let closeRouter;
 
 function log(text) {
   try {
@@ -778,7 +780,24 @@ if (process.argv.includes('--prepare')) {
   });
   const host = env.SHIM_HOST || '127.0.0.1';
   if (!['127.0.0.1','::1'].includes(host)) throw new Error('The local router must bind to loopback.');
-  server.listen(Number(process.env.CHATGPT_SHIM_PORT || env.SHIM_PORT || 8102), host, () => log('router v2 listening mode=' + mode + ' transport=' + transport));
-  function shutdown() { for (const c of controllers) c.abort(); for (const ws of wss.clients) ws.terminate(); server.close(); sources.destroy(); gatewayDispatcher.destroy(); officialDispatcher.destroy(); setTimeout(() => process.exit(), 500).unref(); }
-  process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
+  routerReady = new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(Number(process.env.CHATGPT_SHIM_PORT || env.SHIM_PORT || 8102), host, () => {
+      log('router v2 listening mode=' + mode + ' transport=' + transport); resolve();
+    });
+  });
+  let closing;
+  closeRouter = () => closing ||= (async () => {
+    for (const c of controllers) c.abort();
+    for (const ws of wss.clients) ws.terminate();
+    const closed = new Promise(resolve => server.close(resolve));
+    server.closeAllConnections();
+    sources.destroy();
+    await Promise.allSettled([gatewayDispatcher.destroy(), officialDispatcher.destroy(), closed]);
+  })();
+  if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+    await routerReady;
+    const shutdown = () => closeRouter().then(() => process.exit());
+    process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
+  }
 }

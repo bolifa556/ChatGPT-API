@@ -51,7 +51,7 @@ try {
   assert.equal(fs.readFileSync(path.join(ctx.home, 'auth.json'), 'utf8'), authBefore);
   assert.equal(fs.statSync(path.join(ctx.data, '.env')).mode & 0o777, 0o600);
   assert(fs.readFileSync(ctx.config, 'utf8').includes('requires_openai_auth = false'));
-  assert(fs.readFileSync(ctx.config, 'utf8').includes('cli_auth_credentials_store = "ephemeral"'));
+  assert(!fs.readFileSync(ctx.config, 'utf8').includes('cli_auth_credentials_store = "ephemeral"'));
   const initial = JSON.parse(fs.readFileSync(path.join(ctx.data, 'state/router.json')));
   await Promise.all([ensureRouter(ctx), ensureRouter(ctx), ensureRouter(ctx)]);
   assert.equal(JSON.parse(fs.readFileSync(path.join(ctx.data, 'state/router.json'))).pid, initial.pid);

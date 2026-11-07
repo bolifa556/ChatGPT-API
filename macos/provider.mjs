@@ -210,7 +210,7 @@ export function applyConfig(ctx, selection = { entryMode: 'apionly', mode: 'gate
   // All entries share a runtime binding; routing still follows the entry/model.
   const values = { openai_base_url: base, model_provider: selectedProvider,
     model_catalog_json: selection.entryMode === 'official' ? null : path.join(ctx.data, 'cache/models-smr.json'), model: selected || null };
-  if (!signedIn) Object.assign(values, { cli_auth_credentials_store: 'ephemeral', forced_login_method: null });
+  if (!signedIn) Object.assign(values, { forced_login_method: null });
   if (!officialOnly) Object.assign(values, { model_context_window: null, model_auto_compact_token_limit: null });
   for (const [key, value] of Object.entries(values)) text = setRoot(text, key, value === null ? '' : key + ' = ' + JSON.stringify(value) + '\n');
   if (remembered?.effort) text = setRoot(text, 'model_reasoning_effort', 'model_reasoning_effort = ' + JSON.stringify(remembered.effort) + '\n');
@@ -322,15 +322,12 @@ export async function launchEntry(ctx, entryMode, args = [], options = {}) {
     if (options.waitForClient) await options.waitForClient(child);
     else {
       if (child.exitCode === null) await new Promise(resolve => child.once('exit', resolve));
-      // The native updater can replace its main process while the app is open.
-      await delay(1200);
-      while (clients().length && readJson(statePath(ctx, 'config'))?.sessionId === sessionId) await delay(1200);
       if (child.exitCode) throw new Error('The native client exited with status ' + child.exitCode + '.');
     }
   } finally {
     await locked(ctx, async () => {
       const current = readJson(statePath(ctx, 'config'));
-      if (current?.sessionId === sessionId && !clients().length) {
+      if (current?.sessionId === sessionId) {
         restoreConfig(ctx); await restoreThreadProviders(ctx); await locked(ctx, () => stopRouter(ctx));
         unregisterRecovery(ctx, recoverySession);
       }

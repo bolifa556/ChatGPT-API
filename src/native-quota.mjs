@@ -187,7 +187,11 @@ export async function startQuotaCompatibleClient({ executable, archive, root, ho
   try {
     await pipe.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
     await ready;
-  } catch (error) { socket?.close(); child.kill(); throw error; }
+  } catch (error) {
+    socket?.close();
+    if (child.exitCode === null && child.signalCode === null) { child.kill(); await once(child, 'exit'); }
+    throw error;
+  }
   finally { clearTimeout(deadline); }
   let refresh;
   const watcher = fs.watch(path.dirname(cache), (_type, name) => {

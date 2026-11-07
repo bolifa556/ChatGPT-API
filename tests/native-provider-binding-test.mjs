@@ -87,7 +87,9 @@ async function startClient() {
     const account = await rpc('account/read', { refreshToken: false });
     assert.equal(account.requiresOpenaiAuth, false);
     assert.equal(account.account, null);
-    await assert.rejects(rpc('account/rateLimits/read'), /account authentication required/);
+    // The native credential store is retained. An existing subscription can
+    // still have native usage metadata even though this provider has no account.
+    await assert.rejects(rpc('account/rateLimits/read'), /account authentication required|failed to fetch codex rate limits/);
   }
   menus.push({ provider: config.model_provider, capabilities, identity, models: menu.data.map(model => ({ model: model.model, serviceTiers: model.serviceTiers, hidden: model.hidden })) });
   console.log(JSON.stringify({ provider: config.model_provider, menu: menus.at(-1).models }));

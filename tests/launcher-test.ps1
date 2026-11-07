@@ -136,7 +136,7 @@ Assert ((Get-RootString $apiOnlyApplied 'model_provider') -eq 'chatgpt_api_launc
 Assert ((Get-RootString $apiOnlyApplied 'model') -in @('Example/model','Other/model')) 'API-only retained an official initial model.'
 Assert ((Get-TableText $apiOnlyApplied 'model_providers.chatgpt_api_launcher').Contains('requires_openai_auth = false')) 'API-only borrowed the subscription identity.'
 Assert (Get-TableText $apiOnlyApplied 'model_providers.chatgpt_api_launcher.auth') 'API-only lost its API-key helper.'
-Assert ((Get-RootString $apiOnlyApplied 'cli_auth_credentials_store') -eq 'ephemeral') 'API-only loaded saved file/keychain credentials.'
+Assert ((Get-RootString $apiOnlyApplied 'cli_auth_credentials_store') -eq (Get-RootString $baseline 'cli_auth_credentials_store')) 'API-only changed persistent sign-in storage.'
 $helperSelection = Get-LauncherRouterSelection $fixture
 Assert ($helperSelection.mode -eq 'gateway' -and $helperSelection.entryMode -eq 'apionly') 'API-key helper did not retain the active API-only route.'
 Assert ((Read-LauncherState $fixture).lastApiModel -eq $mixedPreference) 'API-only overwrote the mixed entry model preference.'

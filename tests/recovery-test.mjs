@@ -39,8 +39,12 @@ try {
         provider.applyConfig(ctx);
         assert.equal(await recoverPending(ctx, platform), false);
         if (scenario === 'new-boot') {
+          const watcher = JSON.parse(fs.readFileSync(path.join(root, 'data/state/recovery-watcher.json')));
+          process.kill(watcher.owner.pid, 'SIGKILL');
           const previous = JSON.parse(fs.readFileSync(state));
           fs.writeFileSync(state, JSON.stringify({ ...previous, boot: 'previous-system-boot' }));
+          const login = spawn(process.execPath, [path.join(root, 'src/recovery.mjs'), platform, root, home], { stdio: 'ignore' });
+          await once(login, 'exit'); assert.equal(login.exitCode, 0);
           await until(() => !fs.existsSync(state));
         } else { provider.restoreConfig(ctx); unregisterRecovery(ctx, session); }
       } else {

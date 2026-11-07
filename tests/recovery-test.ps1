@@ -15,9 +15,13 @@ $config = Join-Path $fixture 'home\config.toml'
 $baseline = "model = `"gpt-6-sol`"`r`ncli_auth_credentials_store = `"file`"`r`n[app]`r`nlocaleOverride = `"zh-CN`"`r`n"
 Write-Utf8File (Join-Path $fixture 'data\cache\models-smr.json') '{"models":[{"slug":"Vendor/model"}]}'
 $checks = @()
+$foreign = 'model_provider = "chatgpt_api_launcher"' + "`n" + 'openai_base_url = "http://127.0.0.1:8102/v1"' + "`n" + 'model_catalog_json = "another-install/models.json"' + "`n"
+Write-Utf8File $config $foreign
+Repair-LegacyLauncherConfig $fixture $config
+Assert ([IO.File]::ReadAllText($config) -ceq $foreign) 'A matching port/provider was mistaken for configuration owned by this installation.'
 foreach ($scenario in @('normal','crash','corrupt-config','new-boot')) {
     Write-Utf8File $config $baseline
-    $session = Register-LauncherRecovery $fixture $config (Join-Path $fixture 'startup') $false $false
+    $session = Register-LauncherRecovery $fixture $config (Join-Path $fixture 'startup')
     Assert (@(Get-ChildItem -LiteralPath (Join-Path $fixture 'startup') -Filter '*.lnk' -Force).Count -eq 1) 'Next-logon recovery was not registered.'
     Apply-LauncherConfig $fixture $config 'gateway' 'http://127.0.0.1:8102/v1' '' 'apionly'
     if ($scenario -eq 'normal') {
@@ -46,7 +50,7 @@ $ownerScript = Join-Path $fixture 'owner.ps1'
 $quote = { param($value) "'" + $value.Replace("'","''") + "'" }
 $lines = @("`$ErrorActionPreference = 'Stop'")
 foreach ($name in @('Common.ps1','Package-Paths.ps1','Launcher-State.ps1','Recovery-Control.ps1')) { $lines += '. ' + (& $quote (Join-Path $fixture ('src\'+$name))) }
-$lines += '$session = Register-LauncherRecovery ' + ((@($fixture,$config,(Join-Path $fixture 'startup')) | ForEach-Object { & $quote $_ }) -join ' ') + ' -watchNativeClients:$false'
+$lines += '$session = Register-LauncherRecovery ' + ((@($fixture,$config,(Join-Path $fixture 'startup')) | ForEach-Object { & $quote $_ }) -join ' ')
 $lines += 'Apply-LauncherConfig ' + ((@($fixture,$config,'gateway','http://127.0.0.1:8102/v1','','apionly') | ForEach-Object { & $quote $_ }) -join ' ')
 $lines += 'Write-Utf8File ' + (& $quote (Join-Path $fixture 'prepared')) + " 'ready'"
 $lines += 'Start-Sleep -Seconds 120'
@@ -57,10 +61,12 @@ try {
     for ($n=0; $n -lt 300 -and -not (Test-Path -LiteralPath (Join-Path $fixture 'prepared')); $n++) { $owner.Refresh(); if ($owner.HasExited) { throw ('Fixture launcher exited before recovery was registered. ' + [IO.File]::ReadAllText((Join-Path $fixture 'owner-stderr.log'))) }; Start-Sleep -Milliseconds 100 }
     Assert (Test-Path -LiteralPath (Join-Path $fixture 'prepared')) 'Fixture launcher did not prepare.'
     Stop-Process -Id $owner.Id -Force
+    $pending = [IO.File]::ReadAllText((Get-RecoveryPath $fixture)) | ConvertFrom-Json
+    Start-Process -FilePath $pending.shortcut -WindowStyle Hidden
     for ($n=0; $n -lt 150 -and (Test-Path -LiteralPath (Get-RecoveryPath $fixture)); $n++) { Start-Sleep -Milliseconds 100 }
     Assert (-not (Test-Path -LiteralPath (Get-RecoveryPath $fixture))) 'Detached recovery did not finish after the launcher was killed.'
     Assert ([IO.File]::ReadAllText($config) -ceq $baseline) 'Detached recovery changed the original native configuration.'
     Assert (@(Get-ChildItem -LiteralPath (Join-Path $fixture 'startup') -Filter '*.lnk' -Force).Count -eq 0) 'Detached recovery kept its startup shortcut.'
-    $checks += 'launcher force-killed; detached background recovery completed'
+    $checks += 'launcher force-killed before client activation; next-logon recovery completed'
 } finally { $owner.Refresh(); if (-not $owner.HasExited) { Stop-Process -Id $owner.Id -Force } }
 $checks | ConvertTo-Json

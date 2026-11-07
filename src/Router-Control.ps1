@@ -52,7 +52,7 @@ function Get-LauncherRouterSelection([string]$packageDir, [string]$routeMode = '
     }
     return [pscustomobject]@{ mode = $routeMode; entryMode = $entryMode }
 }
-function Ensure-LocalRouter([string]$packageDir, [string]$routeMode = '', [string]$entryMode = '') {
+function Ensure-LocalRouter([string]$packageDir, [string]$routeMode = '', [string]$entryMode = '', [switch]$PrepareOnly) {
     $selection = Get-LauncherRouterSelection $packageDir $routeMode $entryMode
     $mode = $selection.mode
     $entryMode = $selection.entryMode
@@ -107,6 +107,7 @@ function Ensure-LocalRouter([string]$packageDir, [string]$routeMode = '', [strin
         $text=& $node $script --prepare 2> (Join-Path $logDir 'prepare-stderr.log')
         if($LASTEXITCODE -ne 0){throw ('Model refresh failed: '+[IO.File]::ReadAllText((Join-Path $logDir 'prepare-stderr.log')))}
         $prepared=($text -join '')|ConvertFrom-Json
+        if ($PrepareOnly) { return $prepared }
         $p=Start-Process -FilePath $node -ArgumentList @('"'+$script+'"') -WorkingDirectory (Split-Path -Parent $script) -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $logDir 'shim-stdout.log') -RedirectStandardError (Join-Path $logDir 'shim-stderr.log')
         Add-RouterHelper $packageDir $p $script
         for($n=0;$n -lt 60;$n++){

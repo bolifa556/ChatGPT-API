@@ -44,6 +44,7 @@ jobs:
       - run: python scripts/ci-run.py powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/gateway-transport-test.ps1
       - run: python scripts/ci-run.py powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/launcher-test.ps1
       - run: python scripts/ci-run.py powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/recovery-test.ps1
+      - run: python scripts/ci-run.py powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/session-recovery-test.ps1
       - run: python scripts/ci-run.py powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/gateway-recovery-test.ps1
       - run: python scripts/ci-run.py powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/install-deferred-test.ps1
       - run: python scripts/ci-run.py powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-Release.ps1

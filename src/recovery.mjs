@@ -10,6 +10,7 @@ import { atomicPrivate } from './settings.mjs';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const journalPath = ctx => path.join(ctx.root, 'data/state/recovery.json');
 const watcherPath = ctx => path.join(ctx.root, 'data/state/recovery-watcher.json');
+const children = new Map();
 const read = file => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (error) { if (error.code === 'ENOENT') return null; throw error; } };
 const xml = text => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 const desktopQuote = text => '"' + text.replaceAll('%', '%%').replace(/[\\"`$]/g, '\\$&') + '"';
@@ -38,7 +39,7 @@ export async function registerRecovery(ctx, platform, options = {}) {
   if (read(file)) throw new Error('An earlier automatic recovery is still pending.');
   const session = crypto.randomUUID(), trigger = recoveryTrigger(ctx, platform, options.loginDirectory);
   atomicPrivate(file, { version: 1, session, platform, root: ctx.root, home: ctx.home, owner, boot: bootIdentity(), trigger: trigger.file,
-    watchNativeClients: options.watchNativeClients !== false }, { durable: true });
+    watchNativeClients: false }, { durable: true });
   atomicPrivate(trigger.file, trigger.text, { durable: true });
   fs.mkdirSync(path.join(ctx.root, 'data/logs'), { recursive: true, mode: 0o700 });
   try {
@@ -48,10 +49,11 @@ export async function registerRecovery(ctx, platform, options = {}) {
         if (watcher.session === session) return session;
       } else {
         const child = spawn(ctx.node, [path.join(ctx.root, 'src/recovery.mjs'), platform, ctx.root, ctx.home], {
-          detached: true, stdio: 'ignore', env: { ...process.env, CODEX_HOME: ctx.home, CHATGPT_API_ROOT: ctx.root },
+          detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], env: { ...process.env, CODEX_HOME: ctx.home, CHATGPT_API_ROOT: ctx.root },
         });
         await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
-        child.unref();
+        children.set(session, child);
+        child.unref(); child.channel?.unref();
       }
       if (!read(file)) throw new Error('Automatic recovery stopped during startup.');
       await delay(100);
@@ -70,6 +72,8 @@ export function unregisterRecovery(ctx, session) {
   if (!saved || saved.session !== session) return;
   if (fs.existsSync(saved.trigger)) fs.unlinkSync(saved.trigger);
   fs.unlinkSync(journalPath(ctx));
+  const child = children.get(session); children.delete(session);
+  if (child?.connected) child.disconnect();
 }
 export async function recoverPending(ctx, platform) {
   const saved = read(journalPath(ctx));
@@ -77,7 +81,7 @@ export async function recoverPending(ctx, platform) {
   if (saved.root !== ctx.root || saved.home !== ctx.home || saved.platform !== platform) throw new Error('Automatic recovery belongs to another installation.');
   const provider = await import(pathToFileURL(path.join(ctx.root, platform, 'provider.mjs')));
   const currentBoot = !saved.boot || saved.boot === bootIdentity();
-  if (currentBoot && (provider.alive(saved.owner) || provider.alive(saved.client) || saved.watchNativeClients && provider.runningClients().length)) return false;
+  if (currentBoot && (provider.alive(saved.owner) || provider.alive(saved.client))) return false;
   await provider.withLaunchLock(ctx, async () => {
     if (read(journalPath(ctx))?.session !== saved.session) return;
     provider.restoreConfig(ctx);
@@ -103,12 +107,21 @@ async function watch(ctx, platform) {
     return watch(ctx, platform);
   }
   try {
+    atomicPrivate(file, { owner, session: read(journalPath(ctx))?.session });
+    if (process.connected) {
+      // IPC signals owner exit without polling a process list. Normal cleanup
+      // disconnects it after removing this session's recovery journal.
+      await new Promise(resolve => process.once('disconnect', resolve));
+    }
     while (read(journalPath(ctx))) {
-      atomicPrivate(file, { owner, session: read(journalPath(ctx))?.session });
+      const saved = read(journalPath(ctx));
+      if ((!saved.boot || saved.boot === bootIdentity()) && provider.alive(saved.owner)) return;
       try { await recoverPending(ctx, platform); }
       catch (error) {
         fs.appendFileSync(path.join(ctx.root, 'data/logs/recovery.log'), new Date().toISOString() + ' ' + error.message + '\n', { mode: 0o600 });
       }
+      // Only an abnormal owner exit can reach this retry path with its native
+      // client still alive. Normal operation has no monitoring timer.
       if (read(journalPath(ctx))) await delay(1500);
     }
   } finally { if (read(file)?.owner?.pid === process.pid) fs.unlinkSync(file); }

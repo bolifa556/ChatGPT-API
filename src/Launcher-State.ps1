@@ -215,8 +215,8 @@ function Apply-LauncherConfig([string]$packageDir, [string]$configPath, [string]
     $previous = Read-LauncherState $packageDir
     $content = Set-RootString $original 'openai_base_url' $shimBase
     if (-not $signedIn) {
-        # Ignore saved file/keychain identity without moving or deleting credentials.
-        $content = Set-RootString $content 'cli_auth_credentials_store' 'ephemeral'
+        # The provider's requires_openai_auth=false selects API authentication.
+        # Keep the user's credential store so explicit sign-ins remain persistent.
         $content = Set-RootLine $content 'forced_login_method' $null
     }
     if ($entryMode -eq 'official') { $content = Set-RootLine $content 'model_catalog_json' $null }

@@ -187,8 +187,8 @@ export function applyConfig(ctx) {
   const body = `[${table}]\nname = "ChatGPT API Provider"\nbase_url = ${JSON.stringify(base)}\nwire_api = "responses"\nrequires_openai_auth = ${signedIn}\n${imageHeader}supports_websockets = ${signedIn}\n\n`;
   const auth = signedIn ? '' : `[${table}.auth]\ncommand = ${JSON.stringify(ctx.node)}\nargs = ${JSON.stringify([path.join(ctx.root, 'linux/provider.mjs'), 'auth'])}\ntimeout_ms = 45000\nrefresh_interval_ms = 0\n\n`;
   text = setTable(setTable(text, table + '.auth', auth), table, body);
-  const values = { openai_base_url: base, model_provider: selectedProvider, model_catalog_json: path.join(ctx.data, 'cache/models-gateway.json'), model: selected, model_context_window: null, model_auto_compact_token_limit: null, cli_auth_credentials_store: 'ephemeral', forced_login_method: null };
-  for (const key of rootKeys) text = setRoot(text, key, values[key] === null ? '' : key + ' = ' + JSON.stringify(values[key]) + '\n');
+  const values = { openai_base_url: base, model_provider: selectedProvider, model_catalog_json: path.join(ctx.data, 'cache/models-gateway.json'), model: selected, model_context_window: null, model_auto_compact_token_limit: null, forced_login_method: null };
+  for (const [key, value] of Object.entries(values)) text = setRoot(text, key, value === null ? '' : key + ' = ' + JSON.stringify(value) + '\n');
   const file = statePath(ctx, 'config'), prior = readJson(file);
   if (prior && prior.configPath !== ctx.config) throw new Error('This installation is bound to another CODEX_HOME.');
   const saved = { configPath: ctx.config, configExisted: prior ? prior.configExisted !== false : configExisted, original: prior?.original ?? original,
@@ -313,11 +313,9 @@ export async function main(args = process.argv.slice(2)) {
   }
   try {
     if (child.exitCode === null) await new Promise(resolve => child.once('exit', resolve));
-    await delay(1200);
-    while (runningClients().length) await delay(1200);
   } finally {
     await withLaunchLock(ctx, async () => {
-      if (readJson(statePath(ctx, 'config'))?.sessionId === sessionId && !runningClients().length) {
+      if (readJson(statePath(ctx, 'config'))?.sessionId === sessionId) {
         restoreConfig(ctx); await restoreThreadProviders(ctx); await locked(ctx, () => stopRouter(ctx));
         unregisterRecovery(ctx, recoverySession);
       }

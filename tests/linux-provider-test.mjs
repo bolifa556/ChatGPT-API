@@ -173,7 +173,7 @@ try {
   installedProvider.applyConfig(projected);
   const signedConfig = fs.readFileSync(configFile, 'utf8');
   assert(signedConfig.includes('requires_openai_auth = false'));
-  assert(signedConfig.includes('cli_auth_credentials_store = "ephemeral"'));
+  assert(!signedConfig.includes('cli_auth_credentials_store = "ephemeral"'));
   assert(signedConfig.includes('[model_providers.chatgpt_api_launcher.auth]'));
   assert.equal(fs.readFileSync(authFile, 'utf8'), signedAuth);
   assert.equal((await (await fetch('http://127.0.0.1:' + port + '/healthz')).json()).officialModels, 0);

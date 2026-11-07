@@ -20,7 +20,10 @@ function Show-Message([string]$message) {
     [void][System.Windows.Forms.MessageBox]::Show($message,'ChatGPT 启动器')
 }
 function Get-MainApp {
-    return @(Get-CimInstance Win32_Process -Filter "name='ChatGPT.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -notmatch '--type=' })
+    return @(Get-CimInstance Win32_Process -Filter "name='ChatGPT.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -and $_.CommandLine -notmatch '--type=' -and
+        (-not $env:CODEX_ELECTRON_USER_DATA_PATH -or ($_.CommandLine.Contains('--user-data-dir=') -and $_.CommandLine.Contains($env:CODEX_ELECTRON_USER_DATA_PATH)))
+    })
 }
 function Stop-Helpers {
     Stop-LauncherRecordedHelpers $packageDir
@@ -54,7 +57,9 @@ try {
     $activeEntry = if ($state -and $state.active) { if ($state.entryMode) { $state.entryMode } else { 'api' } } else { 'official' }
     if ($running.Count -gt 0) {
         if ($Mode -ne $activeEntry) { throw '请先从托盘完全退出 ChatGPT，再点击另一个入口切换。' }
-        & (Join-Path $env:WINDIR 'explorer.exe') "shell:AppsFolder\$appId"
+        if ($env:CODEX_ELECTRON_USER_DATA_PATH) {
+            Start-Process -FilePath (Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\chatgpt-desktop.exe') -ArgumentList ('--user-data-dir="' + $env:CODEX_ELECTRON_USER_DATA_PATH + '"') -WindowStyle Hidden
+        } else { & (Join-Path $env:WINDIR 'explorer.exe') "shell:AppsFolder\$appId" }
         exit 0
     }
     if ($Mode -ne 'official') { Assert-LauncherApiConfigured $packageDir }
@@ -66,9 +71,9 @@ try {
     if (-not (Test-Path -LiteralPath $nodePath)) { throw '缺少 runtime\node.exe，请使用完整安装包。' }
     $shimPath = Join-Path $packageDir 'src\shim.mjs'
     $authMode = Get-LauncherRouteMode $Mode (Get-CodexHome)
-    if ($Mode -eq 'official') { $prepared = Ensure-LocalRouter $packageDir $authMode $Mode }
+    if ($Mode -eq 'official') { $prepared = Ensure-LocalRouter $packageDir $authMode $Mode -PrepareOnly }
     else {
-        $prepared = Invoke-GatewayPreparation { Ensure-LocalRouter $packageDir $authMode $Mode } { Show-ApiSettings $packageDir } {
+        $prepared = Invoke-GatewayPreparation { Ensure-LocalRouter $packageDir $authMode $Mode -PrepareOnly } { Show-ApiSettings $packageDir } {
             param($values)
             Stop-Helpers
             Set-LauncherSettings $packageDir $values.base $values.key
@@ -92,47 +97,39 @@ try {
         $notice = if ($authMode -eq 'mixed') { '网关目前不可用。有效缓存中的网关模型请求可能失败；已登录的官方模型仍使用官方通道。' } else { '网关目前不可用。此入口只使用网关模型，请检查网关连接。' }
         Show-Message $notice
     }
-    if ($Mode -ne 'official') {
-        $quotaState = Join-Path $packageDir 'data\state\native-quota.json'
-        if (Test-Path -LiteralPath $quotaState) { Remove-Item -LiteralPath $quotaState }
-        $nativeAlias = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\chatgpt-desktop.exe'
-        if (-not (Test-Path -LiteralPath $nativeAlias)) { $nativeAlias = Join-Path $package.InstallLocation 'app\ChatGPT.exe' }
-        $quotaScript = Join-Path $packageDir 'src\native-quota.mjs'
-        $arguments = @($quotaScript,$nativeAlias,(Join-Path $package.InstallLocation 'app\resources\app.asar'),$packageDir,(Get-CodexHome)) | ForEach-Object { '"' + $_ + '"' }
-        $quotaHelper = Start-Process -FilePath $nodePath -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardError (Join-Path $packageDir 'data\logs\quota-stderr.log')
-        Add-RouterHelper $packageDir $quotaHelper $quotaScript
-        $quotaReady = $false
-        for ($n=0; $n -lt 400; $n++) {
-            $quotaHelper.Refresh()
-            if ($quotaHelper.HasExited) { throw ('额度兼容准备失败：' + [IO.File]::ReadAllText((Join-Path $packageDir 'data\logs\quota-stderr.log'))) }
-            if (Test-Path -LiteralPath $quotaState) {
-                $quota = [IO.File]::ReadAllText($quotaState) | ConvertFrom-Json
-                if ($quota.ready) { $quotaReady = $true; break }
+    $nativeAlias = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\chatgpt-desktop.exe'
+    if (-not (Test-Path -LiteralPath $nativeAlias)) { $nativeAlias = Join-Path $package.InstallLocation 'app\ChatGPT.exe' }
+    $sessionState = Join-Path $packageDir 'data\state\native-session.json'
+    $sessionLog = Join-Path $packageDir 'data\logs\native-session-stderr.log'
+    $sessionScript = Join-Path $packageDir 'src\native-session.mjs'
+    $arguments = @($sessionScript,$packageDir,(Get-CodexHome),$nativeAlias,(Join-Path $package.InstallLocation 'app\resources\app.asar'),$Mode,$recoverySession) | ForEach-Object { '"' + $_ + '"' }
+    $controller = Start-Process -FilePath $nodePath -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardError $sessionLog
+    Add-RouterHelper $packageDir $controller $sessionScript
+    Set-LauncherRecoveryController $packageDir $recoverySession $controller.Id
+    $main = $null
+    for ($n=0; $n -lt 400; $n++) {
+        $controller.Refresh()
+        if ($controller.HasExited) { throw ('客户端启动失败：' + [IO.File]::ReadAllText($sessionLog)) }
+        if (Test-Path -LiteralPath $sessionState) {
+            $native = [IO.File]::ReadAllText($sessionState) | ConvertFrom-Json
+            if ($native.session -eq $recoverySession -and $native.ready) {
+                $main = Get-CimInstance Win32_Process -Filter ('ProcessId=' + [int]$native.pid) -ErrorAction SilentlyContinue
+                if ($main) { break }
             }
-            Start-Sleep -Milliseconds 100
         }
-        if (-not $quotaReady) { throw '额度兼容准备未完成，请查看 data\logs\quota-stderr.log。' }
-    } else {
-        & (Join-Path $env:WINDIR 'explorer.exe') "shell:AppsFolder\$appId"
+        Start-Sleep -Milliseconds 100
     }
-    $main=$null
-    for($n=0;$n -lt 100;$n++){ $apps=@(Get-MainApp);if($apps.Count){$main=$apps[0];break};Start-Sleep -Milliseconds 200 }
-    if(-not $main){throw '客户端未能启动，已恢复原配置。'}
+    if (-not $main) { throw '客户端未能完成启动，请查看 data\logs\native-session-stderr.log。' }
     Set-LauncherRecoveryClient $packageDir $recoverySession $main
     $apiLaunched=$true
     $lock.Dispose();$lock=$null
-    do {
-        Wait-Process -Id $main.ProcessId -ErrorAction SilentlyContinue
-        # The app may replace its main process while applying an update.
-        Start-Sleep -Milliseconds 1200
-        $main = @(Get-MainApp) | Select-Object -First 1
-    } while ($main)
+    Wait-LauncherSession $packageDir $recoverySession $controller.Id
     for($n=0;$n -lt 50 -and -not $lock;$n++){
         try{$lock=[IO.File]::Open($lockPath,'OpenOrCreate','ReadWrite','None')}catch{Start-Sleep -Milliseconds 100}
     }
     if($lock){
         $currentState = Read-LauncherState $packageDir
-        if($currentState.active -and $currentState.startedAt -eq $sessionStartedAt -and @(Get-MainApp).Count -eq 0){
+        if($currentState.active -and $currentState.startedAt -eq $sessionStartedAt){
             Restore-LauncherConfig $packageDir $configPath
             Stop-Helpers
             Unregister-LauncherRecovery $packageDir $recoverySession
