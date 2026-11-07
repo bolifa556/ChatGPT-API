@@ -16,7 +16,7 @@ async function until(check) {
 }
 const checks = [];
 try {
-  for (const platform of ['linux', 'macos']) {
+  for (const platform of process.platform === 'darwin' ? ['macos'] : ['linux', 'macos']) {
     const root = path.join(temporary, platform), home = path.join(root, 'home');
     fs.mkdirSync(home, { recursive: true });
     for (const directory of ['src', platform, 'node_modules']) fs.cpSync(path.join(repo, directory), path.join(root, directory), { recursive: true });

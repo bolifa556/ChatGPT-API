@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { overlayDesktopState, restoreDesktopState } from '../src/desktop-state.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+fs.mkdirSync(path.join(root, 'data/testing'), { recursive: true });
 const fixture = fs.mkdtempSync(path.join(root, 'data/testing/account-isolation-'));
 const home = path.join(fixture, 'home'); fs.mkdirSync(home);
 const ctx = { root: fixture, home }, file = path.join(home, '.codex-global-state.json');
