@@ -1,5 +1,21 @@
 ﻿$script:LauncherRootKeys = @('openai_base_url', 'model_provider', 'model_catalog_json', 'model', 'model_reasoning_effort', 'model_context_window', 'model_auto_compact_token_limit')
 $script:LauncherTables = @('model_providers.chatgpt_api_launcher', 'model_providers.chatgpt_api_launcher.auth', 'model_providers.chatgpt_api_mixed', 'model_providers.chatgpt_api_mixed.auth', 'model_providers.smr', 'model_providers.smr.auth')
+$script:LauncherRootKeys += @('cli_auth_credentials_store', 'forced_login_method')
+function Write-LauncherFile([string]$path, [string]$content) {
+    $directory = Split-Path -Parent $path
+    [void][IO.Directory]::CreateDirectory($directory)
+    $temporary = $path + '.chatgpt-api.tmp'
+    $backup = $path + '.chatgpt-api.bak'
+    try {
+        $stream = [IO.File]::Open($temporary,'Create','Write','None')
+        try { $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($content); $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) }
+        finally { $stream.Dispose() }
+        if (Test-Path -LiteralPath $path) { [IO.File]::Replace($temporary,$path,$backup) }
+        else { [IO.File]::Move($temporary,$path) }
+    } finally {
+        foreach ($scratch in @($temporary,$backup)) { if (Test-Path -LiteralPath $scratch) { Remove-Item -LiteralPath $scratch } }
+    }
+}
 function Get-CodexHome {
     if ($env:CODEX_HOME) { return $env:CODEX_HOME }
     return (Join-Path $env:USERPROFILE '.codex')
@@ -151,42 +167,58 @@ function Restore-LauncherTable([string]$content, [string]$name, [string]$origina
 }
 function Restore-LauncherConfig([string]$packageDir, [string]$configPath) {
     $compatibility = Join-Path $packageDir 'data\state\thread-provider-compatibility.json'
+    $state = Read-LauncherState $packageDir
+    if ($state -and $state.active) {
+        if ([IO.Path]::GetFullPath($state.configPath) -ne [IO.Path]::GetFullPath($configPath)) { throw '切换记录属于另一个配置目录，已停止自动恢复。' }
+        $current = if (Test-Path -LiteralPath $configPath) { [System.IO.File]::ReadAllText($configPath) } else { '' }
+        if ($state.entryMode -eq 'apionly') {
+            $state | Add-Member -NotePropertyName lastApiOnlyModel -NotePropertyValue (Get-RootString $current 'model') -Force
+            $state | Add-Member -NotePropertyName lastApiOnlyEffort -NotePropertyValue (Get-RootString $current 'model_reasoning_effort') -Force
+        } elseif ($state.entryMode -ne 'official') {
+            $state.lastApiModel = Get-RootString $current 'model'
+            $state.lastApiEffort = Get-RootString $current 'model_reasoning_effort'
+        }
+        $body = [regex]::Replace($current, '(?m)^[ \t]*#[^\r\n]*', '').Trim()
+        $damaged = $body -and $body -notmatch '(?m)^[^\r\n#]*=|^[ \t]*\['
+        if ($current -ceq $state.applied -or $damaged) { $restored = [string]$state.original } else {
+            $restored = $current
+            foreach ($key in $script:LauncherRootKeys) { $restored = Restore-LauncherRootLine $restored $key (Get-RootLine $state.original $key) $state.original }
+            foreach ($table in $script:LauncherTables) { $restored = Restore-LauncherTable $restored $table $state.original }
+            $restored = $restored.TrimEnd() + [regex]::Match($state.original, '[\r\n\t ]*\z').Value
+        }
+        if ($state.PSObject.Properties['originalExisted'] -and -not $state.originalExisted -and $restored.Length -eq 0) { if (Test-Path -LiteralPath $configPath) { Remove-Item -LiteralPath $configPath } }
+        else { Write-LauncherFile $configPath $restored }
+        $state.active = $false
+        $state.original = $null; $state.applied = $null
+        Write-LauncherFile (Get-LauncherDataPath $packageDir 'launcher-state.json') ($state | ConvertTo-Json -Depth 8)
+    }
+    if (Get-Command Repair-LegacyLauncherConfig -ErrorAction SilentlyContinue) { Repair-LegacyLauncherConfig $packageDir $configPath }
+    $desktopJournal = Join-Path $packageDir 'data\state\desktop-state-compatibility.json'
+    if (Test-Path -LiteralPath $desktopJournal) {
+        & (Join-Path $packageDir 'runtime\node.exe') (Join-Path $packageDir 'src\desktop-state.mjs') 'restore' (Split-Path -Parent $configPath) $packageDir
+        if ($LASTEXITCODE -ne 0) { throw '桌面项目配置尚未恢复，请查看恢复日志。' }
+    }
+    # Native routing and preferences remain usable if history recovery needs retry.
     if (Test-Path -LiteralPath $compatibility) {
         $restoredThreads = & (Join-Path $packageDir 'runtime\node.exe') (Join-Path $packageDir 'src\repair-thread-providers.mjs') 'restore' (Split-Path -Parent $configPath) $packageDir 2> (Join-Path $packageDir 'data\logs\provider-restore-stderr.log')
         if ($LASTEXITCODE -ne 0) { throw '对话的临时通道设置尚未恢复，请查看 data\logs\provider-restore-stderr.log。' }
     }
-    $state = Read-LauncherState $packageDir
-    if (-not $state -or -not $state.active) { return }
-    if ([IO.Path]::GetFullPath($state.configPath) -ne [IO.Path]::GetFullPath($configPath)) { throw '切换记录属于另一个配置目录，已停止自动恢复。' }
-    $current = [System.IO.File]::ReadAllText($configPath)
-    if ($state.entryMode -eq 'apionly') {
-        $state | Add-Member -NotePropertyName lastApiOnlyModel -NotePropertyValue (Get-RootString $current 'model') -Force
-        $state | Add-Member -NotePropertyName lastApiOnlyEffort -NotePropertyValue (Get-RootString $current 'model_reasoning_effort') -Force
-    } elseif ($state.entryMode -ne 'official') {
-        $state.lastApiModel = Get-RootString $current 'model'
-        $state.lastApiEffort = Get-RootString $current 'model_reasoning_effort'
+    foreach ($scratch in @(($configPath + '.chatgpt-api.tmp'), ($configPath + '.chatgpt-api.bak'), (Join-Path (Split-Path -Parent $configPath) '.codex-global-state.json.chatgpt-api.tmp'))) {
+        if (Test-Path -LiteralPath $scratch) { Remove-Item -LiteralPath $scratch }
     }
-    if ($current -ceq $state.applied) { $restored = [string]$state.original } else {
-        $restored = $current
-        foreach ($key in $script:LauncherRootKeys) { $restored = Restore-LauncherRootLine $restored $key (Get-RootLine $state.original $key) $state.original }
-        foreach ($table in $script:LauncherTables) { $restored = Restore-LauncherTable $restored $table $state.original }
-        $restored = $restored.TrimEnd() + [regex]::Match($state.original, '[\r\n\t ]*\z').Value
-    }
-    if ($state.PSObject.Properties['originalExisted'] -and -not $state.originalExisted -and $restored.Length -eq 0) { Remove-Item -LiteralPath $configPath }
-    else { Write-Utf8File $configPath $restored }
-    $state.active = $false
-    $state.original = $null; $state.applied = $null
-    Write-Utf8File (Get-LauncherDataPath $packageDir 'launcher-state.json') ($state | ConvertTo-Json -Depth 8)
 }
 function Apply-LauncherConfig([string]$packageDir, [string]$configPath, [string]$mode, [string]$shimBase, [string]$gatewayBase, [ValidateSet('api','official','apionly')][string]$entryMode = 'api') {
     if ($entryMode -eq 'apionly') { $mode = 'gateway' }
-    # Account identity owns projects, onboarding and desktop preferences. Keeping
-    # a real saved login must not enable official inference in the API-only router.
-    $signedIn = ($mode -eq 'mixed') -or (Get-SavedChatGPTLogin (Split-Path -Parent $configPath))
+    $signedIn = $mode -eq 'mixed'
     $originalExisted = Test-Path -LiteralPath $configPath
     $original = if ($originalExisted) { [IO.File]::ReadAllText($configPath) } else { '' }
     $previous = Read-LauncherState $packageDir
     $content = Set-RootString $original 'openai_base_url' $shimBase
+    if (-not $signedIn) {
+        # Ignore saved file/keychain identity without moving or deleting credentials.
+        $content = Set-RootString $content 'cli_auth_credentials_store' 'ephemeral'
+        $content = Set-RootLine $content 'forced_login_method' $null
+    }
     if ($entryMode -eq 'official') { $content = Set-RootLine $content 'model_catalog_json' $null }
     else { $content = Set-RootString $content 'model_catalog_json' (Get-LauncherDataPath $packageDir 'models-smr.json') }
     foreach ($id in @('chatgpt_api_launcher','chatgpt_api_mixed','smr')) {
@@ -220,6 +252,6 @@ function Apply-LauncherConfig([string]$packageDir, [string]$configPath, [string]
     }
     $state = [ordered]@{ version = 2; active = $true; mode = $mode; entryMode = $entryMode; configPath = $configPath; originalExisted = $originalExisted; original = $original; applied = $content; startedAt = [DateTime]::UtcNow.ToString('o'); lastApiModel = $(if ($entryMode -eq 'api') { $selected } else { $previous.lastApiModel }); lastApiEffort = $(if ($entryMode -eq 'api') { Get-RootString $original 'model_reasoning_effort' } else { $previous.lastApiEffort }); lastApiOnlyModel = $(if ($entryMode -eq 'apionly') { $selected } else { $previous.lastApiOnlyModel }); lastApiOnlyEffort = $(if ($entryMode -eq 'apionly') { Get-RootString $original 'model_reasoning_effort' } else { $previous.lastApiOnlyEffort }) }
     # Journal first, so a crash while switching can be recovered by either entry.
-    Write-Utf8File (Get-LauncherDataPath $packageDir 'launcher-state.json') ($state | ConvertTo-Json -Depth 8)
-    Write-Utf8File $configPath $content
+    Write-LauncherFile (Get-LauncherDataPath $packageDir 'launcher-state.json') ($state | ConvertTo-Json -Depth 8)
+    Write-LauncherFile $configPath $content
 }

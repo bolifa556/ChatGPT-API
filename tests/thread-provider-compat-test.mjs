@@ -76,6 +76,34 @@ try {
   assert.deepEqual(fs.readFileSync(moved), Buffer.concat([first.bytes, Buffer.from(message + setting('openai', 2) + tool)]));
   checks.push('Interrupted preparation recovers from the adapter journal without native backup files or lost messages');
 
+  for (const indexed of [true, false]) {
+    const id = indexed ? 'indexed-duplicates' : 'unindexed-duplicates';
+    const left = path.join(sessions, id + '-left.jsonl'), right = path.join(sessions, id + '-right.jsonl');
+    const extra = path.join(archive, id + '-new.jsonl');
+    const originalLeft = header(id, 'openai') + message + setting('openai');
+    const originalRight = header(id, 'smr') + message + setting('smr');
+    fs.writeFileSync(left, originalLeft); fs.writeFileSync(right, originalRight);
+    if (indexed) for (const file of dbFiles) {
+      const db = new DatabaseSync(file); db.prepare('INSERT INTO threads VALUES(?,?,?,?,?)').run(id, 'openai', 'original-project', 'original-model', 10); db.close();
+    }
+    await repairThreadProviders(ctx);
+    fs.copyFileSync(right, extra); fs.appendFileSync(extra, setting(target, 9));
+    const extraBefore = fs.readFileSync(extra);
+    if (!indexed) for (const file of dbFiles) {
+      const db = new DatabaseSync(file); db.prepare('INSERT INTO threads VALUES(?,?,?,?,?)').run(id, target, 'new-native-project', 'new-native-model', 20); db.close();
+    }
+    await restoreThreadProviders(ctx);
+    assert.equal(fs.readFileSync(left, 'utf8'), originalLeft);
+    assert.equal(fs.readFileSync(right, 'utf8'), originalRight);
+    if (indexed) assert.equal(fs.readFileSync(extra, 'utf8'), header(id, 'openai') + message + setting('openai') + setting('openai', 9));
+    else {
+      assert.deepEqual(fs.readFileSync(extra), extraBefore);
+      assert(dbFiles.every(file => rows(file).find(row => row.id === id).model_provider === target));
+    }
+    assert(!fs.existsSync(journal)); noScratch();
+  }
+  checks.push('Duplicate rollout IDs restore each tracked file exactly; new indexed continuations use the pre-launch native provider and unowned unindexed copies remain intact');
+
   for (const platform of ['macos', 'linux']) {
     const { applyConfig, restoreConfig } = await import('../' + platform + '/provider.mjs');
     const area = path.join(root, platform), data = path.join(area, 'data'), native = path.join(area, 'home');

@@ -98,6 +98,12 @@ export function clientLaunchCommand(client, args, home, { wait = true, platform 
 }
 
 export async function startNativeClient(client, args, home, options = {}) {
+  if (options.quotaRoot) {
+    const { startQuotaCompatibleClient } = await import('../src/native-quota.mjs');
+    const bundle = client.match(/^(.*\.app)\/Contents\/MacOS\//)?.[1];
+    return startQuotaCompatibleClient({ executable: client, archive: path.join(bundle, 'Contents/Resources/app.asar'), root: options.quotaRoot, home, args,
+      launch: debugArgs => startNativeClient(client, debugArgs, home, { ...options, quotaRoot: null }) });
+  }
   const launch = clientLaunchCommand(client, args, home, options);
   const child = spawn(launch.command, launch.args, { detached: true, stdio: 'ignore',
     env: { ...process.env, CODEX_HOME: home } });

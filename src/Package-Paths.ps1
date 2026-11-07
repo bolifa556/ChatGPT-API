@@ -18,8 +18,12 @@ function Get-LauncherDataPath([string]$packageDir, [string]$name) {
 function Test-RecordedProcess($entry) {
     if (-not $entry -or -not $entry.pid) { return $false }
     $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + [int]$entry.pid) -ErrorAction SilentlyContinue
-    return [bool]($p -and $p.ExecutablePath -eq $entry.exe -and
-        $p.CreationDate.ToUniversalTime().ToString('o') -eq $entry.createdAt)
+    if (-not $p -or $p.ExecutablePath -ne $entry.exe) { return $false }
+    try {
+        $created = if ($entry.createdAt -is [DateTime]) { $entry.createdAt.ToUniversalTime() }
+            else { [DateTimeOffset]::Parse([string]$entry.createdAt,[Globalization.CultureInfo]::InvariantCulture).UtcDateTime }
+        return $p.CreationDate.ToUniversalTime().Ticks -eq $created.Ticks
+    } catch { return $false }
 }
 
 function Get-LegacyLayoutState([string]$packageDir) {

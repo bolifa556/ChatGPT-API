@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { once } from 'node:events';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readSettings as readLauncherSettings } from '../src/settings.mjs';
 
 assert.equal(process.platform, 'linux', 'Run this test in Linux or WSL.');
@@ -60,6 +60,11 @@ try {
   assert(!install.stdout.includes(key)); assert(!install.stderr.includes(key));
   assert.deepEqual(new Set(menu().map(model => model.slug)), new Set(models));
   assert.equal(fs.readFileSync(authFile, 'utf8'), originalAuth);
+  assert.equal(fs.readFileSync(configFile, 'utf8'), baseline);
+  assert(!fs.existsSync(path.join(installed, 'data/state/config.json')));
+  const installedProvider = await import(pathToFileURL(path.join(installed, 'linux/provider.mjs')));
+  const projected = { root: installed, home: native, config: configFile, data: path.join(installed, 'data'), node: process.execPath };
+  installedProvider.applyConfig(projected);
   const config = fs.readFileSync(configFile, 'utf8');
   assert(config.includes('requires_openai_auth = false')); assert(config.includes('model_provider = "chatgpt_api_launcher"'));
   assert(config.includes('localeOverride = "zh-CN"')); assert(config.includes('[model_providers.unrelated]'));
@@ -99,6 +104,7 @@ try {
   fs.writeFileSync(journalFile, JSON.stringify(legacy));
   fs.writeFileSync(configFile, 'model_context_window = 500000\nmodel_auto_compact_token_limit = 400000\n' + fs.readFileSync(configFile, 'utf8'));
   await cli('configure');
+  installedProvider.applyConfig(projected);
   assert(!/^model_context_window\s*=/m.test(fs.readFileSync(configFile, 'utf8')));
   checks.push('An older provider journal adopts newly managed context settings without losing their original values');
 
@@ -107,18 +113,21 @@ try {
   fs.writeFileSync(client, '#!/bin/sh\nprintf "%s\\n" "$CODEX_HOME" > "$CHATGPT_TEST_MARKER"\nwhile test ! -f "$CHATGPT_TEST_MARKER.close"; do sleep 0.1; done\n', { mode: 0o755 });
   const marker = path.join(fixture, 'client-started.txt');
   fs.writeFileSync(configFile, fs.readFileSync(configFile, 'utf8').replace(/^model = .*$/m, 'model = "Vendor/model" # keep this choice'));
+  installedProvider.restoreConfig(projected);
+  const configBeforeLaunch = fs.readFileSync(configFile, 'utf8');
   models.push('Vendor/new-model');
   launchingClient = cli('launch', { CHATGPT_API_CLIENT: client, CHATGPT_TEST_MARKER: marker });
   clientClosed = marker + '.close';
-  for (let i = 0; i < 30 && !fs.existsSync(marker); i++) await delay(50);
+  for (let i = 0; i < 200 && !fs.existsSync(marker); i++) await delay(50);
   assert.equal(fs.readFileSync(marker, 'utf8').trim(), native);
-  assert(fs.readFileSync(configFile, 'utf8').includes('model = "Vendor/model"'));
+  assert(fs.readFileSync(configFile, 'utf8').includes('model_provider = "chatgpt_api_launcher"'));
   assert(menu().some(model => model.slug === 'Vendor/new-model'));
   const newModel = await fetch('http://127.0.0.1:' + port + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'Vendor/new-model', input: 'new' }) });
   assert.equal(newModel.status, 200); await newModel.text();
   fs.writeFileSync(clientClosed, 'close'); await launchingClient; launchingClient = null;
   assert(!fs.existsSync(path.join(installed, 'data/state/thread-provider-compatibility.json')));
   assert(!fs.readFileSync(configFile, 'utf8').includes('model_catalog_json'));
+  assert.equal(fs.readFileSync(configFile, 'utf8'), configBeforeLaunch);
   await cli('configure');
   checks.push('Launch refreshes menu/router, preserves CODEX_HOME, and restores temporary configuration after the native client exits');
 
@@ -160,9 +169,12 @@ try {
   const signedAuth = JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'inert-native-account', account_id: 'fixture-account' } });
   fs.writeFileSync(authFile, signedAuth);
   await cli('stop'); await cli('configure');
+  const beforeProjection = fs.readFileSync(configFile, 'utf8');
+  installedProvider.applyConfig(projected);
   const signedConfig = fs.readFileSync(configFile, 'utf8');
-  assert(signedConfig.includes('requires_openai_auth = true'));
-  assert(!signedConfig.includes('[model_providers.chatgpt_api_launcher.auth]'));
+  assert(signedConfig.includes('requires_openai_auth = false'));
+  assert(signedConfig.includes('cli_auth_credentials_store = "ephemeral"'));
+  assert(signedConfig.includes('[model_providers.chatgpt_api_launcher.auth]'));
   assert.equal(fs.readFileSync(authFile, 'utf8'), signedAuth);
   assert.equal((await (await fetch('http://127.0.0.1:' + port + '/healthz')).json()).officialModels, 0);
   const signedResponse = await fetch('http://127.0.0.1:' + port + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer inert-native-account', 'chatgpt-account-id': 'fixture-account' }, body: JSON.stringify({ model: 'Vendor/model', input: 'preserve account identity' }) });
@@ -175,6 +187,7 @@ try {
   assert(originalProvider.includes('openai_base_url = "http://127.0.0.1:' + port + '/v1"'));
   assert.equal(fs.readFileSync(authFile, 'utf8'), signedAuth);
   await cli('restore');
+  assert.equal(fs.readFileSync(configFile, 'utf8').trimEnd(), beforeProjection.trimEnd());
   fs.writeFileSync(authFile, originalAuth);
   if (savedProviders === null) fs.unlinkSync(providersFile); else fs.writeFileSync(providersFile, savedProviders);
   checks.push('Saved native identity survives API-only configuration; credentials stay local and obsolete history preferences do not change the shared provider');

@@ -83,6 +83,12 @@ async function startClient() {
   const menu = await rpc('model/list', { includeHidden: true });
   const capabilities = await rpc('modelProvider/capabilities/read');
   const identity = await rpc('getAuthStatus', { includeToken: false, refreshToken: false });
+  if (!identity.requiresOpenaiAuth) {
+    const account = await rpc('account/read', { refreshToken: false });
+    assert.equal(account.requiresOpenaiAuth, false);
+    assert.equal(account.account, null);
+    await assert.rejects(rpc('account/rateLimits/read'), /account authentication required/);
+  }
   menus.push({ provider: config.model_provider, capabilities, identity, models: menu.data.map(model => ({ model: model.model, serviceTiers: model.serviceTiers, hidden: model.hidden })) });
   console.log(JSON.stringify({ provider: config.model_provider, menu: menus.at(-1).models }));
 }
@@ -95,7 +101,7 @@ const ctx = { root: fixture, data: path.join(fixture, 'data'), home, cwd, config
 async function entry(entryMode, mode, seedProvider = null) {
   await stop(client); client = null; await stop(router); router = null;
   await restoreThreadProviders(ctx);
-  const nativeAccount = fs.existsSync(path.join(home, 'auth.json'));
+  const nativeAccount = entryMode !== 'apionly' && fs.existsSync(path.join(home, 'auth.json'));
   if (process.env.NATIVE_BINDING_PLATFORM === 'windows') {
     const quote = value => "'" + value.replaceAll("'", "''") + "'";
     const script = path.join(fixture, 'apply-entry.ps1');
@@ -181,13 +187,13 @@ try {
   checks.push('API-only chat resumes in signed-in mixed entry and switches official → non-GPT → official with original context');
   await entry('apionly', 'gateway');
   assert.equal(menus.at(-1).models.length, 2);
-  assert.equal(menus.at(-1).identity.requiresOpenaiAuth, true);
-  assert.equal(menus.at(-1).identity.authMethod, 'chatgpt');
+  assert.equal(menus.at(-1).identity.requiresOpenaiAuth, false);
+  assert.equal(menus.at(-1).identity.authMethod, null);
   assert.equal(menus.at(-1).identity.authToken, null);
   const back = await rpc('thread/resume', { threadId, excludeTurns: true }); assert.equal(back.modelProvider, 'chatgpt_api_launcher');
   const last = await turn(threadId, gatewayModels[0], 'API_RETURN_CONTEXT', true); assert(JSON.stringify(last.body).includes('OFFICIAL_RETURN_CONTEXT')); assert.equal(last.body.service_tier, 'priority');
   checks.push('The same chat returns to API-only; model directory excludes official entries and keeps GPT Fast requests');
-  checks.push('API-only preserves a real saved ChatGPT identity for account-scoped desktop state; unsigned API-only remains login-free');
+  checks.push('API-only ignores saved ChatGPT identity without changing the original credentials');
   await compact(threadId, false); checks.push('API provider uses native text compaction; no adapter-written prompt');
   finalHistory = await rpc('thread/turns/list', { threadId, limit: 20 });
   await entry('official', 'mixed');
@@ -222,7 +228,7 @@ try {
   const beforeAuto = requests.length;
   await entry('apionly', 'gateway');
   assert.equal(menus.at(-1).provider, 'chatgpt_api_launcher');
-  assert.equal(menus.at(-1).identity.authMethod, 'chatgpt');
+  assert.equal(menus.at(-1).identity.authMethod, null);
   assert(menus.at(-1).models.every(model => gatewayModels.includes(model.model)));
   assert.equal(requests.length, beforeAuto, 'Automatic compatibility sent an inference request');
   for (const old of legacyThreads) {

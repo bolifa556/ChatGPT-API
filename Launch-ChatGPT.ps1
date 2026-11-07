@@ -4,16 +4,17 @@ $packageDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $packageDir 'src\Common.ps1')
 . (Join-Path $packageDir 'src\Package-Paths.ps1')
 . (Join-Path $packageDir 'src\Launcher-State.ps1')
+. (Join-Path $packageDir 'src\Recovery-Control.ps1')
 . (Join-Path $packageDir 'src\Router-Control.ps1')
 . (Join-Path $packageDir 'src\Api-Settings.ps1')
 . (Join-Path $packageDir 'install\Install-Core.ps1')
 $null = Initialize-PackageLayout $packageDir
 $configPath = Join-Path (Get-CodexHome) 'config.toml'
-$runtimePath = Get-LauncherDataPath $packageDir 'runtime-state.json'
 $lockPath = Get-LauncherDataPath $packageDir 'launcher.lock'
 $lock = $null
 $apiLaunched = $false
 $apiKey = ''
+$recoverySession = ''
 function Show-Message([string]$message) {
     Add-Type -AssemblyName System.Windows.Forms
     [void][System.Windows.Forms.MessageBox]::Show($message,'ChatGPT 启动器')
@@ -22,32 +23,10 @@ function Get-MainApp {
     return @(Get-CimInstance Win32_Process -Filter "name='ChatGPT.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -notmatch '--type=' })
 }
 function Stop-Helpers {
-    if (-not (Test-Path -LiteralPath $runtimePath)) { return }
-    $state = [IO.File]::ReadAllText($runtimePath) | ConvertFrom-Json
-    foreach ($entry in @($state.helpers)) {
-        if (-not $entry.pid) { continue }
-        $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + [int]$entry.pid) -ErrorAction SilentlyContinue
-        if ($p -and $p.ExecutablePath -eq $entry.exe -and $p.CreationDate.ToUniversalTime().ToString('o') -eq $entry.createdAt -and $p.CommandLine.Contains([string]$entry.marker)) {
-            Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
-        }
-    }
-    Write-Utf8File $runtimePath '{"version":2,"helpers":[]}'
+    Stop-LauncherRecordedHelpers $packageDir
 }
-function Recover-OldOverrides {
-    if (-not (Test-Path -LiteralPath $configPath)) { return }
-    $content = [IO.File]::ReadAllText($configPath)
-    $catalog = Get-RootString $content 'model_catalog_json'
-    $base = Get-RootString $content 'openai_base_url'
-    if ($catalog -ne (Get-LauncherDataPath $packageDir 'models-smr.json') -and $catalog -ne (Join-Path $packageDir 'models-smr.json') -and $base -ne 'http://127.0.0.1:8102/v1') { return }
-    $savedPath = Get-LauncherDataPath $packageDir 'official-settings.json'
-    if (-not (Test-Path -LiteralPath $savedPath)) { throw '发现旧版 API 覆盖但缺少原设置记录；为避免覆盖个人设置，已停止启动。' }
-    $saved = [IO.File]::ReadAllText($savedPath) | ConvertFrom-Json
-    foreach ($key in @('openai_base_url','model_provider','model_catalog_json')) { $content = Set-RootLine $content $key $null }
-    foreach ($key in @('model','model_reasoning_effort')) {
-        if ($saved.$key) { $value=[string]$saved.$key; if($value.StartsWith('"')) { $value=$value | ConvertFrom-Json }; $content=Set-RootString $content $key $value }
-    }
-    Write-Utf8File $configPath $content
-}
+function Recover-OldOverrides { Repair-LegacyLauncherConfig $packageDir $configPath }
+
 try {
     $legacyLayout = Get-LegacyLayoutState $packageDir
     if ($legacyLayout -and $legacyLayout.pending -and @(Get-MainApp).Count -eq 0) {
@@ -62,7 +41,6 @@ try {
             # are stopped, with their PID, executable, creation time and marker checked.
             Stop-Helpers
             if (-not (Initialize-PackageLayout $packageDir)) { throw '旧版转发器仍在退出，目录迁移尚未完成，请稍后再打开。' }
-            $runtimePath = Get-LauncherDataPath $packageDir 'runtime-state.json'
             $lockPath = Get-LauncherDataPath $packageDir 'launcher.lock'
         }
     }
@@ -101,6 +79,11 @@ try {
     $baseUrl = if ($settings['BASE_URL']) { Normalize-BaseUrl ([string]$settings['BASE_URL']) } else { '' }
     $shimPort = if ($settings['SHIM_PORT']) { [int]$settings['SHIM_PORT'] } else { 8102 }
     $shimBase = 'http://127.0.0.1:' + $shimPort + '/v1'
+    $recoverySession = Register-LauncherRecovery $packageDir $configPath
+    if ($Mode -eq 'apionly' -or $authMode -eq 'gateway') {
+        & $nodePath (Join-Path $packageDir 'src\desktop-state.mjs') 'begin' (Get-CodexHome) $packageDir
+        if ($LASTEXITCODE -ne 0) { throw '桌面项目配置兼容准备失败。' }
+    }
     Apply-LauncherConfig $packageDir $configPath $authMode $shimBase $baseUrl $Mode
     $repair = & $nodePath (Join-Path $packageDir 'src\repair-thread-providers.mjs') 'begin' (Get-CodexHome) $packageDir 2> (Join-Path $packageDir 'data\logs\provider-repair-stderr.log')
     if ($LASTEXITCODE -ne 0) { throw '对话兼容准备未完成，请查看 data\logs\provider-repair-stderr.log。' }
@@ -109,10 +92,33 @@ try {
         $notice = if ($authMode -eq 'mixed') { '网关目前不可用。有效缓存中的网关模型请求可能失败；已登录的官方模型仍使用官方通道。' } else { '网关目前不可用。此入口只使用网关模型，请检查网关连接。' }
         Show-Message $notice
     }
-    & (Join-Path $env:WINDIR 'explorer.exe') "shell:AppsFolder\$appId"
+    if ($Mode -ne 'official') {
+        $quotaState = Join-Path $packageDir 'data\state\native-quota.json'
+        if (Test-Path -LiteralPath $quotaState) { Remove-Item -LiteralPath $quotaState }
+        $nativeAlias = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\chatgpt-desktop.exe'
+        if (-not (Test-Path -LiteralPath $nativeAlias)) { $nativeAlias = Join-Path $package.InstallLocation 'app\ChatGPT.exe' }
+        $quotaScript = Join-Path $packageDir 'src\native-quota.mjs'
+        $arguments = @($quotaScript,$nativeAlias,(Join-Path $package.InstallLocation 'app\resources\app.asar'),$packageDir,(Get-CodexHome)) | ForEach-Object { '"' + $_ + '"' }
+        $quotaHelper = Start-Process -FilePath $nodePath -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardError (Join-Path $packageDir 'data\logs\quota-stderr.log')
+        Add-RouterHelper $packageDir $quotaHelper $quotaScript
+        $quotaReady = $false
+        for ($n=0; $n -lt 400; $n++) {
+            $quotaHelper.Refresh()
+            if ($quotaHelper.HasExited) { throw ('额度兼容准备失败：' + [IO.File]::ReadAllText((Join-Path $packageDir 'data\logs\quota-stderr.log'))) }
+            if (Test-Path -LiteralPath $quotaState) {
+                $quota = [IO.File]::ReadAllText($quotaState) | ConvertFrom-Json
+                if ($quota.ready) { $quotaReady = $true; break }
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        if (-not $quotaReady) { throw '额度兼容准备未完成，请查看 data\logs\quota-stderr.log。' }
+    } else {
+        & (Join-Path $env:WINDIR 'explorer.exe') "shell:AppsFolder\$appId"
+    }
     $main=$null
     for($n=0;$n -lt 100;$n++){ $apps=@(Get-MainApp);if($apps.Count){$main=$apps[0];break};Start-Sleep -Milliseconds 200 }
     if(-not $main){throw '客户端未能启动，已恢复原配置。'}
+    Set-LauncherRecoveryClient $packageDir $recoverySession $main
     $apiLaunched=$true
     $lock.Dispose();$lock=$null
     do {
@@ -129,13 +135,18 @@ try {
         if($currentState.active -and $currentState.startedAt -eq $sessionStartedAt -and @(Get-MainApp).Count -eq 0){
             Restore-LauncherConfig $packageDir $configPath
             Stop-Helpers
+            Unregister-LauncherRecovery $packageDir $recoverySession
         }
     }
 } catch {
     $message=$_.Exception.Message
     if($apiKey){$message=$message.Replace($apiKey,'[redacted]')}
+    if ($apiLaunched) {
+        Add-Content -LiteralPath (Join-Path $packageDir 'data\logs\recovery.log') -Value ([DateTime]::UtcNow.ToString('o') + ' ' + $message)
+        exit 1
+    }
     if(-not $apiLaunched -and @(Get-MainApp).Count -eq 0){
-        try{Restore-LauncherConfig $packageDir $configPath;Stop-Helpers}catch{}
+        try{Restore-LauncherConfig $packageDir $configPath;Stop-Helpers;if($recoverySession){Unregister-LauncherRecovery $packageDir $recoverySession}}catch{}
     }
     Show-Message ('启动 ChatGPT 失败：'+$message)
     exit 1

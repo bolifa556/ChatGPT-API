@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { context, atomic, configure, ensureRouter, stopRouter, restoreConfig, health } from '../macos/provider.mjs';
+import { context, atomic, configure, ensureRouter, stopRouter, applyConfig, restoreConfig, health } from '../macos/provider.mjs';
 import { processIdentity, alive, launcherText } from '../macos/platform.mjs';
 
 assert(['linux', 'darwin'].includes(process.platform), 'Run on a POSIX host (macOS or WSL/Linux).');
@@ -45,9 +45,13 @@ try {
   atomic(path.join(ctx.home, 'models_cache.json'), { models: [{ slug: 'must-not-appear' }] });
   const authBefore = fs.readFileSync(path.join(ctx.home, 'auth.json'), 'utf8');
   await configure(ctx);
+  assert.equal(fs.readFileSync(ctx.config, 'utf8'), baseline);
+  assert(!fs.existsSync(path.join(ctx.data, 'state/config.json')));
+  applyConfig(ctx);
   assert.equal(fs.readFileSync(path.join(ctx.home, 'auth.json'), 'utf8'), authBefore);
   assert.equal(fs.statSync(path.join(ctx.data, '.env')).mode & 0o777, 0o600);
-  assert(fs.readFileSync(ctx.config, 'utf8').includes('requires_openai_auth = true'));
+  assert(fs.readFileSync(ctx.config, 'utf8').includes('requires_openai_auth = false'));
+  assert(fs.readFileSync(ctx.config, 'utf8').includes('cli_auth_credentials_store = "ephemeral"'));
   const initial = JSON.parse(fs.readFileSync(path.join(ctx.data, 'state/router.json')));
   await Promise.all([ensureRouter(ctx), ensureRouter(ctx), ensureRouter(ctx)]);
   assert.equal(JSON.parse(fs.readFileSync(path.join(ctx.data, 'state/router.json'))).pid, initial.pid);

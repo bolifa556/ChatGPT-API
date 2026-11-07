@@ -26,7 +26,7 @@ function Add-RouterHelper([string]$packageDir, $process, [string]$marker) {
     if($state -and $state.version -eq 2){
         foreach($entry in @($state.helpers)){
             $alive=Get-CimInstance Win32_Process -Filter ('ProcessId='+[int]$entry.pid) -ErrorAction SilentlyContinue
-            if($alive -and $alive.ExecutablePath -eq $entry.exe -and $alive.CreationDate.ToUniversalTime().ToString('o') -eq $entry.createdAt -and $alive.ProcessId -ne $p.ProcessId){$items+=$entry}
+            if($alive -and (Test-RecordedProcess $entry) -and $alive.ProcessId -ne $p.ProcessId){$items+=$entry}
         }
     }
     $items+=@{pid=$p.ProcessId;exe=$p.ExecutablePath;createdAt=$p.CreationDate.ToUniversalTime().ToString('o');marker=$marker}
@@ -34,7 +34,16 @@ function Add-RouterHelper([string]$packageDir, $process, [string]$marker) {
 }
 function Get-LauncherRouterSelection([string]$packageDir, [string]$routeMode = '', [string]$entryMode = '') {
     $state = Read-LauncherState $packageDir
-    if (-not $entryMode) { $entryMode = if ($state -and $state.active -and $state.entryMode) { [string]$state.entryMode } else { 'api' } }
+    if (-not $entryMode) {
+        $entryMode = if ($state -and $state.active -and $state.entryMode) { [string]$state.entryMode } else { 'api' }
+        if (-not $state -or -not $state.active) {
+            $routeFile = Get-LauncherDataPath $packageDir 'route-state.json'
+            if (Test-Path -LiteralPath $routeFile) {
+                $route = [IO.File]::ReadAllText($routeFile) | ConvertFrom-Json
+                if ($route.entryMode -eq 'apionly') { $entryMode = 'apionly' }
+            }
+        }
+    }
     if ($entryMode -notin @('official','api','apionly')) { throw 'Unknown launcher entry mode.' }
     if ($entryMode -eq 'apionly') { $routeMode = 'gateway' }
     elseif ($entryMode -eq 'official') { $routeMode = 'mixed' }
@@ -70,7 +79,7 @@ function Ensure-LocalRouter([string]$packageDir, [string]$routeMode = '', [strin
             if($health.service -eq 'chatgpt-api-router' -and $health.sourceId -eq $sourceId -and ($health.buildId -eq $buildId -or (Test-LegacyRouter $packageDir $health)) -and $health.mode -eq $mode -and $healthEntry -eq $entryMode){return $health}
             throw 'The router on this port uses a different version or configuration. Fully exit ChatGPT and reopen chatgpt-api.'
         }
-        $nativeAccount = ($mode -eq 'mixed') -or (Get-SavedChatGPTLogin (Get-CodexHome))
+        $nativeAccount = $mode -eq 'mixed'
         $clientVersion = if ($nativeAccount) { Get-NativeClientVersion } else { '' }
         $logDir=Join-Path $packageDir 'data\logs';[void](New-Item -ItemType Directory -Path $logDir -Force)
         $transport=Get-GatewayTransport $settings['GATEWAY_TRANSPORT']

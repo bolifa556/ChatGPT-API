@@ -20,11 +20,20 @@ export function normalizeBaseUrl(value) {
   if (!/\/v1$/i.test(text)) text += '/v1';
   return text;
 }
-export function atomicPrivate(file, value) {
+export function atomicPrivate(file, value, { durable = false, temporaryPath } = {}) {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2) + '\n';
+  if (fs.existsSync(file) && fs.lstatSync(file).isSymbolicLink()) throw new Error('Refusing to replace a symbolic link: ' + file);
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  const temporary = file + '.' + crypto.randomUUID() + '.tmp';
-  try { fs.writeFileSync(temporary, text, { mode: 0o600 }); fs.renameSync(temporary, file); if (process.platform !== 'win32') fs.chmodSync(file, 0o600); }
+  const temporary = temporaryPath || file + '.' + crypto.randomUUID() + '.tmp';
+  try {
+    fs.writeFileSync(temporary, text, { mode: 0o600 });
+    if (durable) { const fd = fs.openSync(temporary, 'r+'); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); } }
+    fs.renameSync(temporary, file); if (process.platform !== 'win32') fs.chmodSync(file, 0o600);
+    if (durable && process.platform !== 'win32') {
+      const directory = fs.openSync(path.dirname(file), 'r');
+      try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+    }
+  }
   finally { try { fs.unlinkSync(temporary); } catch {} }
 }
 export const settingsRevision = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');

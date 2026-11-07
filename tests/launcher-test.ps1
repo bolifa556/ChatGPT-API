@@ -134,8 +134,9 @@ Apply-LauncherConfig $fixture $config 'mixed' 'http://127.0.0.1:8102/v1' 'https:
 $apiOnlyApplied = [IO.File]::ReadAllText($config)
 Assert ((Get-RootString $apiOnlyApplied 'model_provider') -eq 'chatgpt_api_launcher') 'API-only selected official authentication.'
 Assert ((Get-RootString $apiOnlyApplied 'model') -in @('Example/model','Other/model')) 'API-only retained an official initial model.'
-Assert ((Get-TableText $apiOnlyApplied 'model_providers.chatgpt_api_launcher').Contains('requires_openai_auth = true')) 'API-only discarded an existing ChatGPT identity.'
-Assert (-not (Get-TableText $apiOnlyApplied 'model_providers.chatgpt_api_launcher.auth')) 'Saved ChatGPT identity was replaced by an API-key helper.'
+Assert ((Get-TableText $apiOnlyApplied 'model_providers.chatgpt_api_launcher').Contains('requires_openai_auth = false')) 'API-only borrowed the subscription identity.'
+Assert (Get-TableText $apiOnlyApplied 'model_providers.chatgpt_api_launcher.auth') 'API-only lost its API-key helper.'
+Assert ((Get-RootString $apiOnlyApplied 'cli_auth_credentials_store') -eq 'ephemeral') 'API-only loaded saved file/keychain credentials.'
 $helperSelection = Get-LauncherRouterSelection $fixture
 Assert ($helperSelection.mode -eq 'gateway' -and $helperSelection.entryMode -eq 'apionly') 'API-key helper did not retain the active API-only route.'
 Assert ((Read-LauncherState $fixture).lastApiModel -eq $mixedPreference) 'API-only overwrote the mixed entry model preference.'
@@ -146,6 +147,10 @@ Apply-LauncherConfig $fixture $config 'gateway' 'http://127.0.0.1:8102/v1' 'http
 Assert ((Get-RootString ([IO.File]::ReadAllText($config)) 'model') -eq 'Other/model') 'API-only did not restore its independent model preference.'
 Restore-LauncherConfig $fixture $config
 Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes($auth)) -ceq [Convert]::ToBase64String($authBefore)) 'Entry switching changed saved official credentials.'
+Write-Utf8File (Get-LauncherDataPath $fixture 'route-state.json') '{"entryMode":"apionly","mode":"gateway"}'
+$inactiveSelection = Get-LauncherRouterSelection $fixture
+Assert ($inactiveSelection.entryMode -eq 'apionly' -and $inactiveSelection.mode -eq 'gateway') 'An inactive watcher changed the API-only credential helper route.'
+Remove-Item -LiteralPath (Get-LauncherDataPath $fixture 'route-state.json')
 Write-Utf8File $auth '{"auth_mode":"apikey","tokens":{"access_token":"test"}}'
 Assert (-not (Get-SavedChatGPTLogin $fixture)) 'API key auth is not a ChatGPT login.'
 Write-Utf8File $auth 'invalid-json'
@@ -184,6 +189,11 @@ $null=Initialize-PackageLayout $legacy
 Assert (@(Get-ChildItem -LiteralPath $legacy -Recurse -File).Count -eq $count) 'Migration accumulated files.'
 $me=Get-CimInstance Win32_Process -Filter ('ProcessId='+$PID)
 $record=@{pid=$me.ProcessId;exe=$me.ExecutablePath;createdAt=$me.CreationDate.ToUniversalTime().ToString('o')}
+Assert (Test-RecordedProcess $record) 'A valid recorded process was not recognized.'
+$dateRecord=@{pid=$me.ProcessId;exe=$me.ExecutablePath;createdAt=$me.CreationDate.ToUniversalTime()}
+Assert (Test-RecordedProcess $dateRecord) 'PowerShell 7 JSON date conversion invalidated a live process record.'
+$wrongDate=@{pid=$me.ProcessId;exe=$me.ExecutablePath;createdAt=$me.CreationDate.ToUniversalTime().AddTicks(1)}
+Assert (-not (Test-RecordedProcess $wrongDate)) 'Process identity matching accepted a different start time.'
 Write-Utf8File (Join-Path $legacy 'data\state\layout-migration.json') (@{pending=$true;watcher=$record;router=$null}|ConvertTo-Json -Depth 5)
 Write-Utf8File (Join-Path $legacy 'launcher-state.json') '{"active":true}'
 Assert (-not (Initialize-PackageLayout $legacy)) 'Active legacy watcher must defer migration.'

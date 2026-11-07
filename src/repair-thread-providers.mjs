@@ -115,7 +115,16 @@ async function rewrite(file, temporary, transform) {
     }, output);
     const current = fs.statSync(file);
     if (current.size !== before.size || current.mtimeMs !== before.mtimeMs) throw new Error('A conversation changed while preparing compatibility; close its other client first.');
-    if (changed) { fs.utimesSync(temporary, before.atime, before.mtime); fs.renameSync(temporary, file); }
+    if (changed) {
+      fs.utimesSync(temporary, before.atime, before.mtime);
+      const fd = fs.openSync(temporary, 'r+');
+      try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      fs.renameSync(temporary, file);
+      if (process.platform !== 'win32') {
+        const directory = fs.openSync(path.dirname(file), 'r');
+        try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+      }
+    }
   } finally { output.destroy(); if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
 }
 function validateJournal(state, home) {
@@ -124,24 +133,47 @@ function validateJournal(state, home) {
     if (typeof thread.id !== 'string' || !inside(home, path.resolve(home, thread.relative))) throw new Error('Invalid conversation compatibility path.');
   }
 }
+function recordedProvider(state, id) {
+  const indexed = new Set(state.databases.flatMap(db => db.rows || [])
+    .filter(row => row.id === id && typeof row.model_provider === 'string' && row.model_provider)
+    .map(row => row.model_provider));
+  if (indexed.size) return indexed.size === 1 ? [...indexed][0] : undefined;
+  const providers = new Set(state.threads.filter(thread => thread.id === id).map(thread => thread.originalProvider));
+  return providers.size === 1 ? [...providers][0] : undefined;
+}
+function originalThread(state, file, meta) {
+  const relative = path.relative(state.home, file);
+  const exact = state.threads.find(thread => thread.id === meta.id && thread.relative === relative);
+  if (exact) return exact;
+  const candidates = state.threads.filter(thread => thread.id === meta.id);
+  if (candidates.length <= 1) return candidates[0];
+  // Native continuations can produce another rollout with the same conversation
+  // ID while keeping older rollouts. The pre-launch index owns its routing.
+  const provider = recordedProvider(state, meta.id);
+  if (provider !== undefined) return { id: meta.id, originalProvider: provider, records: [] };
+  const matching = candidates.filter(thread => thread.records.some(record => record.key === meta.key));
+  if (matching.length === 1) return matching[0];
+  const first = fingerprint({ provider: candidates[0].originalProvider, records: candidates[0].records });
+  if (candidates.every(thread => fingerprint({ provider: thread.originalProvider, records: thread.records }) === first)) return candidates[0];
+  const moved = candidates.filter(thread => !fs.existsSync(path.resolve(state.home, thread.relative)));
+  if (moved.length === 1) return moved[0];
+  // An unindexed extra copy with all tracked originals still present was not
+  // changed by this adapter. Keep its native routing metadata as created.
+  if (!moved.length) return null;
+  throw new Error('An archived conversation has ambiguous duplicate records; its recovery journal was retained.');
+}
 export async function restoreThreadProviders({ home, root }) {
   const journal = journalPath(root);
   if (!fs.existsSync(journal)) return { restored: 0 };
   home = canonicalHome(home);
   const state = JSON.parse(fs.readFileSync(journal, 'utf8')); validateJournal(state, home);
-  const paths = new Map(state.threads.map(thread => [thread.relative, thread]));
-  const byId = new Map();
-  for (const thread of state.threads) { const entries = byId.get(thread.id) || []; entries.push(thread); byId.set(thread.id, entries); }
   // Paths can move when a conversation is archived. Match the native session ID.
   for (const file of rolloutFiles(home)) {
     let thread;
     for await (const bytes of lines(file)) {
       const meta = metadata(bytes);
       if (!meta?.id) continue;
-      const candidates = byId.get(meta.id) || [];
-      thread = paths.get(path.relative(home, file));
-      if (thread?.id !== meta?.id) thread = candidates.length === 1 ? candidates[0] : null;
-      if (!thread && candidates.length > 1) throw new Error('An archived conversation has ambiguous duplicate records; its recovery journal was retained.');
+      thread = originalThread(state, file, meta);
       break;
     }
     if (!thread) continue;
@@ -164,7 +196,10 @@ export async function restoreThreadProviders({ home, root }) {
       db.exec('BEGIN IMMEDIATE');
       const original = new Map((state.databases.find(item => item.file === file)?.rows || []).map(row => [row.id, row.model_provider]));
       const update = db.prepare('UPDATE threads SET model_provider = ? WHERE id = ? AND model_provider = ?');
-      for (const thread of state.threads) update.run(original.has(thread.id) ? original.get(thread.id) : thread.originalProvider, thread.id, state.provider);
+      for (const id of new Set(state.threads.map(thread => thread.id))) {
+        const provider = original.has(id) ? original.get(id) : recordedProvider(state, id);
+        if (provider !== undefined) update.run(provider, id, state.provider);
+      }
       db.exec('COMMIT');
     } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
     finally { db.close(); }
@@ -211,7 +246,7 @@ export async function repairThreadProviders({ home, root, provider = 'chatgpt_ap
   const result = { dryRun, provider, candidates: threads.map(({ id, originalProvider }) => ({ threadId: id, previousProvider: originalProvider })), repaired: [], failed: [] };
   if (dryRun || !threads.length) return result;
   const state = { version: 1, home, provider, threads, databases: dbs };
-  atomicPrivate(journal, state);
+  atomicPrivate(journal, state, { durable: true });
   try {
     for (const thread of threads) {
       const file = path.resolve(home, thread.relative);
