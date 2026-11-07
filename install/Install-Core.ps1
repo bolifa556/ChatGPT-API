@@ -89,9 +89,15 @@ namespace ChatGPTApi {
 function Set-DesktopEntries([string]$packageDir, [string]$desktopDir) {
     [void][IO.Directory]::CreateDirectory($desktopDir)
     Initialize-UnicodeShortcuts
-    foreach ($name in @('ChatGPT','chatgpt-api','chatgpt-apionly')) {
+    foreach ($name in @('chatgpt-official','chatgpt-api','chatgpt-apionly')) {
         $arguments = '//B //Nologo "' + (Join-Path $packageDir ($name + '.vbs')) + '"'
-        $description = if ($name -eq 'ChatGPT') { '官方模型与原生登录，保留混合历史兼容' } elseif ($name -eq 'chatgpt-apionly') { '仅使用自定义 API 网关模型，不切换官方登录' } else { '根据官方登录状态使用官方与网关模型' }
+        $description = if ($name -eq 'chatgpt-official') { '官方模型与原生登录，保留混合历史兼容' } elseif ($name -eq 'chatgpt-apionly') { '仅使用自定义 API 网关模型，不切换官方登录' } else { '根据官方登录状态使用官方与网关模型' }
         [ChatGPTApi.NativeShortcuts]::Save((Join-Path $desktopDir ($name + '.lnk')), (Join-Path $env:WINDIR 'System32\wscript.exe'), $arguments, $packageDir, (Join-Path $packageDir 'assets\ChatGPT.ico'), $description)
+    }
+    $legacy = Join-Path $desktopDir 'ChatGPT.lnk'
+    if (Test-Path -LiteralPath $legacy) {
+        $shell = New-Object -ComObject WScript.Shell
+        $link = $shell.CreateShortcut($legacy)
+        if ($link.TargetPath -like '*\wscript.exe' -and $link.Arguments -match '(?i)\\ChatGPT\.vbs"\s*$') { Remove-Item -LiteralPath $legacy }
     }
 }

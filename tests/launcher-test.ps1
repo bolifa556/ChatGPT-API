@@ -169,11 +169,19 @@ Set-DesktopEntries $root $fakeDesktop
 Set-DesktopEntries $root $fakeDesktop
 Assert (@(Get-ChildItem -LiteralPath $fakeDesktop -Filter *.lnk).Count -eq 3) 'Three-entry shortcut updates created duplicates.'
 $shell=New-Object -ComObject WScript.Shell
-foreach($name in @('ChatGPT','chatgpt-api','chatgpt-apionly')) {
+foreach($name in @('chatgpt-official','chatgpt-api','chatgpt-apionly')) {
     $link=$shell.CreateShortcut((Join-Path $fakeDesktop ($name+'.lnk')))
     Assert ($link.Arguments.Contains((Join-Path $root ($name+'.vbs')))) 'Shortcut is not targeting the root entry.'
     Assert (-not $link.TargetPath.Contains('WindowsApps')) 'Shortcut is tied to a client version.'
 }
+$legacyShortcut = Join-Path $fakeDesktop 'ChatGPT.lnk'
+[ChatGPTApi.NativeShortcuts]::Save($legacyShortcut,(Join-Path $env:WINDIR 'System32\wscript.exe'),('//B //Nologo "' + (Join-Path $root 'ChatGPT.vbs') + '"'),$root,(Join-Path $root 'assets\ChatGPT.ico'),'legacy fixture')
+Set-DesktopEntries $root $fakeDesktop
+Assert (-not (Test-Path -LiteralPath $legacyShortcut)) 'The renamed launcher left its legacy desktop shortcut.'
+[ChatGPTApi.NativeShortcuts]::Save($legacyShortcut,(Join-Path $env:WINDIR 'explorer.exe'),'shell:AppsFolder\fixture',$root,(Join-Path $root 'assets\ChatGPT.ico'),'native fixture')
+Set-DesktopEntries $root $fakeDesktop
+Assert (Test-Path -LiteralPath $legacyShortcut) 'Shortcut migration removed a native entry that did not belong to this launcher.'
+Remove-Item -LiteralPath $legacyShortcut
 
 $legacy=Join-Path $root 'data\testing\migration'
 $null=Initialize-PackageLayout $legacy

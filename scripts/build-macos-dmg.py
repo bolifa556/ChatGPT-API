@@ -14,7 +14,7 @@ import tarfile
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-ENTRIES = [('official', 'chatgpt-official', 'ChatGPT 官方'), ('api', 'chatgpt-api', 'chatgpt-api'),
+ENTRIES = [('official', 'chatgpt-official', 'chatgpt-official'), ('api', 'chatgpt-api', 'chatgpt-api'),
            ('apionly', 'chatgpt-apionly', 'chatgpt-apionly'), ('console', 'chatgpt-console', 'ChatGPT API 控制台')]
 PRIVACY_USAGE = {
     'NSMicrophoneUsageDescription': '仅在你使用 Dot 通话或语音输入时，通过此入口运行的 ChatGPT 才会使用麦克风。',

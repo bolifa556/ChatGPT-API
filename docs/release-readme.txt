@@ -4,10 +4,10 @@ ChatGPT API 3.2.1 — Windows x64
 1. 安装官方 ChatGPT/Codex 桌面客户端。
 2. 从托盘完全退出客户端，完整解压 ZIP，运行“安装.cmd”。
 3. 选择独立的程序安装目录，填写 API 基础 URL 和 Key。
-4. 从桌面 ChatGPT、chatgpt-api、chatgpt-apionly 启动。
+4. 从桌面 chatgpt-official、chatgpt-api、chatgpt-apionly 启动。
 
 入口
-ChatGPT：官方登录与官方模型，保留混合历史兼容通道。
+chatgpt-official：官方登录与官方模型，保留混合历史兼容通道。
 chatgpt-api：有官方登录时显示官方与 API 模型，未登录时只用 API。
 chatgpt-apionly：始终使用 API，模型与图片请求不回退官方。
 切换入口前完全退出客户端；原生登录与聊天记录共用并保留。
@@ -33,7 +33,7 @@ API 默认全局上限 500,000 tokens，客户端通常预留 5%，有效显示�
 支持 Responses/Chat、流式响应、response.interrupt 与 Fast 档位传递。
 模型生成、压缩、生图不设置适配层响应等待上限；不增加网络重试或修改代理/TUN。
 模型、原生客户端或工具缺少的能力不会补齐。要求官方身份的浏览器/在线工具不能用 API Key 替代账号。
-混合模式官方额度用尽后，输入框可能在发送前拦截；即时切 API 模型不保证解除，此限制尚未修复。
+混合模式按当前模型区分额度。官方额度用尽后，选择自定义 API 模型即可在原对话继续发送，使用该来源自身的额度。
 官方/API 切换后的压缩方式需退出重开同步；不可解密的官方压缩块不能保证跨厂商续聊。
 
 更新与数据

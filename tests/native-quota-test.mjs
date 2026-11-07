@@ -9,6 +9,9 @@ assert.equal(scopeNativeQuota(source, key).count, 1);
 assert.equal(scopeNativeQuota('const ordinary="local"===w&&E||(0,tk.is)(T,g);', key).count, 0);
 const fastSource = 'const p=host,m=(0,i.tn)(p),h=m?.authMethod==="chatgpt"||m?.authMethod==="personalAccessToken"||m?.authMethod==="amazonBedrock";return{serviceTierAccess:h};';
 assert.equal(scopeNativeQuota(fastSource, key).fastCount, 1);
+const submitSource = 'var C=n("eLmE"),P=n("a6kU");let nF=host,n6={settings:{model}},nK=(0,i._U)(C.F9,nF),of=(0,i.Ul)("local"===nF&&P.U);let oU=otherBlock||nK||of;return{activeCollaborationMode:n6,submitDisabled:oU};';
+const adaptedSubmit = scopeNativeQuota(submitSource, key);
+assert.equal(adaptedSubmit.submitCount, 1);
 const url = 'data:text/javascript,' + encodeURIComponent(source);
 const bootstrap = quotaBootstrap([{ url, source }], gatewayQuotaModels(catalog), key, key + '_notify');
 try {
@@ -23,6 +26,16 @@ try {
   assert.equal(fast('local', { tn: () => null }).serviceTierAccess, true);
   assert.equal(fast('remote', { tn: () => null }).serviceTierAccess, false);
   assert.equal(fast('remote', { tn: () => ({ authMethod: 'chatgpt' }) }).serviceTierAccess, true);
+  for (const host of ['local', 'remote']) for (const model of ['Gateway/model', 'official', 'unknown', null]) {
+    for (const hard of [false, true]) for (const ordinary of [false, true]) for (const otherBlock of [false, true]) {
+      const invoke = source => new Function('host', 'model', 'otherBlock', 'n', 'i', source)(host, model, otherBlock,
+        name => name === 'eLmE' ? { F9: hard } : { U: ordinary }, { _U: value => value, Ul: value => value });
+      const result = invoke(adaptedSubmit.text);
+      const gateway = host === 'local' && model === 'Gateway/model';
+      assert.equal(result.submitDisabled, otherBlock || !gateway && (hard || host === 'local' && ordinary), JSON.stringify({host,model,hard,ordinary,otherBlock}));
+      if (!gateway) assert.deepEqual(result, invoke(submitSource));
+    }
+  }
   for (const [host, model, blocked] of [['local', 'Gateway/model', false], ['local', 'official', true], ['remote', 'Gateway/model', true], ['local', 'unknown', true]]) {
     const output = {};
     native.__webpack_modules__.gate(output, {}, { host, model, blocked: true, limits: { blocked: true } });
@@ -34,4 +47,4 @@ try {
   native.__webpack_modules__.gate(output, {}, { host: 'local', model: 'New/model', blocked: true, limits: { blocked: true } });
   assert.equal(output.result.sendBlocked, false);
 } finally { delete globalThis[key]; }
-console.log(JSON.stringify({ passed: true, checks: ['Exhausted subscription does not block local API models', 'Official models, remote hosts and unknown models keep native quota decisions', 'Catalog changes update the in-memory model scope'] }));
+console.log(JSON.stringify({ passed: true, checks: ['Native submit gate scopes both exhausted-subscription flags to the selected model', 'Official models, remote hosts, unknown models and other native blockers retain their original decisions', 'Model switching updates submit eligibility and catalog changes update the in-memory scope'] }));

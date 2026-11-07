@@ -12,6 +12,32 @@ import WebSocket from 'ws';
 import { atomicPrivate } from './settings.mjs';
 
 const quotaGuard = /([A-Za-z_$][\w$]*)="local"===([A-Za-z_$][\w$]*)&&([A-Za-z_$][\w$]*)\|\|\(0,([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)/g;
+function scopeComposerSubmission(source, key) {
+  const identifier = '[A-Za-z_$][\\w$]*';
+  const hardReads = new RegExp('\\b(' + identifier + ')=\\(0,' + identifier + '\\._U\\)\\((' + identifier + ')\\.F9,(' + identifier + ')\\)', 'g');
+  const props = /activeCollaborationMode:([A-Za-z_$][\w$]*),[^{};]{0,1200}?\bsubmitDisabled:([A-Za-z_$][\w$]*)/g;
+  let text = source, count = 0;
+  for (const hard of source.matchAll(hardReads)) {
+    const [, blocked, module, host] = hard;
+    if (!source.includes(module + '=n("eLmE")')) continue;
+    const component = [...source.matchAll(props)].find(match => match.index > hard.index);
+    if (!component || component.index - hard.index > 40000) continue;
+    const [, mode, disabled] = component;
+    const between = source.slice(hard.index, component.index);
+    const ordinary = between.match(new RegExp('\\b(' + identifier + ')=\\(0,' + identifier + '\\.Ul\\)\\("local"===' + host + '&&(' + identifier + ')\\.U\\)'));
+    if (!ordinary || !source.includes(ordinary[2] + '=n("a6kU")')) continue;
+    const declaration = between.match(new RegExp('\\b' + disabled + '=([^;]+);'));
+    const tail = '||' + blocked + '||' + ordinary[1];
+    if (!declaration || !declaration[1].endsWith(tail)) continue;
+    // Scope only the two subscription-quota operands. Permission checks,
+    // loading, safety decisions and every other native submit condition stay
+    // in the original expression, including when switching models mid-chat.
+    const gateway = '"local"===' + host + '&&globalThis[' + JSON.stringify(key) + ']?.models?.has(' + mode + '?.settings?.model)';
+    const adapted = declaration[0].slice(0, -tail.length - 1) + '||((' + gateway + ')?false:(' + blocked + '||' + ordinary[1] + '));';
+    text = text.replace(declaration[0], adapted); count++;
+  }
+  return { text, count };
+}
 export function scopeNativeQuota(source, key) {
   let quotaCount = 0, fastCount = 0;
   let text = source.replace(quotaGuard, (match, output, host, _blocked, _module, _method, _limits, model, offset) => {
@@ -29,7 +55,8 @@ export function scopeNativeQuota(source, key) {
     fastCount++;
     return output + '=(' + match.slice(output.length + 1) + '||("local"===' + host + '&&globalThis[' + JSON.stringify(key) + ']?.models?.size>0))';
   });
-  return { text, count: quotaCount + fastCount, quotaCount, fastCount };
+  const submission = scopeComposerSubmission(text, key);
+  return { text: submission.text, count: quotaCount + fastCount + submission.count, quotaCount, fastCount, submitCount: submission.count };
 }
 export function nativeQuotaAssets(archive) {
   const fd = fs.openSync(archive, 'r');
@@ -46,9 +73,10 @@ export function nativeQuotaAssets(archive) {
         if (entry.unpacked || !file.startsWith('webview/assets/') || !file.endsWith('.js')) continue;
         const buffer = Buffer.alloc(Number(entry.size)); fs.readSync(fd, buffer, 0, buffer.length, base + Number(entry.offset));
         const source = buffer.toString();
-        if (!scopeNativeQuota(source, 'quota_probe').count) continue;
+        const adapted = scopeNativeQuota(source, 'quota_probe');
+        if (!adapted.count) continue;
         if (!source.includes('export const __webpack_modules__=')) throw new Error('Unsupported native quota module format.');
-        assets.push({ url: 'app://-/' + file.slice('webview/'.length), source });
+        assets.push({ url: 'app://-/' + file.slice('webview/'.length), source, submitCount: adapted.submitCount });
       }
     }
     scan(tree);
@@ -119,6 +147,7 @@ export async function startQuotaCompatibleClient({ executable, archive, root, ho
   const assets = nativeQuotaAssets(archive), key = '__chatgpt_api_quota_' + crypto.randomBytes(8).toString('hex'), binding = key + '_notify';
   const cache = path.join(root, 'data/cache/catalog-state.json');
   const models = () => gatewayQuotaModels(JSON.parse(fs.readFileSync(cache, 'utf8')));
+  if (models().length && !assets.some(asset => asset.submitCount)) throw new Error('当前客户端的 API 发送兼容检查未通过，请更新适配层。');
   let child, socket;
   if (launch) {
     // LaunchServices preserves macOS permission attribution. Its application

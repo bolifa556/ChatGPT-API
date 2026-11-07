@@ -51,7 +51,7 @@ function Complete-Installation([bool]$skipApi) {
         $keyBox.Clear()
         foreach ($control in @($intro,$urlLabel,$urlBox,$keyLabel,$keyBox,$showKey,$skip)) { $control.Visible = $false }
         [void](New-InstallerLabel $form '安装完成' 26 95 568 28)
-        [void](New-InstallerLabel $form '桌面入口：ChatGPT、chatgpt-api、chatgpt-apionly' 26 139 568 28)
+        [void](New-InstallerLabel $form '桌面入口：chatgpt-official、chatgpt-api、chatgpt-apionly' 26 139 568 28)
         [void](New-InstallerLabel $form '调整 API 和模型：打开安装目录中的“控制台”。' 26 181 568 28 -Muted)
         $message = if ($skipApi) { '已跳过 API 配置，原有设置保持不变。' } else { '设置已保存。启动 API 入口时会获取模型目录。' }
         Set-InstallerStatus $status $message

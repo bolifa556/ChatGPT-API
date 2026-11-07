@@ -32,7 +32,7 @@ function Copy-ProgramFile([string]$relative) {
 try {
     # Explicit application allowlist: never copy the repository or data wholesale.
     foreach ($file in @(
-        '安装.cmd','控制台.vbs','ChatGPT.vbs','chatgpt-api.vbs','chatgpt-apionly.vbs','Launch-ChatGPT.ps1','Read-ApiKey.ps1',
+        '安装.cmd','控制台.vbs','chatgpt-official.vbs','chatgpt-api.vbs','chatgpt-apionly.vbs','Launch-ChatGPT.ps1','Read-ApiKey.ps1',
         'package.json','package-lock.json','runtime/node.exe',
         'assets/ChatGPT.ico','assets/model-template.json','assets/reasoning-levels.json','assets/model-contexts.json','assets/console/index.html','assets/console/console.css','assets/console/console.js','assets/console/icon.svg','assets/runtime.json',
         'install/Install-ChatGPT.ps1','install/Install-Core.ps1','install/Installer-UI.ps1','install/Bootstrap-Runtime.ps1',

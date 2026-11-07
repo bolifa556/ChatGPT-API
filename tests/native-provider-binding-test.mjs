@@ -47,6 +47,12 @@ const server = http.createServer(async (req, res) => {
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify(req.url.startsWith('/backend-api') ? { models: [official] } : { data: gatewayModels.map(id => ({ id })) })); return;
   }
+  if (/\/(?:wham\/usage|api\/codex\/usage)(?:\?|$)/.test(req.url)) {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ plan_type: 'plus', rate_limit: { allowed: false, limit_reached: true,
+      primary_window: { used_percent: 100, limit_window_seconds: 18000, reset_after_seconds: 3600, reset_at: 2000000000 } } }));
+    return;
+  }
   // Account/configuration lookups are not inference requests. Keep them on the
   // isolated server without returning a fabricated model response for them.
   if (!/\/responses(?:\/compact)?(?:\?|$)/.test(req.url)) { res.writeHead(404, { 'content-type': 'application/json' }); res.end('{}'); return; }
@@ -89,7 +95,10 @@ async function startClient() {
     assert.equal(account.account, null);
     // The native credential store is retained. An existing subscription can
     // still have native usage metadata even though this provider has no account.
-    await assert.rejects(rpc('account/rateLimits/read'), /account authentication required|failed to fetch codex rate limits/);
+    if (fs.existsSync(path.join(home, 'auth.json'))) {
+      const limits = await rpc('account/rateLimits/read');
+      assert.equal(limits.rateLimits.primary.usedPercent, 100);
+    } else await assert.rejects(rpc('account/rateLimits/read'), /account authentication required/);
   }
   menus.push({ provider: config.model_provider, capabilities, identity, models: menu.data.map(model => ({ model: model.model, serviceTiers: model.serviceTiers, hidden: model.hidden })) });
   console.log(JSON.stringify({ provider: config.model_provider, menu: menus.at(-1).models }));
@@ -182,9 +191,12 @@ try {
     tokens: { id_token: fixtureIdToken, access_token: 'inert-native', refresh_token: '', account_id: 'fixture-account' } }));
   await entry('api', 'mixed');
   assert.equal(menus.at(-1).provider, 'chatgpt_api_launcher'); assert.equal(menus.at(-1).models.length, 3);
+  const exhausted = await rpc('account/rateLimits/read');
+  assert.equal(exhausted.rateLimits.primary.usedPercent, 100);
   const resumed = await rpc('thread/resume', { threadId, excludeTurns: true }); assert.equal(resumed.thread.id, threadId); assert.equal(resumed.modelProvider, 'chatgpt_api_launcher');
   const first = await turn(threadId, official.slug, 'OFFICIAL_CONTEXT', true); assert(JSON.stringify(first.body).includes('ORIGINAL_API_CONTEXT'));
   const next = await turn(threadId, gatewayModels[1], 'CUSTOM_CONTEXT'); assert(JSON.stringify(next.body).includes('ORIGINAL_API_CONTEXT')); assert(JSON.stringify(next.body).includes('OFFICIAL_CONTEXT'));
+  checks.push('An exhausted subscription reported by native account/rateLimits does not prevent gateway turns in the same mixed-provider conversation');
   await turn(threadId, official.slug, 'OFFICIAL_RETURN_CONTEXT', true);
   checks.push('API-only chat resumes in signed-in mixed entry and switches official → non-GPT → official with original context');
   await entry('apionly', 'gateway');

@@ -90,7 +90,7 @@ try {
     $fakeDesktop = Join-Path $fixture 'desktop'
     Set-DesktopEntries $installed $fakeDesktop
     $shell = New-Object -ComObject WScript.Shell
-    foreach ($entry in @('ChatGPT','chatgpt-api','chatgpt-apionly')) {
+    foreach ($entry in @('chatgpt-official','chatgpt-api','chatgpt-apionly')) {
         $shortcutFile = Join-Path $fakeDesktop ($entry + '.lnk')
         $storedArguments = Get-ShortcutStoredArguments $shortcutFile
         $expectedEntry = Join-Path $installed ($entry + '.vbs')

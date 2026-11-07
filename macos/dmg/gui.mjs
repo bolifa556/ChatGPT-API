@@ -157,7 +157,7 @@ export async function prepareInstallation(releaseArg, destinationArg) {
   fs.chmodSync(path.join(destination, '控制台.command'), 0o755);
   return { ctx, provider, updated: true };
 }
-export const entryTitles = { official: 'ChatGPT 官方', api: 'chatgpt-api', apionly: 'chatgpt-apionly', console: 'ChatGPT API 控制台' };
+export const entryTitles = { official: 'chatgpt-official', api: 'chatgpt-api', apionly: 'chatgpt-apionly', console: 'ChatGPT API 控制台' };
 export function entryArguments(args) {
   const index = args.indexOf('--entry');
   const entryMode = index < 0 ? 'apionly' : args[index + 1];
