@@ -113,7 +113,7 @@ async function watch(ctx, platform) {
     }
   } finally { if (read(file)?.owner?.pid === process.pid) fs.unlinkSync(file); }
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
   const [platform, root, home] = process.argv.slice(2);
   if (!['linux', 'macos'].includes(platform) || !path.isAbsolute(root || '') || !path.isAbsolute(home || '')) throw new Error('Invalid internal recovery context.');
   const ctx = { root, home, data: path.join(root, 'data'), config: path.join(home, 'config.toml'), node: process.execPath };

@@ -59,11 +59,12 @@ try {
   assert.deepEqual(new Set(menu().map(model => model.slug)), new Set(models));
   assert.equal(fs.readFileSync(authFile, 'utf8'), originalAuth);
   const config = fs.readFileSync(configFile, 'utf8');
-  assert(config.includes('requires_openai_auth = false')); assert(config.includes('model_provider = "chatgpt_api_launcher"'));
+  assert.equal(config, baseline);
+  assert(!fs.existsSync(path.join(installed, 'data/state/config.json')));
   assert(config.includes('localeOverride = "zh-CN"')); assert(config.includes('[model_providers.unrelated]'));
   assert(!config.includes('powershell'));
-  // Native image requests share the local bridge, even in API-only mode.
-  assert(config.includes('openai_base_url = "http://127.0.0.1:' + port + '/v1"'));
+  // Native provider/image routing is applied only during a client launch.
+  assert(!config.includes('openai_base_url'));
   const route = await (await fetch('http://127.0.0.1:' + port + '/healthz')).json();
   assert.equal(route.entryMode, 'apionly'); assert.equal(route.mode, 'gateway'); assert.equal(route.officialModels, 0);
   assert.equal(fs.statSync(path.join(installed, 'data/.env')).mode & 0o777, 0o600);
@@ -135,7 +136,7 @@ try {
   await cli('restore');
   const restored = fs.readFileSync(configFile, 'utf8');
   assert(!restored.includes('model_catalog_json')); assert(!restored.includes('[model_providers.chatgpt_api_launcher]'));
-  assert(restored.includes('model = "old-official"')); assert(restored.includes('localeOverride = "en-US"')); assert(restored.includes('[model_providers.unrelated]'));
+  assert(restored.includes('model = "Vendor/model"')); assert(restored.includes('localeOverride = "en-US"')); assert(restored.includes('[model_providers.unrelated]'));
   checks.push('Updates preserve settings and user files; restore returns managed keys while retaining later preference edits');
 
 
