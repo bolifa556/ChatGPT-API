@@ -19,6 +19,47 @@ $foreign = 'model_provider = "chatgpt_api_launcher"' + "`n" + 'openai_base_url =
 Write-Utf8File $config $foreign
 Repair-LegacyLauncherConfig $fixture $config
 Assert ([IO.File]::ReadAllText($config) -ceq $foreign) 'A matching port/provider was mistaken for configuration owned by this installation.'
+# 3.2.0 wrote these definitions before recording the original configuration,
+# so both its normal exit and its crash journal retain the unused helpers.
+$legacyBaseline = Set-LauncherProvider $baseline 'chatgpt_api_launcher' 'http://127.0.0.1:8102/v1' $fixture $false
+$legacyBaseline = Set-LauncherMixedProvider $legacyBaseline 'http://127.0.0.1:8102/v1' $fixture $false
+foreach ($scenario in @('normal-exit','crash','crash-with-preference-change')) {
+    Write-Utf8File $config $legacyBaseline
+    Apply-LauncherConfig $fixture $config 'gateway' 'http://127.0.0.1:8102/v1' '' 'apionly'
+    $legacyState = Read-LauncherState $fixture
+    $legacyState.PSObject.Properties.Remove('originalExisted')
+    $expected = $legacyBaseline
+    if ($scenario -eq 'normal-exit') {
+        $legacyState.active = $false; $legacyState.original = $null; $legacyState.applied = $null
+        Write-Utf8File $config $legacyBaseline
+    } elseif ($scenario -eq 'crash-with-preference-change') {
+        Write-Utf8File $config ([IO.File]::ReadAllText($config).Replace('zh-CN','en-US'))
+        $expected = $legacyBaseline.Replace('zh-CN','en-US')
+    }
+    Write-Utf8File (Get-LauncherDataPath $fixture 'launcher-state.json') ($legacyState | ConvertTo-Json -Depth 8)
+    Restore-LauncherConfig $fixture $config
+    Restore-LauncherConfig $fixture $config
+    Assert ([IO.File]::ReadAllText($config) -ceq $expected) ('3.2.0 upgrade did not retain the restored settings after ' + $scenario)
+    Assert (-not (Read-LauncherState $fixture).active) 'The old launch journal remained active after recovery.'
+    $checks += '3.2.0 upgrade after ' + $scenario
+}
+$selectedOfficial = Set-RootString $legacyBaseline 'model_provider' 'openai'
+Write-Utf8File $config $selectedOfficial
+Repair-LegacyLauncherConfig $fixture $config
+Assert ([IO.File]::ReadAllText($config) -ceq $selectedOfficial) 'Unused API definitions blocked an explicitly selected native provider.'
+foreach ($activeOverride in @(
+    (Set-RootString $legacyBaseline 'model_provider' 'chatgpt_api_launcher'),
+    (Set-RootString $legacyBaseline 'model_catalog_json' (Join-Path $fixture 'data\cache\models-smr.json')),
+    (Set-RootString $selectedOfficial 'openai_base_url' 'http://127.0.0.1:8102/v1')
+)) {
+    Write-Utf8File $config $activeOverride
+    $blocked = $false
+    try { Repair-LegacyLauncherConfig $fixture $config }
+    catch { $blocked = $_.Exception.Message -eq '旧版 API 配置缺少原设置记录，已保留现场。' }
+    Assert $blocked 'An active legacy override without its original record was silently discarded.'
+    Assert ([IO.File]::ReadAllText($config) -ceq $activeOverride) 'Missing legacy records caused an unrecorded configuration change.'
+}
+$checks += 'Unused provider definitions are preserved; active owned roots still require their legacy recovery record'
 foreach ($scenario in @('normal','crash','corrupt-config','new-boot')) {
     Write-Utf8File $config $baseline
     $session = Register-LauncherRecovery $fixture $config (Join-Path $fixture 'startup')

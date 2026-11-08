@@ -32,11 +32,18 @@ function Repair-LegacyLauncherConfig([string]$packageDir, [string]$configPath) {
     $base = Get-RootString $text 'openai_base_url'
     $knownCatalog = $catalog -and ($catalog -eq (Join-Path $packageDir 'models-smr.json') -or $catalog -eq (Join-Path $packageDir 'data\cache\models-smr.json'))
     $reader = Quote-TomlString (Join-Path $packageDir 'Read-ApiKey.ps1')
-    $ownsAuth = @('chatgpt_api_launcher','chatgpt_api_mixed','smr') | Where-Object {
+    $ownedProviders = @(@('chatgpt_api_launcher','chatgpt_api_mixed','smr') | Where-Object {
         $authTable = Get-TableText $text ('model_providers.' + $_ + '.auth')
         $authTable -and $authTable.Contains($reader)
-    }
-    if (-not $knownCatalog -and -not $ownsAuth) { return }
+    })
+    $selectedProvider = Get-RootString $text 'model_provider'
+    $ownedBase = $base -and @($ownedProviders | Where-Object {
+        $body = Get-TableText $text ('model_providers.' + $_)
+        $body -and $body.Contains('base_url = ' + (Quote-TomlString $base))
+    }).Count -gt 0
+    # 3.2.0 retained provider definitions after a normal restore. Only active
+    # root settings establish a legacy override that needs its old backup.
+    if (-not $knownCatalog -and $selectedProvider -notin $ownedProviders -and -not $ownedBase) { return }
     $record = Get-LauncherDataPath $packageDir 'official-settings.json'
     if (-not (Test-Path -LiteralPath $record)) { throw '旧版 API 配置缺少原设置记录，已保留现场。' }
     $saved = [IO.File]::ReadAllText($record) | ConvertFrom-Json
