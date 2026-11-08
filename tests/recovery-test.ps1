@@ -60,6 +60,85 @@ foreach ($activeOverride in @(
     Assert ([IO.File]::ReadAllText($config) -ceq $activeOverride) 'Missing legacy records caused an unrecorded configuration change.'
 }
 $checks += 'Unused provider definitions are preserved; active owned roots still require their legacy recovery record'
+$startup = Join-Path $fixture 'startup'
+$runKeyPath = 'Software\ChatGPT-API-Recovery-Test-' + [Guid]::NewGuid().ToString('N')
+$shortcut = Get-RecoveryShortcut $fixture $startup
+$startupAcl = Get-Acl -LiteralPath $startup
+$registryKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($runKeyPath)
+$registryAcl = $registryKey.GetAccessControl()
+try {
+    Write-Utf8File $config $baseline
+    $firstSession = Register-LauncherRecovery $fixture $config $startup $runKeyPath
+    [IO.File]::SetAttributes($shortcut,([IO.File]::GetAttributes($shortcut) -bor [IO.FileAttributes]::ReadOnly))
+    $session = Register-LauncherRecovery $fixture $config $startup $runKeyPath
+    Assert (-not ([IO.File]::GetAttributes($shortcut) -band [IO.FileAttributes]::ReadOnly)) 'Read-only recovery shortcut was not repaired.'
+    Unregister-LauncherRecovery $fixture $firstSession
+    Assert (Test-Path -LiteralPath $shortcut) 'A previous session removed the current recovery trigger.'
+    Unregister-LauncherRecovery $fixture $session
+    Assert (-not (Test-Path -LiteralPath $shortcut)) 'Repaired recovery shortcut survived cleanup.'
+    $checks += 'Read-only hidden recovery shortcut is replaced automatically; stale-session cleanup is ignored'
+
+    # Deny creation in the isolated startup directory. Registry operations use
+    # a temporary HKCU key, so tests never register a real login application.
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $deniedStartup = Get-Acl -LiteralPath $startup
+    $deniedStartup.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid,[Security.AccessControl.FileSystemRights]::CreateFiles,[Security.AccessControl.AccessControlType]::Deny)))
+    Set-Acl -LiteralPath $startup -AclObject $deniedStartup
+    $registryKey.SetValue('unrelated','keep')
+    foreach ($scenario in @('normal','next-logon')) {
+        Write-Utf8File $config $baseline
+        $session = Register-LauncherRecovery $fixture $config $startup $runKeyPath
+        $state = [IO.File]::ReadAllText((Get-RecoveryPath $fixture)) | ConvertFrom-Json
+        Assert ($registryKey.GetValue($state.runName) -ceq $state.runCommand) 'Denied startup directory did not register current-user recovery.'
+        Assert (-not (Test-Path -LiteralPath $shortcut)) 'Denied shortcut creation left a partial recovery file.'
+        Apply-LauncherConfig $fixture $config 'gateway' 'http://127.0.0.1:8102/v1' '' 'apionly'
+        if ($scenario -eq 'normal') {
+            Restore-LauncherConfig $fixture $config
+            Unregister-LauncherRecovery $fixture $session
+        } else {
+            $state.boot = 'previous-system-boot'
+            Write-LauncherFile (Get-RecoveryPath $fixture) ($state | ConvertTo-Json -Depth 5)
+            $wscript = Join-Path $env:WINDIR 'System32\wscript.exe'
+            $arguments = '//B //Nologo "' + (Join-Path $fixture 'src\Recover-ChatGPT.vbs') + '"'
+            Assert ($state.runCommand -ceq ('"' + $wscript + '" ' + $arguments)) 'Registry recovery command lost Unicode or quoted paths.'
+            Start-Process -FilePath $wscript -ArgumentList $arguments -WindowStyle Hidden
+            for ($n=0; $n -lt 150 -and (Test-Path -LiteralPath (Get-RecoveryPath $fixture)); $n++) { Start-Sleep -Milliseconds 100 }
+        }
+        Assert ([IO.File]::ReadAllText($config) -ceq $baseline) ('Registry recovery changed native settings after ' + $scenario)
+        Assert (-not (Test-Path -LiteralPath (Get-RecoveryPath $fixture))) 'Registry recovery retained its journal.'
+        Assert ($null -eq $registryKey.GetValue($state.runName)) 'Registry recovery login value survived successful recovery.'
+        Assert ($registryKey.GetValue('unrelated') -ceq 'keep') 'Recovery removed an unrelated registry value.'
+        $checks += 'Denied startup directory uses current-user recovery after ' + $scenario
+    }
+    $null = Register-LauncherRecovery $fixture $config $startup $runKeyPath
+    Set-Acl -LiteralPath $startup -AclObject $startupAcl
+    $session = Register-LauncherRecovery $fixture $config $startup $runKeyPath
+    Unregister-LauncherRecovery $fixture $session
+    Assert ($null -eq $registryKey.GetValue((Get-RecoveryName $fixture))) 'Switching registration paths orphaned a previous registry trigger.'
+    Assert (-not (Test-Path -LiteralPath $shortcut)) 'Switching registration paths retained its shortcut.'
+    $checks += 'A later shortcut registration cleans an interrupted registry registration'
+    Set-Acl -LiteralPath $startup -AclObject $deniedStartup
+    $deniedRegistry = $registryKey.GetAccessControl()
+    $deniedRegistry.AddAccessRule((New-Object Security.AccessControl.RegistryAccessRule($sid,[Security.AccessControl.RegistryRights]::SetValue,[Security.AccessControl.AccessControlType]::Deny)))
+    $registryKey.SetAccessControl($deniedRegistry)
+    $blocked = $false
+    try { $null = Register-LauncherRecovery $fixture $config $startup $runKeyPath }
+    catch { $blocked = $_.Exception.Message.Contains('无法登记配置恢复。') -and $_.Exception.Message.Contains($shortcut) }
+    Assert $blocked 'Both registration paths failed without a useful startup error.'
+    Assert ([IO.File]::ReadAllText($config) -ceq $baseline) 'Failed recovery registration changed native configuration.'
+    $checks += 'Both login paths denied fail before native overrides with the failing path identified'
+    Set-Acl -LiteralPath $startup -AclObject $startupAcl
+    $session = Register-LauncherRecovery $fixture $config $startup $runKeyPath
+    Unregister-LauncherRecovery $fixture $session
+    Assert (-not (Test-Path -LiteralPath (Get-RecoveryPath $fixture))) 'Unused registry write restrictions blocked shortcut cleanup.'
+    $checks += 'A writable startup directory works when registry login writes are denied'
+} finally {
+    Set-Acl -LiteralPath $startup -AclObject $startupAcl
+    $registryKey.SetAccessControl($registryAcl)
+    $registryKey.Dispose()
+    [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($runKeyPath,$false)
+    if (Test-Path -LiteralPath (Get-RecoveryPath $fixture)) { Remove-Item -LiteralPath (Get-RecoveryPath $fixture) }
+}
 foreach ($scenario in @('normal','crash','corrupt-config','new-boot')) {
     Write-Utf8File $config $baseline
     $session = Register-LauncherRecovery $fixture $config (Join-Path $fixture 'startup')

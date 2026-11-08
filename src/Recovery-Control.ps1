@@ -5,24 +5,53 @@ function Get-RecoveryProcess([int]$processId) {
     if ($p) { return @{pid=$p.ProcessId;exe=$p.ExecutablePath;createdAt=$p.CreationDate.ToUniversalTime().ToString('o')} }
     return $null
 }
-function Get-RecoveryShortcut([string]$packageDir, [string]$startup = [Environment]::GetFolderPath('Startup')) {
+function Get-RecoveryName([string]$packageDir) {
     $hash = [Security.Cryptography.SHA256]::Create()
     try { $id = ([BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($packageDir))))).Replace('-','').Substring(0,12) }
     finally { $hash.Dispose() }
-    return Join-Path $startup ('ChatGPT-API-Recovery-' + $id + '.lnk')
+    return 'ChatGPT-API-Recovery-' + $id
 }
-function Register-LauncherRecovery([string]$packageDir, [string]$configPath, [string]$startup = [Environment]::GetFolderPath('Startup')) {
+function Get-RecoveryShortcut([string]$packageDir, [string]$startup = [Environment]::GetFolderPath('Startup')) {
+    return Join-Path $startup ((Get-RecoveryName $packageDir) + '.lnk')
+}
+function Register-LauncherRecovery([string]$packageDir, [string]$configPath, [string]$startup = [Environment]::GetFolderPath('Startup'), [string]$runKey = 'Software\Microsoft\Windows\CurrentVersion\Run') {
     $session = [Guid]::NewGuid().ToString('N')
-    $shortcut = Get-RecoveryShortcut $packageDir $startup
-    if (-not (Get-Command Initialize-UnicodeShortcuts -ErrorAction SilentlyContinue)) { . (Join-Path $packageDir 'install\Install-Core.ps1') }
-    Initialize-UnicodeShortcuts
-    # The next-logon recovery must exist before the native files are touched.
-    Write-LauncherFile (Get-RecoveryPath $packageDir) (@{version=2;sessionId=$session;configPath=$configPath;shortcut=$shortcut;owner=(Get-RecoveryProcess $PID);boot=(Get-RecoveryBoot)}|ConvertTo-Json -Depth 5)
+    $shortcut = if ($startup) { Get-RecoveryShortcut $packageDir $startup } else { '' }
+    $runName = Get-RecoveryName $packageDir
+    $wscript = Join-Path $env:WINDIR 'System32\wscript.exe'
     $arguments = '//B //Nologo "' + (Join-Path $packageDir 'src\Recover-ChatGPT.vbs') + '"'
-    [ChatGPTApi.NativeShortcuts]::Save($shortcut,(Join-Path $env:WINDIR 'System32\wscript.exe'),$arguments,$packageDir,(Join-Path $packageDir 'assets\ChatGPT.ico'),'恢复 ChatGPT 的临时 API 配置')
-    [IO.File]::SetAttributes($shortcut,([IO.File]::GetAttributes($shortcut) -bor [IO.FileAttributes]::Hidden))
-    $linkFile = [IO.File]::Open($shortcut,'Open','ReadWrite','Read')
-    try { $linkFile.Flush($true) } finally { $linkFile.Dispose() }
+    $runCommand = '"' + $wscript + '" ' + $arguments
+    # Record both possible triggers before creating either one. A later launch
+    # can clean up an interrupted registration even if it selects another path.
+    Write-LauncherFile (Get-RecoveryPath $packageDir) (@{version=3;sessionId=$session;configPath=$configPath;shortcut=$shortcut;runKey=$runKey;runName=$runName;runCommand=$runCommand;owner=(Get-RecoveryProcess $PID);boot=(Get-RecoveryBoot)}|ConvertTo-Json -Depth 5)
+    try {
+        if (-not $shortcut) { throw 'Windows 启动目录不可用。' }
+        [void][IO.Directory]::CreateDirectory($startup)
+        if (-not (Get-Command Initialize-UnicodeShortcuts -ErrorAction SilentlyContinue)) { . (Join-Path $packageDir 'install\Install-Core.ps1') }
+        Initialize-UnicodeShortcuts
+        if ([IO.File]::Exists($shortcut)) {
+            $attributes = [IO.File]::GetAttributes($shortcut)
+            if ($attributes -band [IO.FileAttributes]::ReadOnly) { [IO.File]::SetAttributes($shortcut,($attributes -band (-bnot [IO.FileAttributes]::ReadOnly))) }
+        }
+        [ChatGPTApi.NativeShortcuts]::Save($shortcut,$wscript,$arguments,$packageDir,(Join-Path $packageDir 'assets\ChatGPT.ico'),'恢复 ChatGPT 的临时 API 配置')
+        [IO.File]::SetAttributes($shortcut,([IO.File]::GetAttributes($shortcut) -bor [IO.FileAttributes]::Hidden))
+        $linkFile = [IO.File]::Open($shortcut,'Open','ReadWrite','Read')
+        try { $linkFile.Flush($true) } finally { $linkFile.Dispose() }
+    } catch {
+        $startupError = $_.Exception.Message
+        $key = $null
+        try {
+            # HKCU Run needs no administrator rights and remains registered
+            # until recovery succeeds, including after another interruption.
+            $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($runKey)
+            $key.SetValue($runName,$runCommand,[Microsoft.Win32.RegistryValueKind]::String)
+            $key.Flush()
+        } catch {
+            throw ('无法登记配置恢复。启动目录写入失败（' + $shortcut + '，' + $startupError + '）。当前用户登录恢复也未能写入（' + $_.Exception.Message + '）。')
+        } finally { if ($key) { $key.Dispose() } }
+    }
+    # Return only after a next-logon trigger is durable. The caller can now
+    # apply its temporary native configuration.
     return $session
 }
 function Repair-LegacyLauncherConfig([string]$packageDir, [string]$configPath) {
@@ -107,6 +136,20 @@ function Unregister-LauncherRecovery([string]$packageDir, [string]$session) {
     if (-not (Test-Path -LiteralPath $file)) { return }
     $state = [IO.File]::ReadAllText($file) | ConvertFrom-Json
     if ($state.sessionId -ne $session) { return }
-    if (Test-Path -LiteralPath $state.shortcut) { Remove-Item -LiteralPath $state.shortcut -Force }
+    if ($state.shortcut -and (Test-Path -LiteralPath $state.shortcut)) { Remove-Item -LiteralPath $state.shortcut -Force }
+    if ($state.runKey -and $state.runName -and $state.runCommand) {
+        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey([string]$state.runKey)
+        try { $registered = $key -and $key.GetValue([string]$state.runName) -ceq $state.runCommand }
+        finally { if ($key) { $key.Dispose() } }
+        if ($registered) {
+            $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey([string]$state.runKey,$true)
+            try {
+                if ($key -and $key.GetValue([string]$state.runName) -ceq $state.runCommand) {
+                    $key.DeleteValue([string]$state.runName,$false)
+                    $key.Flush()
+                }
+            } finally { if ($key) { $key.Dispose() } }
+        }
+    }
     Remove-Item -LiteralPath $file
 }
