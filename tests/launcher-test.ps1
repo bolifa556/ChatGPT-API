@@ -235,7 +235,8 @@ for(const [i,phase] of ['scanning','launching','connecting','installing','runnin
 }
 setTimeout(()=>{},6000);
 '@
-    $worker = Start-Process -FilePath (Join-Path $root 'runtime\node.exe') -ArgumentList @(('"'+$readyScript+'"'),('"'+$nativeStatus+'"'),$nativeSession) -WindowStyle Hidden -PassThru
+    $nodeCommand = Get-Command node.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    $worker = Start-Process -FilePath $nodeCommand.Source -ArgumentList @(('"'+$readyScript+'"'),('"'+$nativeStatus+'"'),$nativeSession) -WindowStyle Hidden -PassThru
     $nativeClient = Wait-LauncherNativeClient $nativeFixture $nativeSession $worker 500 5000
     Assert ($nativeClient.ProcessId -eq $worker.Id) 'Progress-aware startup did not return the live client.'
     $nativeRecovery = [IO.File]::ReadAllText((Get-RecoveryPath $nativeFixture)) | ConvertFrom-Json

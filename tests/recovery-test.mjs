@@ -82,6 +82,18 @@ fs.writeFileSync(path.join(ctx.root,'prepared'),String(client.pid));setInterval(
       assert.deepEqual(fs.readdirSync(home).sort(), ['auth.json', 'config.toml']);
       checks.push(platform + '/' + scenario);
     }
+    const recoveryScript = path.join(root, 'src/recovery.mjs');
+    const recoverySource = fs.readFileSync(recoveryScript, 'utf8');
+    fs.writeFileSync(recoveryScript, recoverySource.replace('async function watch(ctx, platform) {', 'async function watch(ctx, platform) { await delay(350);'));
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const session = await registerRecovery(ctx, platform, { loginDirectory: logins });
+      const watcher = JSON.parse(fs.readFileSync(path.join(root, 'data/state/recovery-watcher.json')));
+      assert.equal(watcher.session, session);
+      unregisterRecovery(ctx, session);
+      await until(() => !fs.existsSync(path.join(root, 'data/state/recovery-watcher.json')));
+      assert(!fs.existsSync(state));
+    }
+    checks.push(platform + '/slow watcher startup and repeated registration');
   }
   console.log(JSON.stringify({ passed: true, checks }));
 } finally { fs.rmSync(temporary, { recursive: true, force: true }); }

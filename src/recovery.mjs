@@ -42,19 +42,24 @@ export async function registerRecovery(ctx, platform, options = {}) {
     watchNativeClients: false }, { durable: true });
   atomicPrivate(trigger.file, trigger.text, { durable: true });
   fs.mkdirSync(path.join(ctx.root, 'data/logs'), { recursive: true, mode: 0o700 });
+  let child;
   try {
     for (let n = 0; n < 100; n++) {
       const watcher = read(watcherPath(ctx));
       if (watcher && provider.alive(watcher.owner)) {
         if (watcher.session === session) return session;
-      } else {
-        const child = spawn(ctx.node, [path.join(ctx.root, 'src/recovery.mjs'), platform, ctx.root, ctx.home], {
-          detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], env: { ...process.env, CODEX_HOME: ctx.home, CHATGPT_API_ROOT: ctx.root },
-        });
+      } else if (!child) {
+        const errors = fs.openSync(path.join(ctx.root, 'data/logs/recovery.log'), 'a', 0o600);
+        try {
+          child = spawn(ctx.node, [path.join(ctx.root, 'src/recovery.mjs'), platform, ctx.root, ctx.home], {
+            detached: true, stdio: ['ignore', 'ignore', errors, 'ipc'], env: { ...process.env, CODEX_HOME: ctx.home, CHATGPT_API_ROOT: ctx.root },
+          });
+        } finally { fs.closeSync(errors); }
         await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
         children.set(session, child);
         child.unref(); child.channel?.unref();
       }
+      if (child && (child.exitCode !== null || child.signalCode !== null)) throw new Error('Automatic recovery exited before initialization (' + (child.signalCode || child.exitCode) + '). See data/logs/recovery.log.');
       if (!read(file)) throw new Error('Automatic recovery stopped during startup.');
       await delay(100);
     }
