@@ -62,11 +62,11 @@ try {
         } else { & (Join-Path $env:WINDIR 'explorer.exe') "shell:AppsFolder\$appId" }
         exit 0
     }
-    if ($Mode -ne 'official') { Assert-LauncherApiConfigured $packageDir }
     Initialize-DeferredLauncherSettings $packageDir
     Restore-LauncherConfig $packageDir $configPath
     Recover-OldOverrides
     Stop-Helpers
+    if ($Mode -ne 'official') { Assert-LauncherApiConfigured $packageDir }
     $nodePath = Join-Path $packageDir 'runtime\node.exe'
     if (-not (Test-Path -LiteralPath $nodePath)) { throw '缺少 runtime\node.exe，请使用完整安装包。' }
     $shimPath = Join-Path $packageDir 'src\shim.mjs'
@@ -102,25 +102,15 @@ try {
     $sessionState = Join-Path $packageDir 'data\state\native-session.json'
     $sessionLog = Join-Path $packageDir 'data\logs\native-session-stderr.log'
     $sessionScript = Join-Path $packageDir 'src\native-session.mjs'
+    $starting = @{session=$recoverySession;entryMode=$Mode;ready=$false;stopped=$false;phase='controller';startedAt=[DateTime]::UtcNow.ToString('o')}
+    Write-LauncherFile $sessionState ($starting | ConvertTo-Json)
+    $starting.phase = if ($Mode -eq 'official') { 'disabled' } else { 'waiting' }
+    Write-LauncherFile (Join-Path $packageDir 'data\state\native-quota.json') ($starting | ConvertTo-Json)
     $arguments = @($sessionScript,$packageDir,(Get-CodexHome),$nativeAlias,(Join-Path $package.InstallLocation 'app\resources\app.asar'),$Mode,$recoverySession) | ForEach-Object { '"' + $_ + '"' }
     $controller = Start-Process -FilePath $nodePath -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardError $sessionLog
     Add-RouterHelper $packageDir $controller $sessionScript
     Set-LauncherRecoveryController $packageDir $recoverySession $controller.Id
-    $main = $null
-    for ($n=0; $n -lt 400; $n++) {
-        $controller.Refresh()
-        if ($controller.HasExited) { throw ('客户端启动失败：' + [IO.File]::ReadAllText($sessionLog)) }
-        if (Test-Path -LiteralPath $sessionState) {
-            $native = [IO.File]::ReadAllText($sessionState) | ConvertFrom-Json
-            if ($native.session -eq $recoverySession -and $native.ready) {
-                $main = Get-CimInstance Win32_Process -Filter ('ProcessId=' + [int]$native.pid) -ErrorAction SilentlyContinue
-                if ($main) { break }
-            }
-        }
-        Start-Sleep -Milliseconds 100
-    }
-    if (-not $main) { throw '客户端未能完成启动，请查看 data\logs\native-session-stderr.log。' }
-    Set-LauncherRecoveryClient $packageDir $recoverySession $main
+    $null = Wait-LauncherNativeClient $packageDir $recoverySession $controller
     $apiLaunched=$true
     $lock.Dispose();$lock=$null
     Wait-LauncherSession $packageDir $recoverySession $controller.Id
@@ -142,8 +132,32 @@ try {
         Add-Content -LiteralPath (Join-Path $packageDir 'data\logs\recovery.log') -Value ([DateTime]::UtcNow.ToString('o') + ' ' + $message)
         exit 1
     }
-    if(-not $apiLaunched -and @(Get-MainApp).Count -eq 0){
-        try{Restore-LauncherConfig $packageDir $configPath;Stop-Helpers;if($recoverySession){Unregister-LauncherRecovery $packageDir $recoverySession}}catch{}
+    if (-not $apiLaunched -and $lock -and $recoverySession) {
+        try {
+            $recovery = [IO.File]::ReadAllText((Get-RecoveryPath $packageDir)) | ConvertFrom-Json
+            if ($recovery.sessionId -eq $recoverySession) {
+                # Recover an early PID even if the controller exited before
+                # the readiness loop recorded its process identity.
+                if (-not $recovery.client -and (Test-Path -LiteralPath $sessionState)) {
+                    $native = [IO.File]::ReadAllText($sessionState) | ConvertFrom-Json
+                    if ($native.session -eq $recoverySession -and $native.pid) {
+                        $candidate = Get-CimInstance Win32_Process -Filter ('ProcessId=' + [int]$native.pid) -ErrorAction SilentlyContinue
+                        if ($candidate -and $candidate.ParentProcessId -eq $controller.Id) {
+                            Set-LauncherRecoveryClient $packageDir $recoverySession $candidate
+                            $recovery = [IO.File]::ReadAllText((Get-RecoveryPath $packageDir)) | ConvertFrom-Json
+                        }
+                    }
+                }
+                Stop-Helpers
+                Stop-LauncherRecoveryClient $recovery.client
+                $lock.Dispose(); $lock = $null
+                & (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $packageDir 'src\Recover-ChatGPT.ps1') -Immediate -Session $recoverySession
+                if ($LASTEXITCODE -ne 0) { throw '配置恢复尚未完成，请查看 data\logs\recovery.log。' }
+            }
+        } catch {
+            $message += [Environment]::NewLine + $_.Exception.Message
+            Add-Content -LiteralPath (Join-Path $packageDir 'data\logs\recovery.log') -Value ([DateTime]::UtcNow.ToString('o') + ' ' + $_.Exception.Message)
+        }
     }
     Show-Message ('启动 ChatGPT 失败：'+$message)
     exit 1

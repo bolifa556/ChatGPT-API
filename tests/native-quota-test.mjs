@@ -7,6 +7,7 @@ const catalog = { official: [{ slug: 'official' }], gatewayIds: ['Gateway/model'
 assert.deepEqual(gatewayQuotaModels(catalog), ['Gateway/model']);
 assert.equal(scopeNativeQuota(source, key).count, 1);
 assert.equal(scopeNativeQuota('const ordinary="local"===w&&E||(0,tk.is)(T,g);', key).count, 0);
+assert.equal(scopeNativeQuota('const data="' + 'a'.repeat(1000000) + '";' + source, key).quotaCount, 1);
 const fastSource = 'const p=host,m=(0,i.tn)(p),h=m?.authMethod==="chatgpt"||m?.authMethod==="personalAccessToken"||m?.authMethod==="amazonBedrock";return{serviceTierAccess:h};';
 assert.equal(scopeNativeQuota(fastSource, key).fastCount, 1);
 const submitSource = 'var C=n("eLmE"),P=n("a6kU");let nF=host,n6={settings:{model}},nK=(0,i._U)(C.F9,nF),of=(0,i.Ul)("local"===nF&&P.U);let oU=otherBlock||nK||of;return{activeCollaborationMode:n6,submitDisabled:oU};';

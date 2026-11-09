@@ -20,7 +20,12 @@ try {
     if (-not $Immediate -and $sameBoot -and ((Test-RecordedProcess $state.owner) -or (Test-RecordedProcess $state.controller))) { exit 0 }
     for ($n=0; $n -lt 100 -and -not $lock; $n++) {
         try { $lock = [IO.File]::Open((Get-LauncherDataPath $packageDir 'launcher.lock'),'OpenOrCreate','ReadWrite','None') }
-        catch { Start-Sleep -Milliseconds 100 }
+        catch {
+            # During startup the owner holds this lock while waiting for the
+            # controller. Let that owner recover after observing its failure.
+            if ($Immediate -and $Session -and $ControllerPid -and $sameBoot -and (Test-RecordedProcess $state.owner)) { exit 0 }
+            Start-Sleep -Milliseconds 100
+        }
     }
     if (-not $lock) { throw '配置恢复正等待启动准备完成，将在下次启动时继续。' }
     if (-not (Test-Path -LiteralPath $file)) { exit 0 }

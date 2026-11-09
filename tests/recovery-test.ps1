@@ -139,6 +139,23 @@ try {
     [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($runKeyPath,$false)
     if (Test-Path -LiteralPath (Get-RecoveryPath $fixture)) { Remove-Item -LiteralPath (Get-RecoveryPath $fixture) }
 }
+Write-Utf8File $config $baseline
+$session = Register-LauncherRecovery $fixture $config (Join-Path $fixture 'startup')
+Set-LauncherRecoveryController $fixture $session $PID
+Apply-LauncherConfig $fixture $config 'gateway' 'http://127.0.0.1:8102/v1' '' 'apionly'
+$applied = [IO.File]::ReadAllText($config)
+$startupLock = [IO.File]::Open((Get-LauncherDataPath $fixture 'launcher.lock'),'OpenOrCreate','ReadWrite','None')
+try {
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $fixture 'src\Recover-ChatGPT.ps1') -Immediate -Session $session -ControllerPid $PID
+    Assert ($LASTEXITCODE -eq 0) 'Startup recovery could not defer to its live owner.'
+    Assert ($clock.ElapsedMilliseconds -lt 6000) 'Startup recovery waited on the owner that was waiting for it.'
+    Assert ([IO.File]::ReadAllText($config) -ceq $applied) 'Deferred startup recovery modified the active configuration.'
+} finally { $startupLock.Dispose() }
+Restore-LauncherConfig $fixture $config
+Unregister-LauncherRecovery $fixture $session
+Assert ([IO.File]::ReadAllText($config) -ceq $baseline) 'Startup owner failed to finish deferred recovery.'
+$checks += 'Startup controller recovery defers to its lock-owning launcher without hiding the original failure'
 foreach ($scenario in @('normal','crash','corrupt-config','new-boot')) {
     Write-Utf8File $config $baseline
     $session = Register-LauncherRecovery $fixture $config (Join-Path $fixture 'startup')

@@ -110,6 +110,18 @@ function Set-LauncherRecoveryController([string]$packageDir, [string]$session, [
     $state | Add-Member -NotePropertyName controller -NotePropertyValue (Get-RecoveryProcess $processId) -Force
     Write-LauncherFile $file ($state | ConvertTo-Json -Depth 5)
 }
+function Stop-LauncherRecoveryClient($entry) {
+    if (-not $entry -or -not $entry.pid) { return }
+    $client = Get-Process -Id $entry.pid -ErrorAction SilentlyContinue
+    if (-not $client) { return }
+    try {
+        # Open its process handle before checking the recorded identity again.
+        if (-not $client.HasExited -and (Test-RecordedProcess $entry)) {
+            try { $client.Kill() } catch { if (-not $client.HasExited) { throw } }
+            if (-not $client.WaitForExit(10000)) { throw '本次客户端仍在退出，配置恢复尚未完成。' }
+        }
+    } finally { $client.Dispose() }
+}
 function Wait-LauncherSession([string]$packageDir, [string]$session, [int]$controllerId) {
     Wait-Process -Id $controllerId -ErrorAction SilentlyContinue
     $file = Get-RecoveryPath $packageDir
@@ -119,8 +131,7 @@ function Wait-LauncherSession([string]$packageDir, [string]$session, [int]$contr
     if (Test-RecordedProcess $recovery.client) {
         # The controller exited first. End only its recorded native client
         # before removing the temporary provider from the shared configuration.
-        Stop-Process -Id $recovery.client.pid -Force -ErrorAction SilentlyContinue
-        Wait-Process -Id $recovery.client.pid -ErrorAction SilentlyContinue
+        Stop-LauncherRecoveryClient $recovery.client
     }
     & (Join-Path $packageDir 'src\Recover-ChatGPT.ps1') -Immediate -Session $session
 }
@@ -130,6 +141,49 @@ function Set-LauncherRecoveryClient([string]$packageDir, [string]$session, $proc
     if ($state.sessionId -ne $session) { throw 'Recovery session changed during startup.' }
     $state | Add-Member -NotePropertyName client -NotePropertyValue (Get-RecoveryProcess $process.ProcessId) -Force
     Write-LauncherFile $file ($state | ConvertTo-Json -Depth 5)
+}
+function Wait-LauncherNativeClient([string]$packageDir, [string]$session, $controller, [int]$idleTimeoutMs = 120000, [int]$startupTimeoutMs = 180000) {
+    $statusPath = Join-Path $packageDir 'data\state\native-session.json'
+    $logPath = Join-Path $packageDir 'data\logs\native-session-stderr.log'
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $idleDeadline = $idleTimeoutMs
+    $progress = ''; $phase = 'controller'; $clientPid = 0
+    while ($clock.ElapsedMilliseconds -lt $startupTimeoutMs) {
+        $native = $null
+        if (Test-Path -LiteralPath $statusPath) {
+            try { $native = [IO.File]::ReadAllText($statusPath) | ConvertFrom-Json } catch {}
+        }
+        if ($native -and $native.session -eq $session) {
+            $phase = [string]$native.phase
+            $current = $phase + '|' + $native.pid
+            if ($current -ne $progress) { $progress = $current; $idleDeadline = $clock.ElapsedMilliseconds + $idleTimeoutMs }
+            if ($native.stopped) {
+                if ($native.error) { throw [string]$native.error }
+                throw ('客户端在启动确认前已退出（退出码 ' + $native.exitCode + '，信号 ' + $native.signal + '）。')
+            }
+        }
+        $controller.Refresh()
+        if ($controller.HasExited) {
+            $detail = if (Test-Path -LiteralPath $logPath) { [IO.File]::ReadAllText($logPath).Trim() } else { '' }
+            throw ('客户端启动进程已退出（退出码 ' + $controller.ExitCode + '）。' + [Environment]::NewLine + $detail)
+        }
+        if ($native -and $native.session -eq $session) {
+            if ($native.pid -and [int]$native.pid -ne $clientPid) {
+                $client = Get-CimInstance Win32_Process -Filter ('ProcessId=' + [int]$native.pid) -ErrorAction SilentlyContinue
+                if ($client) {
+                    Set-LauncherRecoveryClient $packageDir $session $client
+                    $clientPid = [int]$native.pid
+                }
+            }
+            if ($native.ready -and $clientPid) {
+                $client = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $clientPid) -ErrorAction SilentlyContinue
+                if ($client) { return $client }
+            }
+        }
+        if ($clock.ElapsedMilliseconds -ge $idleDeadline) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    throw ('客户端启动等待超时（阶段 ' + $phase + '），请查看 data\logs\native-session-stderr.log。')
 }
 function Unregister-LauncherRecovery([string]$packageDir, [string]$session) {
     $file = Get-RecoveryPath $packageDir

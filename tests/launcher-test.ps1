@@ -3,6 +3,7 @@ $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $root 'src\Common.ps1')
 . (Join-Path $root 'src\Package-Paths.ps1')
 . (Join-Path $root 'src\Launcher-State.ps1')
+. (Join-Path $root 'src\Recovery-Control.ps1')
 . (Join-Path $root 'src\Router-Control.ps1')
 . (Join-Path $root 'install\Install-Core.ps1')
 . (Join-Path $root 'install\Bootstrap-Runtime.ps1')
@@ -208,6 +209,42 @@ Assert (-not (Initialize-PackageLayout $legacy)) 'Active legacy watcher must def
 Assert (Test-Path -LiteralPath (Join-Path $legacy 'launcher-state.json')) 'Active journal moved while in use.'
 Write-Utf8File (Join-Path $legacy 'data\state\layout-migration.json') '{"pending":false}'
 Assert (Test-LauncherDependencies $root) 'Installed dependency versions do not match lock file.'
-$report=@{passed=$true;checks=@('PowerShell 5.1 syntax','exact restore and preference preservation','8 switches without growing backups','three-entry login and route selection','API-only helper isolation and independent model preference','saved official credentials unchanged','idempotent install preserving settings','three version-independent shortcuts','safe and repeatable data migration','active legacy process protection','locked dependencies')}
+$nativeFixture = Join-Path $root ('data\testing\native-wait-' + [Guid]::NewGuid().ToString('N'))
+$nativeSession = Register-LauncherRecovery $nativeFixture (Join-Path $nativeFixture 'config.toml') (Join-Path $nativeFixture 'startup')
+$nativeStatus = Join-Path $nativeFixture 'data\state\native-session.json'
+$self = Get-Process -Id $PID
+$worker = $null
+try {
+    Write-LauncherFile $nativeStatus (@{session='stale-session';ready=$true;stopped=$true;error='stale failure';pid=$PID}|ConvertTo-Json)
+    $blocked = $false
+    try { $null = Wait-LauncherNativeClient $nativeFixture $nativeSession $self 50 100 }
+    catch { $blocked = $_.Exception.Message.Contains('启动等待超时') }
+    Assert $blocked 'A stale session supplied readiness or a failure for the current launch.'
+    Write-LauncherFile $nativeStatus (@{session=$nativeSession;ready=$false;stopped=$true;error='original startup failure';exitCode=17}|ConvertTo-Json)
+    $blocked = $false
+    try { $null = Wait-LauncherNativeClient $nativeFixture $nativeSession $self }
+    catch { $blocked = $_.Exception.Message -eq 'original startup failure' }
+    Assert $blocked 'A known stopped startup was replaced by a generic timeout.'
+    Write-LauncherFile $nativeStatus (@{session=$nativeSession;ready=$false;stopped=$false;phase='controller'}|ConvertTo-Json)
+    $readyScript = Join-Path $nativeFixture 'ready.mjs'
+    Write-Utf8File $readyScript @'
+import fs from 'node:fs';
+const [file,session]=process.argv.slice(2);
+for(const [i,phase] of ['scanning','launching','connecting','installing','running'].entries()) {
+  setTimeout(()=>fs.writeFileSync(file,JSON.stringify({session,phase,pid:phase==='running'?process.pid:undefined,ready:phase==='running',stopped:false})),i*200);
+}
+setTimeout(()=>{},6000);
+'@
+    $worker = Start-Process -FilePath (Join-Path $root 'runtime\node.exe') -ArgumentList @(('"'+$readyScript+'"'),('"'+$nativeStatus+'"'),$nativeSession) -WindowStyle Hidden -PassThru
+    $nativeClient = Wait-LauncherNativeClient $nativeFixture $nativeSession $worker 500 5000
+    Assert ($nativeClient.ProcessId -eq $worker.Id) 'Progress-aware startup did not return the live client.'
+    $nativeRecovery = [IO.File]::ReadAllText((Get-RecoveryPath $nativeFixture)) | ConvertFrom-Json
+    Assert ([int]$nativeRecovery.client.pid -eq $worker.Id) 'The native PID was not registered for recovery.'
+} finally {
+    if ($worker) { Stop-LauncherRecoveryClient (Get-RecoveryProcess $worker.Id); $worker.Dispose() }
+    $self.Dispose()
+    Unregister-LauncherRecovery $nativeFixture $nativeSession
+}
+$report=@{passed=$true;checks=@('PowerShell 5.1 syntax','exact restore and preference preservation','8 switches without growing backups','three-entry login and route selection','API-only helper isolation and independent model preference','saved official credentials unchanged','idempotent install preserving settings','three version-independent shortcuts','safe and repeatable data migration','active legacy process protection','locked dependencies','startup progress, early client identity, stale sessions and original failure reporting')}
 Write-Utf8File (Join-Path $root 'data\diagnostics\launcher-results.json') ($report|ConvertTo-Json -Depth 5)
 $report|ConvertTo-Json -Depth 5

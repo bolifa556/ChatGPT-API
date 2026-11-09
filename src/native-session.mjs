@@ -8,24 +8,55 @@ import { atomicPrivate } from './settings.mjs';
 import { startQuotaCompatibleClient } from './native-quota.mjs';
 
 export async function runNativeSession({ router, start, recover, onStatus = () => {} }) {
-  let child, stopping = false;
+  let child, stopping = false, clientStderr = '';
+  const errors = [], state = { ready: false, stopped: false, phase: 'router' };
+  const report = value => { Object.assign(state, value); onStatus({ ...state }); };
   const stop = () => { stopping = true; if (child && child.exitCode === null && child.signalCode === null) child.kill(); };
+  const track = nativeClient => {
+    child = nativeClient;
+    child.stderr?.setEncoding('utf8');
+    child.stderr?.on('data', chunk => { clientStderr = (clientStderr + chunk.toString()).slice(-32768); });
+    report({ phase: 'client', pid: child.pid });
+    if (stopping) stop();
+  };
   process.once('SIGTERM', stop); process.once('SIGINT', stop);
   try {
+    report({ phase: 'router' });
     await router.routerReady;
-    child = await start();
+    report({ phase: 'launching' });
+    child = await start(track, report);
     if (stopping) stop();
-    onStatus({ ready: true, pid: child.pid });
-    if (child.exitCode === null && child.signalCode === null) await once(child, 'exit');
-  } finally {
-    process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop);
-    if (child && child.exitCode === null && child.signalCode === null) {
-      child.kill(); await once(child, 'exit');
+    else {
+      if (child.exitCode !== null || child.signalCode !== null) throw new Error('Native client exited before startup confirmation (' + (child.signalCode || child.exitCode) + ').');
+      report({ ready: true, phase: 'running', pid: child.pid });
     }
-    try { await router.closeRouter(); }
-    finally { await recover(); }
-    onStatus({ ready: false, stopped: true });
+    if (child.exitCode === null && child.signalCode === null) await once(child, 'exit');
+    if (!stopping && (child.exitCode !== 0 || child.signalCode)) {
+      throw new Error('Native client exited with ' + (child.signalCode ? 'signal ' + child.signalCode : 'code ' + child.exitCode));
+    }
+  } catch (error) { errors.push(error); }
+  finally {
+    process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop);
+    try {
+      if (child && child.exitCode === null && child.signalCode === null) {
+        child.kill(); await once(child, 'exit');
+      }
+    } catch (error) { errors.push(error); }
+    try { report({ ready: false, phase: 'recovering' }); } catch (error) { errors.push(error); }
+    try { await router.closeRouter(); } catch (error) { errors.push(error); }
+    if (child && child.exitCode === null && child.signalCode === null) errors.push(new Error('Native client is still running. Configuration recovery is pending.'));
+    else {
+      try { await recover(); } catch (error) { errors.push(error); }
+      child?.stderr?.destroy();
+    }
+    const error = errors.map(error => error.message || String(error)).join('\n');
+    try {
+      report({ ready: false, stopped: true, phase: error ? 'failed' : 'stopped',
+        exitCode: child?.exitCode ?? null, signal: child?.signalCode ?? null,
+        error: error || null, ...(clientStderr ? { clientStderr: clientStderr.trim() } : {}) });
+    } catch (error) { errors.push(error); }
   }
+  if (errors.length) throw new AggregateError(errors, errors.map(error => error.message || String(error)).join('\n'), { cause: errors[0] });
 }
 
 async function main() {
@@ -35,26 +66,44 @@ async function main() {
   process.env.CODEX_HOME = home;
   process.env.CHATGPT_API_ROOT = root;
   const status = path.join(root, 'data/state/native-session.json');
+  const startedAt = new Date().toISOString();
+  const state = { session, entryMode, startedAt, ready: false, stopped: false, phase: 'initializing' };
+  const report = value => {
+    Object.assign(state, value, { updatedAt: new Date().toISOString() });
+    atomicPrivate(status, state);
+  };
+  report({});
+  atomicPrivate(path.join(root, 'data/state/native-quota.json'), { session, entryMode, ready: false, phase: entryMode === 'official' ? 'disabled' : 'waiting', startedAt });
   const args = process.env.CODEX_ELECTRON_USER_DATA_PATH ? ['--user-data-dir=' + path.resolve(process.env.CODEX_ELECTRON_USER_DATA_PATH)] : [];
-  const router = await import('./shim.mjs');
-  await runNativeSession({
-    router,
-    onStatus: value => atomicPrivate(status, { session, ...value }),
-    start: async () => {
-      if (entryMode !== 'official') return startQuotaCompatibleClient({ executable, archive, root, home, args,
-        onStatus: value => atomicPrivate(path.join(root, 'data/state/native-quota.json'), { session, ...value }) });
-      const child = spawn(executable, args, { env: process.env, windowsHide: true, stdio: 'ignore' });
-      await once(child, 'spawn'); return child;
-    },
-    recover: async () => {
-      const command = path.join(process.env.WINDIR, 'System32/WindowsPowerShell/v1.0/powershell.exe');
-      const child = spawn(command, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
-        path.join(root, 'src/Recover-ChatGPT.ps1'), '-Immediate', '-Session', session, '-ControllerPid', String(process.pid)], { windowsHide: true, stdio: 'ignore' });
-      const [code] = await once(child, 'exit');
-      if (code) throw new Error('Native configuration recovery is pending.');
-    },
-  });
+  try {
+    const router = await import('./shim.mjs');
+    await runNativeSession({
+      router,
+      onStatus: report,
+      start: async (track, progress) => {
+        if (entryMode !== 'official') return startQuotaCompatibleClient({ executable, archive, root, home, args,
+          onSpawn: track,
+          onStatus: value => {
+            atomicPrivate(path.join(root, 'data/state/native-quota.json'), { session, entryMode, updatedAt: new Date().toISOString(), ...value });
+            if (!state.ready && !state.stopped) progress({ phase: value.phase, ...(value.pid ? { pid: value.pid } : {}) });
+          } });
+        const child = spawn(executable, args, { env: process.env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+        await once(child, 'spawn'); track(child); return child;
+      },
+      recover: async () => {
+        const command = path.join(process.env.WINDIR, 'System32/WindowsPowerShell/v1.0/powershell.exe');
+        const child = spawn(command, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+          path.join(root, 'src/Recover-ChatGPT.ps1'), '-Immediate', '-Session', session, '-ControllerPid', String(process.pid)], { windowsHide: true, stdio: 'ignore' });
+        const [code] = await once(child, 'exit');
+        if (code) throw new Error('Native configuration recovery is pending. See data/logs/recovery.log.');
+      },
+    });
+  } catch (error) {
+    try { report({ ready: false, stopped: true, phase: 'failed', error: error.message }); }
+    catch (statusError) { throw new AggregateError([error, statusError], error.message + '\n' + statusError.message, { cause: error }); }
+    throw error;
+  }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  main().catch(error => { process.stderr.write(error.message + '\n'); process.exitCode = 1; });
+  main().catch(error => { process.stderr.write((error.stack || error.message) + '\n'); process.exitCode = 1; });
 }
