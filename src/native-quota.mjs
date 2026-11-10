@@ -16,10 +16,11 @@ function scopeComposerSubmission(source, key) {
   const identifier = '[A-Za-z_$][\\w$]*';
   const hardReads = new RegExp('\\b(' + identifier + ')=\\(0,' + identifier + '\\._U\\)\\((' + identifier + ')\\.F9,(' + identifier + ')\\)', 'g');
   const props = /activeCollaborationMode:([A-Za-z_$][\w$]*),[^{};]{0,1200}?\bsubmitDisabled:([A-Za-z_$][\w$]*)/g;
-  let text = source, count = 0;
+  let text = source, count = 0, legacyCount = 0;
   for (const hard of source.matchAll(hardReads)) {
     const [, blocked, module, host] = hard;
     if (!source.includes(module + '=n("eLmE")')) continue;
+    legacyCount++;
     const component = [...source.matchAll(props)].find(match => match.index > hard.index);
     if (!component || component.index - hard.index > 40000) continue;
     const [, mode, disabled] = component;
@@ -36,11 +37,11 @@ function scopeComposerSubmission(source, key) {
     const adapted = declaration[0].slice(0, -tail.length - 1) + '||((' + gateway + ')?false:(' + blocked + '||' + ordinary[1] + '));';
     text = text.replace(declaration[0], adapted); count++;
   }
-  return { text, count };
+  return { text, count, legacyCount };
 }
 export function scopeNativeQuota(source, key) {
   if (!source.includes('sendBlocked:') && !source.includes('serviceTierAccess:') && !source.includes('submitDisabled:')) {
-    return { text: source, count: 0, quotaCount: 0, fastCount: 0, submitCount: 0 };
+    return { text: source, count: 0, quotaCount: 0, fastCount: 0, submitCount: 0, legacySubmitCount: 0 };
   }
   let quotaCount = 0, fastCount = 0;
   let text = source.replace(quotaGuard, (match, output, host, _blocked, _module, _method, _limits, model, offset) => {
@@ -59,7 +60,7 @@ export function scopeNativeQuota(source, key) {
     return output + '=(' + match.slice(output.length + 1) + '||("local"===' + host + '&&globalThis[' + JSON.stringify(key) + ']?.models?.size>0))';
   });
   const submission = scopeComposerSubmission(text, key);
-  return { text: submission.text, count: quotaCount + fastCount + submission.count, quotaCount, fastCount, submitCount: submission.count };
+  return { text: submission.text, count: quotaCount + fastCount + submission.count, quotaCount, fastCount, submitCount: submission.count, legacySubmitCount: submission.legacyCount };
 }
 export function nativeQuotaAssets(archive) {
   const fd = fs.openSync(archive, 'r');
@@ -79,7 +80,7 @@ export function nativeQuotaAssets(archive) {
         const adapted = scopeNativeQuota(source, 'quota_probe');
         if (!adapted.count) continue;
         if (!source.includes('export const __webpack_modules__=')) throw new Error('Unsupported native quota module format.');
-        assets.push({ url: 'app://-/' + file.slice('webview/'.length), source, submitCount: adapted.submitCount });
+        assets.push({ url: 'app://-/' + file.slice('webview/'.length), source, submitCount: adapted.submitCount, legacySubmitCount: adapted.legacySubmitCount });
       }
     }
     scan(tree);
@@ -171,7 +172,9 @@ export async function startQuotaCompatibleClient({ executable, archive, root, ho
     const assets = nativeQuotaAssets(archive), key = '__chatgpt_api_quota_' + crypto.randomBytes(8).toString('hex'), binding = key + '_notify';
     const cache = path.join(root, 'data/cache/catalog-state.json');
     const models = () => gatewayQuotaModels(JSON.parse(fs.readFileSync(cache, 'utf8')));
-    if (models().length && !assets.some(asset => asset.submitCount)) throw new Error('当前客户端的 API 发送兼容检查未通过，请更新适配层。');
+    // Older clients duplicate subscription quota checks in the composer. New
+    // clients removed those operands; keep their native submission path intact.
+    if (models().length && assets.some(asset => asset.legacySubmitCount) && !assets.some(asset => asset.submitCount)) throw new Error('当前客户端的 API 发送兼容检查未通过，请更新适配层。');
     status.phase = 'launching'; report();
     if (launch) {
       // LaunchServices preserves macOS permission attribution. Its application

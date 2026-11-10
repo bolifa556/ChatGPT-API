@@ -115,11 +115,27 @@ function Get-NativeClientVersion([string]$installLocation = '') {
         $installLocation = $package.InstallLocation
     }
     $cli = Get-NativeRepairCli $installLocation
-    if (-not $cli) { return '' }
     # A saved model catalog describes the client that fetched it, not the
     # currently installed client. Ask the byte-identical native executable.
-    $version = (& $cli --version | Out-String).Trim()
-    if ($LASTEXITCODE -eq 0 -and $version -match '^codex-cli (\d+\.\d+\.\d+)(?:[-+\s]|$)') { return $Matches[1] }
+    $temporaryCli = $null
+    try {
+        if (-not $cli) {
+            # Immediately after an app update the native relocated CLI cache
+            # may not exist yet. Probe an exact temporary copy in the adapter;
+            # WindowsApps executables cannot run directly outside activation.
+            $source = Join-Path $installLocation 'app\resources\codex.exe'
+            if (-not (Test-Path -LiteralPath $source)) { return '' }
+            $scriptFile = $MyInvocation.MyCommand.ScriptBlock.File
+            $cache = Join-Path (Split-Path -Parent (Split-Path -Parent $scriptFile)) 'data\cache'
+            [void][IO.Directory]::CreateDirectory($cache)
+            $temporaryCli = Join-Path $cache ('native-version-' + [Guid]::NewGuid().ToString('N') + '.exe')
+            [IO.File]::Copy($source,$temporaryCli,$false)
+            $cli = $temporaryCli
+        }
+        $version = (& $cli --version 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0 -and $version -match '^codex-cli (\d+\.\d+\.\d+)(?:[-+\s]|$)') { return $Matches[1] }
+    } catch { return '' }
+    finally { if ($temporaryCli -and (Test-Path -LiteralPath $temporaryCli)) { Remove-Item -LiteralPath $temporaryCli -Force } }
     return ''
 }
 function Set-LauncherMixedProvider([string]$content, [string]$baseUrl, [string]$packageDir, [bool]$signedIn, [string]$id = 'chatgpt_api_mixed', [bool]$officialOnly = $false) {

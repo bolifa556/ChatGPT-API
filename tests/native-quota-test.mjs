@@ -13,6 +13,12 @@ assert.equal(scopeNativeQuota(fastSource, key).fastCount, 1);
 const submitSource = 'var C=n("eLmE"),P=n("a6kU");let nF=host,n6={settings:{model}},nK=(0,i._U)(C.F9,nF),of=(0,i.Ul)("local"===nF&&P.U);let oU=otherBlock||nK||of;return{activeCollaborationMode:n6,submitDisabled:oU};';
 const adaptedSubmit = scopeNativeQuota(submitSource, key);
 assert.equal(adaptedSubmit.submitCount, 1);
+assert.equal(adaptedSubmit.legacySubmitCount, 1);
+const nativeSubmit = 'let blocked=otherBlock||workHomePolicy;return{activeCollaborationMode:mode,submitBlockState:state,submitDisabled:blocked};';
+const currentSubmit = scopeNativeQuota(source + nativeSubmit, key);
+assert.equal(currentSubmit.legacySubmitCount, 0);
+assert.equal(currentSubmit.submitCount, 0);
+assert(currentSubmit.text.endsWith(nativeSubmit), 'A native composer without duplicated quota checks was modified');
 const url = 'data:text/javascript,' + encodeURIComponent(source);
 const bootstrap = quotaBootstrap([{ url, source }], gatewayQuotaModels(catalog), key, key + '_notify');
 try {

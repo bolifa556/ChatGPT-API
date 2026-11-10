@@ -33,6 +33,11 @@ try {
     Assert ((Get-NativeClientVersion $fakePackage) -eq '0.159.0') 'Official catalog version did not come from the actual native CLI.'
     function Get-NativeRepairCli { param($installLocation) return $null }
     Assert (-not (Get-NativeClientVersion $fakePackage)) 'Missing native CLI must not invent a fixed version.'
+    $fixtureCli = Join-Path $fakePackage 'app\resources\codex.exe'
+    Remove-Item -LiteralPath $fixtureCli
+    Add-Type -TypeDefinition 'public static class FixtureNativeVersion { public static void Main() { System.Console.WriteLine("codex-cli 0.999.0-alpha.1"); } }' -OutputAssembly $fixtureCli -OutputType ConsoleApplication
+    Assert ((Get-NativeClientVersion $fakePackage) -eq '0.999.0') 'A new client without a relocated CLI cache could not supply its actual version.'
+    Assert (@(Get-ChildItem -LiteralPath (Join-Path $root 'data\cache') -Filter 'native-version-*.exe').Count -eq 0) 'The native version probe left a temporary executable behind.'
 } finally { Set-Item Function:Get-NativeRepairCli $nativeResolver; Remove-Item Function:Invoke-FixtureNativeVersion }
 $config=Join-Path $fixture 'config.toml'
 $baseline="model = `"gpt-6-sol`"`r`nmodel_reasoning_effort = `"ultra`"`r`n[app]`r`nlocaleOverride = `"zh-CN`"`r`nshowMax = true`r`n"
