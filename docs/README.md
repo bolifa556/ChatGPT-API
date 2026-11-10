@@ -5,6 +5,7 @@
 - [安装、入口、功能与限制](../README.md)
 - [本地控制台](console.md)
 - [配置、认证与数据位置](configuration.md)
+- [Bifrost Responses 托管生图兼容（按来源启用）](hosted-images.md)
 - [上下文容量与 API 连接设置](model-context.md)
 - [Linux 使用说明](linux-readme.md)
 - [macOS DMG 使用说明](macos-dmg-readme.md)

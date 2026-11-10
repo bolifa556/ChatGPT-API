@@ -28,6 +28,7 @@ def check(file):
             assert not set(parts) & {'data', '.git', '.github', 'tests', '.env', '__pycache__', 'linux'}
             assert not member.name.endswith(('.exe', '.dll', '.ps1', '.vbs', '.cmd'))
         entries = {entry['path']: entry for entry in manifest['files']}
+        assert 'src/gateway-responses-compat.mjs' in entries, 'Missing Responses compatibility adapter'
         assert len(entries) == len(manifest['files'])
         actual = {member.name[len(prefix + '/payload/'):] for member in members if member.isfile() and member.name.startswith(prefix + '/payload/')}
         assert set(entries) == actual, 'Manifest does not match complete payload'

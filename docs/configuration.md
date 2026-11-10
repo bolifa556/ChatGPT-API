@@ -90,6 +90,8 @@ Windows / macOS 的旧 URL / Key 配置窗口仍可用；明确修改时同步�
 
 ## 生图与编辑
 
+Responses 服务端托管生图是另一条显式启用的通道，配置与边界见 [Bifrost Responses 托管生图兼容](hosted-images.md)。其规则默认关闭，不改变下述 Images 接口设置。
+
 Images 接口独立于聊天转换。官方入口只使用官方服务；混合入口有官方身份时按 `imageRouting` 选择官方或自定义服务，官方通道不自动回退自定义。API-only 及无登录模式直接使用 API 图片模型。
 
 自定义生图通道使用选中的默认 API 模型，未手动指定时按目录自动选择。控制台在“模型与上下文”中选择默认，取消后恢复自动选择。模型按能力元数据与已知图片模型名称识别；已有的 `imageModel`、`imageEditModel` 和 `imageEditFormat` 配置继续读取，控制台保存其他设置时保留这些字段。图片生成不限定 GPT Image，来源必须提供兼容 Images 接口。

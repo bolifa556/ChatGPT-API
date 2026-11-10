@@ -55,6 +55,7 @@ try {
     [IO.Compression.ZipFile]::ExtractToDirectory([IO.Path]::GetFullPath($Archive), $extracted)
     $release = Join-Path $extracted $releaseName
     Assert (Test-Path -LiteralPath (Join-Path $release '安装.cmd')) 'Missing release entry point.'
+    Assert (Test-Path -LiteralPath (Join-Path $release 'payload\src\gateway-responses-compat.mjs')) 'Missing Responses compatibility adapter.'
     foreach ($file in Get-ChildItem -LiteralPath $release -Recurse -File -Filter *.ps1) {
         $tokens = $null; $errors = $null
         $null = [Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)

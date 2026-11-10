@@ -14,6 +14,7 @@ import { usesChat, chatRequest, chatResponse, ChatEvents } from './chat-compat.m
 import { decodedStream, ssePackets, encodeSse } from './sse.mjs';
 import { forwardImages, imageOnlyModel, imageCapabilities } from './image-compat.mjs';
 import { ResponseImages, restoreHostedImageHistory } from './responses-images.mjs';
+import { gatewayResponseRequest, readGatewayResponseRules } from './gateway-responses-compat.mjs';
 import { contextFields, rememberContexts, contextKey, applyContext } from './model-context.mjs';
 import { officialDispatcherFor, readEncodedBody, outgoingBody, writeChunk, relayClose,
   requestWithAbort as request, protocolError, releaseResponseBody, RESPONSE_TIMEOUTS, MAX_REQUEST_BYTES,
@@ -57,7 +58,7 @@ const gatewayDispatcher = gatewayDispatcherFor(gatewayEnabled ? gatewayBase : 'h
 const officialDispatcher = officialDispatcherFor(officialProxy);
 const sourceId = crypto.createHash('sha256').update(gatewayBase + '\n' + (env.API_KEY || '')).digest('hex');
 const buildHash = crypto.createHash('sha256');
-for (const name of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs','responses-images.mjs','model-context.mjs','model-strength.mjs','transport.mjs','response-state.mjs','settings.mjs','gateway-sources.mjs']) buildHash.update(fs.readFileSync(path.join(dir, name)));
+for (const name of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs','responses-images.mjs','gateway-responses-compat.mjs','model-context.mjs','model-strength.mjs','transport.mjs','response-state.mjs','settings.mjs','gateway-sources.mjs']) buildHash.update(fs.readFileSync(path.join(dir, name)));
 for (const name of ['model-contexts.json', 'model-template.json']) {
   if (fs.existsSync(path.join(root, 'assets', name))) buildHash.update(fs.readFileSync(path.join(root, 'assets', name)));
 }
@@ -82,6 +83,7 @@ function log(text) {
     fs.appendFileSync(logFile, '[' + new Date().toISOString() + '] ' + redact(text, sources.settings, [env.API_KEY, ...sources.secrets]) + '\n');
   } catch {}
 }
+const responseCompatRules = readGatewayResponseRules(root, log);
 function auth() {
   const saved = readJson(path.join(codexHome, 'auth.json'), {});
   if (saved.auth_mode && saved.auth_mode !== 'chatgpt') return {};
@@ -303,7 +305,7 @@ function gatewayRequest(payload, gateway) {
   return payload.model === gateway.model ? payload : { ...payload, model: gateway.model };
 }
 function clientEvent(event, model, gateway) {
-  return gateway && gateway.model !== model && event.response?.model ? { ...event, response: { ...event.response, model } } : event;
+  return gateway && event.response?.model && event.response.model !== model ? { ...event, response: { ...event.response, model } } : event;
 }
 function imageSettings() {
   const selected = sources.settings.defaultImageModel;
@@ -454,8 +456,8 @@ async function handleHttp(req, res) {
     const headers = which === 'gateway' ? gatewayResponseHeaders(originalHeaders, !adapted.adapter) : originalHeaders;
     if (outgoingBodyData.encoding) headers['content-encoding'] = outgoingBodyData.encoding;
     phase = 'upstream_headers';
-    const upstream = await request(adapted.chat ? gateway.base + '/chat/completions' + url.search : targetUrl(which, url, gateway), { method: req.method, body, headers, dispatcher: which === 'official' ? officialDispatcher : gateway.dispatcher,
-      signal: controller.signal, ...RESPONSE_TIMEOUTS });
+    const upstream = await gatewayResponseRequest(adapted.chat ? gateway.base + '/chat/completions' + url.search : targetUrl(which, url, gateway), { method: req.method, body, headers, dispatcher: which === 'official' ? officialDispatcher : gateway.dispatcher,
+      signal: controller.signal, ...RESPONSE_TIMEOUTS }, { payload: adapted.payload, gateway, rules: gateway && !adapted.adapter ? responseCompatRules : [], log });
     upstreamBody = upstream.body;
     upstreamStatus = upstream.statusCode; phase = 'stream';
     log('request headers ' + JSON.stringify({ requestId, status: upstreamStatus, upstreamBytes,
@@ -485,7 +487,7 @@ async function handleHttp(req, res) {
         const converted = adapted.chat ? chatResponse(data, gateway.model) : data;
         const native = adapted.adapter ? adapted.adapter.response(converted) : converted;
         const response = images ? images.response(native) : native;
-        if (gateway && gateway.model !== parsed.model && response.model) response.model = parsed.model;
+        if (gateway && response.model) response.model = parsed.model;
         res.writeHead(upstream.statusCode, outgoing);
         firstByteMs ??= Date.now() - started;
         await writeChunk(res, JSON.stringify(response));
@@ -690,7 +692,8 @@ if (process.argv.includes('--prepare')) {
           const headers = gatewayResponseHeaders({ ...headersFor(req.headers, 'gateway', gateway.profile), 'content-type': 'application/json' }, !adapted.adapter);
           const wireText = JSON.stringify(wireBody);
           log('WS request ' + JSON.stringify({ connectionId, requestId, route: 'gateway', model: event.model, bytes: Buffer.byteLength(wireText) }));
-          const up = await request(gateway.base + (adapted.chat ? '/chat/completions' : '/responses'), { method: 'POST', headers, body: wireText, dispatcher: gateway.dispatcher, signal: controller.signal, ...RESPONSE_TIMEOUTS });
+          const up = await gatewayResponseRequest(gateway.base + (adapted.chat ? '/chat/completions' : '/responses'), { method: 'POST', headers, body: wireText, dispatcher: gateway.dispatcher, signal: controller.signal, ...RESPONSE_TIMEOUTS },
+            { payload: wireBody, gateway, rules: !adapted.adapter ? responseCompatRules : [], log });
           upstreamBody = up.body;
           log('WS headers ' + JSON.stringify({ connectionId, requestId, status: up.statusCode, ms: Date.now() - started }));
           if (up.statusCode < 200 || up.statusCode >= 300) {
