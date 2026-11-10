@@ -22,6 +22,6 @@
   },
   "description": "Windows three-entry launcher with a local Responses compatibility router",
   "engines": {
-    "node": ">=22.14"
+    "node": ">=22.15"
   }
 }

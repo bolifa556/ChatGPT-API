@@ -3,6 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import { zstdCompressSync, zstdDecompressSync } from 'node:zlib';
 import { repairThreadProviders, restoreThreadProviders } from '../src/repair-thread-providers.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'chatgpt-provider-compat-'));
@@ -103,6 +104,76 @@ try {
     assert(!fs.existsSync(journal)); noScratch();
   }
   checks.push('Duplicate rollout IDs restore each tracked file exactly; new indexed continuations use the pre-launch native provider and unowned unindexed copies remain intact');
+
+  // Native cold-history compression keeps the logical .jsonl path in SQLite
+  // while storing the actual rollout as .jsonl.zst.
+  for (const materialize of [false, true]) {
+    const id = 'compressed-' + materialize, plain = path.join(sessions, id + '.jsonl'), compressed = plain + '.zst';
+    const bytes = Buffer.from(header(id, 'chatgpt_api_mixed') + message + setting('chatgpt_api_mixed') + tool);
+    fs.writeFileSync(compressed, Buffer.concat([zstdCompressSync(bytes.subarray(0, 17)), zstdCompressSync(bytes.subarray(17))]));
+    for (const file of dbFiles) {
+      const db = new DatabaseSync(file); db.prepare('INSERT INTO threads VALUES(?,?,?,?,?)').run(id, 'chatgpt_api_mixed', 'compressed-project', 'unchanged-model', 10); db.close();
+    }
+    const result = await repairThreadProviders(ctx);
+    assert(result.repaired.some(row => row.threadId === id), 'Compressed history was omitted from provider compatibility');
+    assert.deepEqual(zstdDecompressSync(fs.readFileSync(compressed)), Buffer.from(header(id, target) + message + setting(target) + tool));
+    assert(dbFiles.every(file => rows(file).find(row => row.id === id).model_provider === target));
+    if (materialize) {
+      fs.writeFileSync(plain, zstdDecompressSync(fs.readFileSync(compressed)));
+      fs.unlinkSync(compressed);
+      fs.appendFileSync(plain, setting(target, 12) + message);
+    }
+    await restoreThreadProviders(ctx);
+    const restored = materialize ? fs.readFileSync(plain) : zstdDecompressSync(fs.readFileSync(compressed));
+    assert.deepEqual(restored, materialize ? Buffer.concat([bytes, Buffer.from(setting('chatgpt_api_mixed', 12) + message)]) : bytes);
+    assert(dbFiles.every(file => rows(file).find(row => row.id === id).model_provider === 'chatgpt_api_mixed'));
+    assert(!fs.existsSync(journal)); noScratch();
+  }
+  checks.push('Native .jsonl.zst history, its unchanged SQLite rollout path and materialization on append retain original providers and all message bytes');
+
+  const shadowId = 'native-shadow', shadowPlain = path.join(sessions, shadowId + '.jsonl'), shadowCompressed = shadowPlain + '.zst';
+  const shadowBytes = Buffer.from(header(shadowId, 'openai') + message + setting('openai'));
+  const staleBytes = zstdCompressSync(Buffer.from(header(shadowId, 'smr') + message));
+  fs.writeFileSync(shadowPlain, shadowBytes); fs.writeFileSync(shadowCompressed, staleBytes);
+  await repairThreadProviders(ctx);
+  assert.deepEqual(fs.readFileSync(shadowCompressed), staleBytes, 'Compatibility modified a compressed sibling hidden by the native plain rollout');
+  fs.unlinkSync(shadowCompressed);
+  fs.writeFileSync(shadowCompressed, zstdCompressSync(fs.readFileSync(shadowPlain)));
+  fs.unlinkSync(shadowPlain);
+  const coldArchive = path.join(archive, shadowId + '.jsonl.zst');
+  fs.renameSync(shadowCompressed, coldArchive);
+  fs.writeFileSync(coldArchive + '.chatgpt-api-compat.tmp', 'interrupted compressed rewrite');
+  await restoreThreadProviders(ctx);
+  assert.deepEqual(zstdDecompressSync(fs.readFileSync(coldArchive)), shadowBytes);
+  assert(!fs.existsSync(journal)); noScratch();
+  checks.push('Native plain-file precedence, compression after startup, archive moves and interrupted compressed scratch files recover without losing messages');
+
+  const broken = path.join(sessions, 'invalid.jsonl.zst');
+  fs.writeFileSync(broken, 'invalid compressed data');
+  await assert.rejects(repairThreadProviders(ctx));
+  assert(!fs.existsSync(journal));
+  assert.equal(fs.readFileSync(broken, 'utf8'), 'invalid compressed data');
+  fs.unlinkSync(broken); noScratch();
+  checks.push('Unreadable compressed history fails before changing any conversation or creating a recovery journal');
+
+  for (const compressed of [false, true]) {
+    const id = 'forked-history-' + compressed, file = path.join(sessions, id + '.jsonl' + (compressed ? '.zst' : ''));
+    const opaque = JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Long native item ' + '图'.repeat(1024 * 1024) }] } }) + '\n';
+    const bytes = Buffer.from(header(id, 'openai') + header('retained-parent-header', 'smr') + opaque + setting('openai') + tool);
+    fs.writeFileSync(file, compressed ? zstdCompressSync(bytes) : bytes);
+    for (const database of dbFiles) {
+      const db = new DatabaseSync(database); db.prepare('INSERT INTO threads VALUES(?,?,?,?,?)').run(id, 'openai', 'fork-project', 'unchanged-model', 10); db.close();
+    }
+    const result = await repairThreadProviders(ctx);
+    assert(result.repaired.some(row => row.threadId === id), 'A retained parent header replaced the native fork ID');
+    assert(!result.repaired.some(row => row.threadId === 'retained-parent-header'));
+    assert(dbFiles.every(database => rows(database).find(row => row.id === id).model_provider === target));
+    await restoreThreadProviders(ctx);
+    assert.deepEqual(compressed ? zstdDecompressSync(fs.readFileSync(file)) : fs.readFileSync(file), bytes);
+    assert(dbFiles.every(database => rows(database).find(row => row.id === id).model_provider === 'openai'));
+    noScratch();
+  }
+  checks.push('Native forks retain the first session ID, restore every parent-header provider and preserve multi-megabyte Unicode history lines');
 
   for (const platform of ['macos', 'linux']) {
     const { applyConfig, restoreConfig } = await import('../' + platform + '/provider.mjs');

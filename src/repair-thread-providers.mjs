@@ -5,12 +5,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
+import { createZstdCompress, createZstdDecompress } from 'node:zlib';
 import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { atomicPrivate } from './settings.mjs';
 
 const journalPath = root => path.join(root, 'data/state/thread-provider-compatibility.json');
 const canonicalHome = home => fs.realpathSync(home);
+const plainRollout = file => file.endsWith('.jsonl.zst') ? file.slice(0, -4) : file;
 const fingerprint = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 function inside(home, file) {
   const relative = path.relative(home, file);
@@ -24,7 +26,8 @@ function rolloutFiles(home) {
       const file = path.join(dir, entry.name);
       if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) walk(file);
-      else if (entry.isFile() && entry.name.endsWith('.jsonl')) files.push(file);
+      else if (entry.isFile() && (entry.name.endsWith('.jsonl')
+          || entry.name.endsWith('.jsonl.zst') && !fs.existsSync(plainRollout(file)))) files.push(file);
     }
   }
   for (const name of ['sessions', 'archived_sessions']) walk(path.join(home, name));
@@ -50,15 +53,33 @@ function openDatabase(file, readOnly) {
   if (!['id', 'model_provider'].every(name => columns.has(name))) { db.close(); return null; }
   return db;
 }
-async function* lines(file) {
-  let pending = Buffer.alloc(0);
-  for await (const chunk of fs.createReadStream(file)) {
-    const bytes = pending.length ? Buffer.concat([pending, chunk]) : chunk;
-    let start = 0, end;
-    while ((end = bytes.indexOf(10, start)) >= 0) { yield bytes.subarray(start, end + 1); start = end + 1; }
-    pending = bytes.subarray(start);
+async function* rolloutBytes(file) {
+  if (!file.endsWith('.jsonl.zst')) { yield* fs.createReadStream(file); return; }
+  const size = fs.statSync(file).size;
+  for (let offset = 0; offset < size;) {
+    const input = fs.createReadStream(file, { start: offset }), source = createZstdDecompress({ chunkSize: 64 * 1024 });
+    input.once('error', error => source.destroy(error)); input.pipe(source);
+    try { yield* source; }
+    finally { source.destroy(); input.destroy(); }
+    // Node's Zstandard decoder stops at the end of one frame. Native readers
+    // accept concatenated frames, so continue from the exact consumed offset.
+    if (!source.bytesWritten) throw new Error('Compressed conversation did not contain a complete Zstandard frame.');
+    offset += source.bytesWritten;
   }
-  if (pending.length) yield pending;
+}
+async function* lines(file) {
+  let pending = [], length = 0;
+  for await (const bytes of rolloutBytes(file)) {
+    let start = 0, end;
+    while ((end = bytes.indexOf(10, start)) >= 0) {
+      const part = bytes.subarray(start, end + 1);
+      if (length) { pending.push(part); yield Buffer.concat(pending, length + part.length); pending = []; length = 0; }
+      else yield part;
+      start = end + 1;
+    }
+    if (start < bytes.length) { const part = bytes.subarray(start); pending.push(part); length += part.length; }
+  }
+  if (length) yield Buffer.concat(pending, length);
 }
 // Locate JSON values by their actual object path. Replacing only these tokens
 // preserves whitespace, escapes and every other byte, including instructions.
@@ -112,7 +133,7 @@ async function rewrite(file, temporary, transform) {
   try {
     await pipeline(lines(file), async function* (source) {
       for await (const bytes of source) { const next = transform(bytes); changed ||= next !== bytes; yield next; }
-    }, output);
+    }, ...(file.endsWith('.jsonl.zst') ? [createZstdCompress()] : []), output);
     const current = fs.statSync(file);
     if (current.size !== before.size || current.mtimeMs !== before.mtimeMs) throw new Error('A conversation changed while preparing compatibility; close its other client first.');
     if (changed) {
@@ -143,7 +164,9 @@ function recordedProvider(state, id) {
 }
 function originalThread(state, file, meta) {
   const relative = path.relative(state.home, file);
-  const exact = state.threads.find(thread => thread.id === meta.id && thread.relative === relative);
+  // Native resume materializes .jsonl.zst for append; its cold-history worker
+  // can later compress .jsonl again. Both paths identify the same rollout.
+  const exact = state.threads.find(thread => thread.id === meta.id && plainRollout(thread.relative) === plainRollout(relative));
   if (exact) return exact;
   const candidates = state.threads.filter(thread => thread.id === meta.id);
   if (candidates.length <= 1) return candidates[0];
@@ -155,7 +178,10 @@ function originalThread(state, file, meta) {
   if (matching.length === 1) return matching[0];
   const first = fingerprint({ provider: candidates[0].originalProvider, records: candidates[0].records });
   if (candidates.every(thread => fingerprint({ provider: thread.originalProvider, records: thread.records }) === first)) return candidates[0];
-  const moved = candidates.filter(thread => !fs.existsSync(path.resolve(state.home, thread.relative)));
+  const moved = candidates.filter(thread => {
+    const plain = plainRollout(path.resolve(state.home, thread.relative));
+    return !fs.existsSync(plain) && !fs.existsSync(plain + '.zst');
+  });
   if (moved.length === 1) return moved[0];
   // An unindexed extra copy with all tracked originals still present was not
   // changed by this adapter. Keep its native routing metadata as created.
@@ -205,8 +231,11 @@ export async function restoreThreadProviders({ home, root }) {
     finally { db.close(); }
   }
   for (const thread of state.threads) {
-    const scratch = path.resolve(home, thread.relative) + '.chatgpt-api-compat.tmp';
-    if (fs.existsSync(scratch)) fs.unlinkSync(scratch);
+    const plain = plainRollout(path.resolve(home, thread.relative));
+    for (const file of [plain, plain + '.zst']) {
+      const scratch = file + '.chatgpt-api-compat.tmp';
+      if (fs.existsSync(scratch)) fs.unlinkSync(scratch);
+    }
   }
   fs.unlinkSync(journal);
   return { restored: state.threads.length };
@@ -221,7 +250,9 @@ export async function repairThreadProviders({ home, root, provider = 'chatgpt_ap
     let id, originalProvider = 'openai'; const records = [];
     for await (const bytes of lines(file)) {
       const meta = metadata(bytes); if (!meta) continue;
-      if (meta.id) id = meta.id;
+      // Forked native histories can retain a parent's session header after
+      // their own first header. The first header owns the conversation ID.
+      if (!id && meta.id) id = meta.id;
       if (meta.provider) { originalProvider = meta.provider; records.push({ key: meta.key, provider: meta.provider }); }
     }
     if (id) threads.push({ id, relative: path.relative(home, file), originalProvider, records, differs: records.some(record => record.provider !== provider) });

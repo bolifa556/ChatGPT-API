@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { zstdCompressSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { readRequestJson } from './http-fixture.mjs';
@@ -142,7 +143,21 @@ async function entry(entryMode, mode, seedProvider = null) {
     }
     config = setRoot(config, 'model_provider', 'model_provider = ' + JSON.stringify(seedProvider) + '\n');
     fs.writeFileSync(ctx.config, config);
-  } else await repairThreadProviders(ctx);
+  } else {
+    if (process.env.NATIVE_BINDING_COMPRESSED === '1') {
+      for (const directory of ['sessions', 'archived_sessions']) {
+        const base = path.join(home, directory);
+        if (!fs.existsSync(base)) continue;
+        for (const relative of fs.readdirSync(base, { recursive: true })) {
+          const file = path.join(base, relative);
+          if (!file.endsWith('.jsonl') || !fs.lstatSync(file).isFile()) continue;
+          fs.writeFileSync(file + '.zst', zstdCompressSync(fs.readFileSync(file)));
+          fs.unlinkSync(file);
+        }
+      }
+    }
+    await repairThreadProviders(ctx);
+  }
   await startClient();
 }
 async function turn(threadId, model, marker, fast = false) {
@@ -238,6 +253,11 @@ try {
     const old = await rpc('thread/start', { model: official.slug, cwd, approvalPolicy: 'never', sandbox: 'read-only' });
     await turn(old.thread.id, official.slug, 'LEGACY_' + legacy);
     legacyThreads.push({ provider: legacy, id: old.thread.id, history: await rpc('thread/turns/list', { threadId: old.thread.id, limit: 20 }) });
+    if (legacy === 'chatgpt_api_mixed') {
+      const fork = await rpc('thread/fork', { threadId: old.thread.id, excludeTurns: true });
+      await turn(fork.thread.id, official.slug, 'FORK_LEGACY_' + legacy);
+      legacyThreads.push({ provider: legacy, id: fork.thread.id, history: await rpc('thread/turns/list', { threadId: fork.thread.id, limit: 20 }) });
+    }
   }
   const beforeAuto = requests.length;
   await entry('apionly', 'gateway');
@@ -254,7 +274,7 @@ try {
   // native process; no default switching, manual settings or forks are involved.
   for (const model of gatewayModels) {
     await Promise.all(legacyThreads.map(async old => {
-      const record = await turn(old.id, model, 'AUTO_' + old.provider + '_' + model, model === gatewayModels[0]);
+      const record = await turn(old.id, model, 'AUTO_' + old.provider + '_' + old.id + '_' + model, model === gatewayModels[0]);
       assert(JSON.stringify(record.body).includes('LEGACY_' + old.provider));
     }));
   }
@@ -282,6 +302,7 @@ try {
   db.close();
   assert(!fs.readdirSync(home, { recursive: true }).some(name => /chatgpt-api.*\.tmp|provider-compatibility/.test(name)));
   checks.push('Exit restores each original provider and removes compatibility scratch files; native messages and new turns remain');
+  if (process.env.NATIVE_BINDING_COMPRESSED === '1') checks.push('Native compressed rollouts and real forked conversations resume across all three entries, including materialization, original turns and exit restoration');
   fs.writeFileSync(path.join(root, 'data/diagnostics/native-provider-binding-' + (process.env.NATIVE_BINDING_PLATFORM || 'macos') + '.json'), JSON.stringify({ passed: true, cli, fixture, threadId, checks, menus }, null, 2));
   console.log(JSON.stringify({ passed: true, checks }));
 } finally {
