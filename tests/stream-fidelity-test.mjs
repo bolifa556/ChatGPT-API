@@ -77,7 +77,7 @@ checks.push('Only adapted item identities update references; old routes leave wi
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const fixture = fs.mkdtempSync(path.join(root, 'data/testing/stream-fidelity-'));
 const children = [], sockets = new Set(), servers = [], records = [], timers = new Set();
-let proxyCount = 0, downloads = 0, allowResponses = false, held;
+let proxyCount = 0, downloads = 0, allowResponses = false, held, finishHeartbeat;
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
 const models = [{ id: 'GPT/gpt-fixture' }, { id: 'chat-only' }, { id: 'ws-chat-only' },
   { id: 'deepseek-reasoner', supported_endpoints: ['chat/completions'] },
@@ -106,8 +106,8 @@ const peer = http.createServer(async (req, res) => {
     if (body.auditCase === 'event-error') { res.end('event: error\ndata: ' + JSON.stringify({ error: originalError }) + '\n\n'); return; }
     if (body.auditCase === 'heartbeat') {
       res.write(': original heartbeat\n');
-      const timer = setTimeout(() => { timers.delete(timer); if (!res.destroyed) res.end(encodeSse(terminal(body.model))); }, 300);
-      timers.add(timer); return;
+      finishHeartbeat = () => { if (!res.destroyed) res.end(encodeSse(terminal(body.model))); };
+      return;
     }
     res.end(encodeSse(terminal(body.model)));
   } catch (error) { res.writeHead(500); res.end(error.message); }
@@ -139,6 +139,7 @@ try {
     const response = await post(base, { model: 'GPT/gpt-fixture', input: [], stream: true, auditCase: 'heartbeat' });
     const reader = response.body.getReader(), first = new TextDecoder().decode((await reader.read()).value);
     assert(first.includes(': original heartbeat')); assert(!first.includes('response.completed'));
+    finishHeartbeat();
     let tail = ''; while (true) { const chunk = await reader.read(); if (chunk.done) break; tail += new TextDecoder().decode(chunk.value); } assert(tail.includes('response.completed'));
   }
   for (const model of ['GPT/gpt-fixture', 'chat-error']) {
