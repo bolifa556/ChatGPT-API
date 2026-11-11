@@ -75,7 +75,9 @@ for (const checked of [linuxSettings, macosSettings]) assert.throws(() => checke
 checks.push('Only adapted item identities update references; old routes leave with history; WS output waits for writes; platform URL rules agree');
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const fixture = fs.mkdtempSync(path.join(root, 'data/testing/stream-fidelity-'));
+const testing = path.join(root, 'data/testing');
+fs.mkdirSync(testing, { recursive: true });
+const fixture = fs.mkdtempSync(path.join(testing, 'stream-fidelity-'));
 const children = [], sockets = new Set(), servers = [], records = [], timers = new Set();
 let proxyCount = 0, downloads = 0, allowResponses = false, held, finishHeartbeat;
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
@@ -198,6 +200,5 @@ try {
   for (const child of children) if (child.exitCode === null && child.signalCode === null) { const exited = once(child, 'exit'); child.kill(); await exited; }
   for (const socket of sockets) socket.destroy();
   for (const server of servers) if (server.listening) await new Promise(resolve => server.close(resolve));
-  const testing = path.join(root, 'data/testing');
   if (path.dirname(fixture) === testing && path.basename(fixture).startsWith('stream-fidelity-')) fs.rmSync(fixture, { recursive: true, force: true });
 }
