@@ -6,11 +6,18 @@ import { scopeNativeQuota, quotaBootstrap, gatewayQuotaModels, nativeQuotaAssets
 
 const key = '__quota_test_' + Date.now();
 const source = 'export const __rspack_esm_ids=[];export const __webpack_modules__={gate(e,t,n){const{host:w,blocked:E,model:g,limits:T}=n,tk={is:(limits)=>limits.blocked};let u;u="local"===w&&E||(0,tk.is)(T,g);e.result={rateLimitWarningThreshold:50,sendBlocked:u}}};';
+const namedSubmitSource = 'var C=n("eLmE"),P=n("a6kU");let nF=host,n6={settings:{model}},nK=(0,i._U)(C.F9,nF),of=(0,i.Ul)("local"===nF&&P.U);let other=otherBlock&&"permission-blocked",reserve=nK&&"reserve-limit",usage=of&&"usage-limit";let disabled=[other,reserve,usage].filter(Boolean).join(",");return{activeCollaborationMode:n6,submitDisabledReasons:disabled};';
+const namedModule = 'export const __rspack_esm_ids=[];export const __webpack_modules__={composer(e,t,n){' + namedSubmitSource + '}};';
 const catalog = { official: [{ slug: 'official' }], gatewayIds: ['Gateway/model', 'official'] };
 const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'native-ui-index-'));
 const archive = path.join(fixture, 'app.asar'), index = path.join(fixture, 'index.json');
 function writeArchive(text) {
-  const data = Buffer.from(text), header = Buffer.from(JSON.stringify({ files: { webview: { files: { assets: { files: { 'quota.js': { size: data.length, offset: '0' } } } } } } }));
+  const entries = {}, chunks = []; let offset = 0;
+  for (const [name, source] of Object.entries(typeof text === 'string' ? { 'quota.js': text } : text)) {
+    const bytes = Buffer.from(source); entries[name] = { size: bytes.length, offset: String(offset) };
+    chunks.push(bytes); offset += bytes.length;
+  }
+  const data = Buffer.concat(chunks), header = Buffer.from(JSON.stringify({ files: { webview: { files: { assets: { files: entries } } } } }));
   const prefix = Buffer.alloc(16); prefix.writeUInt32LE(header.length + 8, 4); prefix.writeUInt32LE(header.length, 12);
   fs.writeFileSync(archive, Buffer.concat([prefix, header, data]));
 }
@@ -23,6 +30,18 @@ try {
   assert(nativeQuotaAssets(archive, index)[0].source.endsWith('new native version'));
   fs.writeFileSync(index, 'interrupted optional cache write');
   assert.equal(nativeQuotaAssets(archive, index).length, 1);
+  writeArchive({ 'quota.js': source, 'composer.js': namedModule });
+  assert.equal(nativeQuotaAssets(archive, index).length, 2);
+  const oldIndex = JSON.parse(fs.readFileSync(index));
+  delete oldIndex.revision; oldIndex.entries = oldIndex.entries.slice(0, 1);
+  fs.writeFileSync(index, JSON.stringify(oldIndex));
+  const refreshed = nativeQuotaAssets(archive, index);
+  assert.equal(refreshed.length, 2, 'An old matcher cache hid a newly supported send-button module');
+  assert(refreshed.some(asset => asset.submitCount === 1));
+  writeArchive(namedModule.replace('usage=of&&"usage-limit"', 'usage=of&&"changed-quota-reason"'));
+  const unmatched = nativeQuotaAssets(archive, index);
+  assert.equal(unmatched[0].legacySubmitCount, 1, 'An unmatched send gate disappeared from compatibility validation');
+  assert.equal(unmatched[0].submitCount, 0);
 } finally { fs.unlinkSync(archive); fs.unlinkSync(index); fs.rmdirSync(fixture); }
 assert.deepEqual(gatewayQuotaModels(catalog), ['Gateway/model']);
 assert.deepEqual(gatewayQuotaModels(catalog, 'gateway'), ['Gateway/model', 'official'], 'Pure API models must retain quota/Fast compatibility when their names match an official model');
@@ -35,6 +54,9 @@ const submitSource = 'var C=n("eLmE"),P=n("a6kU");let nF=host,n6={settings:{mode
 const adaptedSubmit = scopeNativeQuota(submitSource, key);
 assert.equal(adaptedSubmit.submitCount, 1);
 assert.equal(adaptedSubmit.legacySubmitCount, 1);
+const adaptedNamed = scopeNativeQuota(namedSubmitSource, key);
+assert.equal(adaptedNamed.submitCount, 1);
+assert.equal(adaptedNamed.legacySubmitCount, 1);
 const nativeSubmit = 'let blocked=otherBlock||workHomePolicy;return{activeCollaborationMode:mode,submitBlockState:state,submitDisabled:blocked};';
 const currentSubmit = scopeNativeQuota(source + nativeSubmit, key);
 assert.equal(currentSubmit.legacySubmitCount, 0);
@@ -62,6 +84,9 @@ try {
       const gateway = host === 'local' && model === 'Gateway/model';
       assert.equal(result.submitDisabled, otherBlock || !gateway && (hard || host === 'local' && ordinary), JSON.stringify({host,model,hard,ordinary,otherBlock}));
       if (!gateway) assert.deepEqual(result, invoke(submitSource));
+      const named = invoke(adaptedNamed.text), expectedReasons = [otherBlock && 'permission-blocked', !gateway && hard && 'reserve-limit', !gateway && host === 'local' && ordinary && 'usage-limit'].filter(Boolean).join(',');
+      assert.equal(named.submitDisabledReasons, expectedReasons, JSON.stringify({host,model,hard,ordinary,otherBlock}));
+      if (!gateway) assert.deepEqual(named, invoke(namedSubmitSource));
     }
   }
   for (const [host, model, blocked] of [['local', 'Gateway/model', false], ['local', 'official', true], ['remote', 'Gateway/model', true], ['local', 'unknown', true]]) {
@@ -75,4 +100,4 @@ try {
   native.__webpack_modules__.gate(output, {}, { host: 'local', model: 'New/model', blocked: true, limits: { blocked: true } });
   assert.equal(output.result.sendBlocked, false);
 } finally { delete globalThis[key]; }
-console.log(JSON.stringify({ passed: true, checks: ['Native submit gate scopes both exhausted-subscription flags to the selected model', 'Official models, remote hosts, unknown models and other native blockers retain their original decisions', 'Model switching updates submit eligibility and catalog changes update the in-memory scope'] }));
+console.log(JSON.stringify({ passed: true, checks: ['Native Boolean and named-reason submit gates scope both exhausted-subscription flags to the selected model', 'Official models, remote hosts, unknown models and other native blockers retain their original decisions', 'Model switching updates submit eligibility and catalog changes update the in-memory scope', 'Matcher upgrades invalidate old asset indexes; unadapted quota gates remain visible to validation'] }));

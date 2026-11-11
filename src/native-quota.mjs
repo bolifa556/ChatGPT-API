@@ -12,10 +12,12 @@ import WebSocket from 'ws';
 import { atomicPrivate } from './settings.mjs';
 
 const quotaGuard = /(?<![\w$])([A-Za-z_$][\w$]*)="local"===([A-Za-z_$][\w$]*)&&([A-Za-z_$][\w$]*)\|\|\(0,([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)/g;
+const quotaAssetRevision = 2;
+const escaped = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function scopeComposerSubmission(source, key) {
   const identifier = '[A-Za-z_$][\\w$]*';
   const hardReads = new RegExp('\\b(' + identifier + ')=\\(0,' + identifier + '\\._U\\)\\((' + identifier + ')\\.F9,(' + identifier + ')\\)', 'g');
-  const props = /activeCollaborationMode:([A-Za-z_$][\w$]*),[^{};]{0,1200}?\bsubmitDisabled:([A-Za-z_$][\w$]*)/g;
+  const props = /activeCollaborationMode:([A-Za-z_$][\w$]*),[^{};]{0,1200}?\b(submitDisabled(?:Reasons)?):([A-Za-z_$][\w$]*)/g;
   let text = source, count = 0, legacyCount = 0;
   for (const hard of source.matchAll(hardReads)) {
     const [, blocked, module, host] = hard;
@@ -23,24 +25,36 @@ function scopeComposerSubmission(source, key) {
     legacyCount++;
     const component = [...source.matchAll(props)].find(match => match.index > hard.index);
     if (!component || component.index - hard.index > 40000) continue;
-    const [, mode, disabled] = component;
+    const [, mode, property, disabled] = component;
     const between = source.slice(hard.index, component.index);
-    const ordinary = between.match(new RegExp('\\b(' + identifier + ')=\\(0,' + identifier + '\\.Ul\\)\\("local"===' + host + '&&(' + identifier + ')\\.U\\)'));
+    const ordinary = between.match(new RegExp('\\b(' + identifier + ')=\\(0,' + identifier + '\\.Ul\\)\\("local"===' + escaped(host) + '&&(' + identifier + ')\\.U\\)'));
     if (!ordinary || !source.includes(ordinary[2] + '=n("a6kU")')) continue;
-    const declaration = between.match(new RegExp('\\b' + disabled + '=([^;]+);'));
+    const gateway = '"local"===' + host + '&&globalThis[' + JSON.stringify(key) + ']?.models?.has(' + mode + '?.settings?.model)';
+    if (property === 'submitDisabledReasons') {
+      // New clients pass named reasons to the composer. Scope the two native
+      // quota reasons before React memoizes them, preserving every other reason.
+      const reasons = [[blocked, 'reserve-limit'], [ordinary[1], 'usage-limit']].map(([flag, reason]) =>
+        between.match(new RegExp('\\b(' + identifier + ')=' + escaped(flag) + '&&"' + reason + '"')));
+      if (reasons.some(reason => !reason)) continue;
+      for (const [position, reason] of reasons.entries()) {
+        const flag = position ? ordinary[1] : blocked;
+        text = text.replace(reason[0], reason[0].replace('=' + flag, '=((' + gateway + ')?false:' + flag + ')'));
+      }
+      count++; continue;
+    }
+    const declaration = between.match(new RegExp('\\b' + escaped(disabled) + '=([^;]+);'));
     const tail = '||' + blocked + '||' + ordinary[1];
     if (!declaration || !declaration[1].endsWith(tail)) continue;
     // Scope only the two subscription-quota operands. Permission checks,
     // loading, safety decisions and every other native submit condition stay
     // in the original expression, including when switching models mid-chat.
-    const gateway = '"local"===' + host + '&&globalThis[' + JSON.stringify(key) + ']?.models?.has(' + mode + '?.settings?.model)';
     const adapted = declaration[0].slice(0, -tail.length - 1) + '||((' + gateway + ')?false:(' + blocked + '||' + ordinary[1] + '));';
     text = text.replace(declaration[0], adapted); count++;
   }
   return { text, count, legacyCount };
 }
 export function scopeNativeQuota(source, key) {
-  if (!source.includes('sendBlocked:') && !source.includes('serviceTierAccess:') && !source.includes('submitDisabled:')) {
+  if (!source.includes('sendBlocked:') && !source.includes('serviceTierAccess:') && !source.includes('submitDisabled:') && !source.includes('submitDisabledReasons:')) {
     return { text: source, count: 0, quotaCount: 0, fastCount: 0, submitCount: 0, legacySubmitCount: 0 };
   }
   let quotaCount = 0, fastCount = 0;
@@ -69,14 +83,14 @@ export function nativeQuotaAssets(archive, cacheFile = '') {
     const read = entry => {
       const buffer = Buffer.alloc(entry.size); fs.readSync(fd, buffer, 0, buffer.length, entry.offset);
       const source = buffer.toString(), adapted = scopeNativeQuota(source, 'quota_probe');
-      if (!adapted.count) return null;
+      if (!adapted.count && !adapted.legacySubmitCount) return null;
       if (!source.includes('export const __webpack_modules__=')) throw new Error('Unsupported native quota module format.');
       return { url: entry.url, source, submitCount: adapted.submitCount, legacySubmitCount: adapted.legacySubmitCount };
     };
     if (cacheFile) {
       try {
         const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
-        if (cached.identity === identity && cached.entries?.length) {
+        if (cached.revision === quotaAssetRevision && cached.identity === identity && cached.entries?.length) {
           const assets = cached.entries.map(read);
           if (assets.every(Boolean)) return assets;
         }
@@ -99,7 +113,7 @@ export function nativeQuotaAssets(archive, cacheFile = '') {
     }
     scan(tree);
     if (!assets.length) throw new Error('当前客户端的 API 界面兼容检查未通过，请更新适配层。');
-    if (cacheFile) atomicPrivate(cacheFile, { identity, entries });
+    if (cacheFile) atomicPrivate(cacheFile, { revision: quotaAssetRevision, identity, entries });
     return assets;
   } finally { fs.closeSync(fd); }
 }
@@ -190,9 +204,9 @@ export async function startQuotaCompatibleClient({ executable, archive, root, ho
     let routeMode = 'mixed';
     try { routeMode = JSON.parse(fs.readFileSync(path.join(root, 'data/state/route-state.json'), 'utf8')).mode; } catch {}
     const models = () => gatewayQuotaModels(JSON.parse(fs.readFileSync(cache, 'utf8')), routeMode);
-    // Older clients duplicate subscription quota checks in the composer. New
-    // clients removed those operands; keep their native submission path intact.
-    if (models().length && assets.some(asset => asset.legacySubmitCount) && !assets.some(asset => asset.submitCount)) throw new Error('当前客户端的 API 发送兼容检查未通过，请更新适配层。');
+    // Validate every detected quota gate, including modules with no other
+    // patches. Installing a Fast/banner module cannot certify the send button.
+    if (models().length && assets.some(asset => asset.legacySubmitCount > asset.submitCount)) throw new Error('当前客户端的 API 发送兼容检查未通过，请更新适配层。');
     const bootstrapSource = quotaBootstrap(assets, [], key, binding);
     status.phase = 'launching'; report();
     if (launch) {

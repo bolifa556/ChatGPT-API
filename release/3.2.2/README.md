@@ -9,6 +9,8 @@
 | Linux ARM64 | [下载安装包](ChatGPT-API-Provider-3.2.2-linux-arm64.tar.gz) |
 | macOS Apple Silicon | [下载 DMG](ChatGPT-API-Provider-3.2.2-macos-arm64.dmg) |
 
+- 修复当前客户端通过 `reserve-limit`、`usage-limit` 禁用发送按钮时，混合模式切自定义模型仍无法发送的问题；官方模型的额度判断和其他禁用条件保持原样。
+- 界面模块缓存随兼容规则更新自动重建，未处理的发送额度判断不会再被其他模块的加载成功掩盖。
 - 配置修改识别 TOML 字符串、注释与数组，保留多行自定义指令和配置示例；退出恢复原设置。
 - 修复压缩历史恢复再次中断时的缓存一致性问题，减少日常切换的历史读写。
 - 按模型目录声明选择 Responses 或 Chat；保留明确的 API 路径、具名工具结果、来源标注、真实模型信息和 Fast 参数。
