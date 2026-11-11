@@ -111,6 +111,8 @@ jobs:
       - run: python3 scripts/ci-run.py node tests/recovery-test.mjs
       - run: node tests/account-isolation-test.mjs
       - run: node tests/native-quota-test.mjs
+      - run: node tests/native-quota-startup-test.mjs
+      - run: node tests/diagnostics-test.mjs
       - run: node tests/model-strength-test.mjs
       - run: node tests/console-sources-test.mjs
       - run: node tests/gateway-transport-test.mjs

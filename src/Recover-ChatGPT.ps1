@@ -44,6 +44,6 @@ try {
     Stop-LauncherRecordedHelpers $packageDir $except
     Unregister-LauncherRecovery $packageDir $state.sessionId
 } catch {
-    Add-Content -LiteralPath (Join-Path $packageDir 'data\logs\recovery.log') -Value ([DateTime]::UtcNow.ToString('o') + ' ' + $_.Exception.Message)
+    Write-LauncherDiagnostic $packageDir 'recovery.log' $_.Exception.Message
     exit 1
 } finally { if ($lock) { $lock.Dispose() } }

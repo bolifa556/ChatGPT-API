@@ -1,0 +1,40 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createDiagnosticLog, cleanManagedLogs, errorDetails, describeError, LOG_LIMIT } from '../src/diagnostics.mjs';
+
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'launcher-diagnostics-'));
+const directory = path.join(root, 'data/logs');
+const file = path.join(directory, 'shim.log');
+try {
+  const log = createDiagnosticLog(file, { limit: 1024, sanitize: value => value.replaceAll('inert-private-key', '[redacted]') });
+  assert(!fs.existsSync(directory), 'An idle logger created files');
+  log('failure Bearer inert-token api_key="inert-other-key" https://u:p@example.invalid/?token=inert-query-key inert-private-key');
+  const recorded = fs.readFileSync(file, 'utf8');
+  for (const secret of ['inert-token','inert-other-key','u:p@','inert-query-key','inert-private-key']) assert(!recorded.includes(secret), secret);
+  log('failure Bearer inert-token api_key="inert-other-key" https://u:p@example.invalid/?token=inert-query-key inert-private-key');
+  assert.equal(fs.readFileSync(file, 'utf8'), recorded, 'Repeated failure created duplicate I/O');
+  for (let n = 0; n < 100; n++) log(n + ' ' + 'x'.repeat(1800));
+  assert(fs.statSync(file).size <= 1024, 'Log exceeded the configured cap');
+  assert(!fs.existsSync(file + '.1'), 'Logger created a growing archive');
+  const cause = Object.assign(new Error('connect refused'), { code: 'ECONNREFUSED' });
+  const failure = new Error('fetch failed', { cause });
+  assert.equal(errorDetails(failure).cause.code, 'ECONNREFUSED');
+  assert(describeError(failure).includes('ECONNREFUSED'));
+  cause.cause = failure;
+  assert.doesNotThrow(() => JSON.stringify(errorDetails(failure)));
+  const userFile = path.join(directory, 'my-notes.log'); fs.writeFileSync(userFile, 'keep user file');
+  fs.writeFileSync(file + '.1', 'obsolete archive');
+  fs.writeFileSync(file, ('old line\n').repeat(LOG_LIMIT));
+  const expired = path.join(directory, 'recovery.log'); fs.writeFileSync(expired, 'old failure');
+  fs.utimesSync(expired, new Date(0), new Date(0));
+  cleanManagedLogs(root);
+  assert(!fs.existsSync(file + '.1'));
+  assert(!fs.existsSync(expired));
+  assert.equal(fs.readFileSync(userFile, 'utf8'), 'keep user file');
+  assert(fs.statSync(file).size <= 64 * 1024);
+  const denied = createDiagnosticLog(path.join(file, 'not-a-directory'));
+  assert.doesNotThrow(() => denied('failure'), 'Logging blocked the caller when the log path was unavailable');
+} finally { fs.rmSync(root, { recursive: true, force: true }); }
+console.log(JSON.stringify({ passed: true, checks: ['failure-only lazy writes', 'redaction', 'cause chain and cycles', 'bounded logs and duplicate suppression', 'bounded startup cleanup preserves user files', 'write failures are non-fatal'] }));

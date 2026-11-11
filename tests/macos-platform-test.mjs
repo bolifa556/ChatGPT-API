@@ -92,7 +92,7 @@ try {
   assert(launch.endsWith(' "$@"\n')); assert(!launch.includes('\r'));
 
   const release = path.join(fixture, 'release'), destination = path.join(fixture, 'target');
-  const required = ['runtime/node','macos/provider.mjs','macos/platform.mjs','macos/native.mjs','macos/chatgpt-apionly','macos/install.mjs','src/shim.mjs','src/transport.mjs','src/response-state.mjs','src/settings.mjs','src/gateway-sources.mjs','src/console.mjs','assets/console/index.html','assets/console/console.css','assets/console/console.js','assets/console/icon.svg','src/repair-thread-providers.mjs','src/rollout-index.mjs','src/model-context.mjs','src/model-strength.mjs','src/gateway-recovery.mjs','src/toml-edit.mjs','assets/model-template.json','assets/model-contexts.json','package-lock.json'];
+  const required = ['runtime/node','macos/provider.mjs','macos/platform.mjs','macos/native.mjs','macos/chatgpt-apionly','macos/install.mjs','src/shim.mjs','src/diagnostics.mjs','src/transport.mjs','src/response-state.mjs','src/settings.mjs','src/gateway-sources.mjs','src/console.mjs','assets/console/index.html','assets/console/console.css','assets/console/console.js','assets/console/icon.svg','src/repair-thread-providers.mjs','src/rollout-index.mjs','src/model-context.mjs','src/model-strength.mjs','src/gateway-recovery.mjs','src/toml-edit.mjs','assets/model-template.json','assets/model-contexts.json','package-lock.json'];
   const files = required.map(relative => {
     atomic(path.join(release, 'payload', relative), 'fixture\n');
     return { path: relative, bytes: 8, sha256: crypto.createHash('sha256').update('fixture\n').digest('hex'), mode: 0o644 };

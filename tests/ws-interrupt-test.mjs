@@ -99,7 +99,7 @@ for (const name of ['model-template.json', 'reasoning-levels.json']) fs.copyFile
 fs.writeFileSync(path.join(fixture, 'data/.env'), 'BASE_URL=' + upstream + '/v1\nAPI_KEY=inert-test-key\nSHIM_PORT=' + port + '\nOFFICIAL_BASE=' + upstream + '/official\n');
 fs.writeFileSync(path.join(fixture, 'data/state/route-state.json'), JSON.stringify({ mode: 'mixed', entryMode: 'api', officialProxy: '', clientVersion: '0.164.0' }));
 fs.writeFileSync(path.join(fixture, 'home/auth.json'), JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'inert-test-account' } }));
-const env = { ...process.env, CHATGPT_API_ROOT: fixture, CODEX_HOME: path.join(fixture, 'home') };
+const env = { ...process.env, CHATGPT_API_DEBUG: '1', CHATGPT_API_ROOT: fixture, CODEX_HOME: path.join(fixture, 'home') };
 function runRouter(args) {
   const child = spawn(process.execPath, [routerFile, ...args], { env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   children.push(child); let errors = ''; child.stderr.on('data', value => { errors += value; });

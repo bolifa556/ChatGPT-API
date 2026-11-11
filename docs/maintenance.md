@@ -36,7 +36,7 @@ Windows 构建在 Windows 执行；macOS DMG 在 Mac 上使用系统工具，或
 
 - data/cache：模型目录与容量记录。
 - data/state：本地进程、入口与控制台连接状态。
-- data/logs：固定文件名日志；shim.log 超过 5 MB 后滚动为一份 .1。
+- data/logs：默认只记异常，不记每条成功请求。诊断追加日志上限为 256 KiB，单条上限 8 KiB，短时间相同错误去重；启动时仅检查固定日志名，删除超过 7 天的旧记录和旧 .1，较大的历史日志保留末尾 64 KiB。没有周期清理任务，不扫描聊天、缓存或其他用户文件。
 - data/testing、data/diagnostics：测试夹具和验证结果，不是聊天记录。
 
 不要分享填过 Key 的安装目录。对外只分发构建生成的原始归档。PowerShell 文件保留 UTF-8 BOM，确保 Windows PowerShell 5.1 正确读取中文入口名。
@@ -51,5 +51,13 @@ Windows 构建在 Windows 执行；macOS DMG 在 Mac 上使用系统工具，或
 | 压缩 provider 不匹配 | 官方/API 切换后退出重开；不把官方加密块转成虚构摘要 |
 | 浏览器工具不可用 | 检查原生工具身份、平台权限与工具自身网络，不仅是模型路由 |
 | 控制台连接失效 | 从程序目录重新打开；随机端口与连接令牌随控制台服务变化 |
+
+## 异常记录
+
+Windows 推荐已验证的官方客户端 26.1103.7773.0 或更新稳定版。26.1029.9216.0 曾出现界面兼容初始化超时，更新后恢复；不能据此断定所有旧版的失败原因相同，也不把这个版本号当成官方最低要求。
+
+启动失败先保留同次 `data/state/native-session.json`、`native-quota.json` 和 `data/logs/native-session-stderr.log`。状态包含失败阶段、客户端版本（可从安装路径取得时）、模块总数/未完成数、挂接页面数、未响应命令和已捕获的底层异常。`native_script_exception` 表示执行异常，`native_module_failed` 表示模块准备或导入失败，`native_page_not_attached` 表示没有接到主页面，`native_command_timeout` 表示本地兼容命令无响应。不能把未观察到的环节写成已确认根因。
+
+聊天失败查看 `data/logs/shim.log`；目录失败同时查看 `data/cache/gateway-sources.json` 中对应来源的状态；早期启动失败查看 `launcher-error.log`，恢复失败查看 `recovery.log`。错误保留有限的 cause/code 链和请求阶段，不记录完整请求、图片或凭据；上游返回值与正常消息转换不因此改变。临时诊断可设置进程环境变量 `CHATGPT_API_DEBUG=1` 保留成功请求的耗时摘要，同样受大小限制，日常不要开启。
 
 功能边界与数据位置以项目 README、configuration.md 和 console.md 为准。日期文档保留为历史调查记录。

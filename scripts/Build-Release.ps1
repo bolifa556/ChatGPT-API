@@ -37,7 +37,7 @@ try {
         'assets/ChatGPT.ico','assets/model-template.json','assets/reasoning-levels.json','assets/model-contexts.json','assets/console/index.html','assets/console/console.css','assets/console/console.js','assets/console/icon.svg','assets/runtime.json',
         'install/Install-ChatGPT.ps1','install/Install-Core.ps1','install/Installer-UI.ps1','install/Bootstrap-Runtime.ps1',
         'src/Common.ps1','src/Package-Paths.ps1','src/Launcher-State.ps1','src/Router-Control.ps1','src/Api-Settings.ps1',
-        'src/shim.mjs','src/transport.mjs','src/response-state.mjs','src/settings.mjs','src/gateway-sources.mjs','src/console.mjs','src/chat-compat.mjs','src/history-compat.mjs','src/non-gpt-compat.mjs','src/sse.mjs','src/image-compat.mjs','src/responses-images.mjs',
+        'src/shim.mjs','src/diagnostics.mjs','src/transport.mjs','src/response-state.mjs','src/settings.mjs','src/gateway-sources.mjs','src/console.mjs','src/chat-compat.mjs','src/history-compat.mjs','src/non-gpt-compat.mjs','src/sse.mjs','src/image-compat.mjs','src/responses-images.mjs',
         'src/repair-thread-providers.mjs','src/rollout-index.mjs','src/model-context.mjs','src/model-strength.mjs','src/gateway-recovery.mjs','src/toml-edit.mjs','src/Recovery-Control.ps1','src/Recover-ChatGPT.ps1','src/Recover-ChatGPT.vbs','src/desktop-state.mjs','src/native-quota.mjs','src/native-session.mjs'
     )) { Copy-ProgramFile $file }
     foreach ($entry in @(Get-LockedPackages $root)) {

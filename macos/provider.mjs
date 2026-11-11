@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { cleanManagedLogs } from '../src/diagnostics.mjs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -81,7 +82,7 @@ async function locked(ctx, action, name = 'provider-lock') {
 export const withLaunchLock = (ctx, action) => locked(ctx, action, 'launch-lock');
 function buildId(ctx) {
   const hash = crypto.createHash('sha256');
-  for (const file of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs','responses-images.mjs','model-context.mjs','model-strength.mjs','transport.mjs','response-state.mjs','settings.mjs','gateway-sources.mjs']) hash.update(fs.readFileSync(path.join(ctx.root, 'src', file)));
+  for (const file of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs','responses-images.mjs','model-context.mjs','model-strength.mjs','transport.mjs','response-state.mjs','diagnostics.mjs','settings.mjs','gateway-sources.mjs']) hash.update(fs.readFileSync(path.join(ctx.root, 'src', file)));
   for (const name of ['model-contexts.json', 'model-template.json']) {
     if (fs.existsSync(path.join(ctx.root, 'assets', name))) hash.update(fs.readFileSync(path.join(ctx.root, 'assets', name)));
   }
@@ -151,8 +152,9 @@ export async function ensureRouter(ctx, refresh = false, selection) {
       return existing;
     }
     const { env, prepared } = await prepare(ctx, settings, selection);
+    cleanManagedLogs(ctx.root);
     const logPath = path.join(ctx.data, 'logs', 'provider-start.log'); fs.mkdirSync(path.dirname(logPath), { recursive: true, mode: 0o700 });
-    const log = fs.openSync(logPath, 'a', 0o600);
+    const log = fs.openSync(logPath, 'w', 0o600);
     const child = spawn(ctx.node, [path.join(ctx.root, 'src/shim.mjs')], { env, cwd: ctx.root, detached: true, stdio: ['ignore', log, log] });
     fs.closeSync(log);
     await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });

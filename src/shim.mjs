@@ -22,6 +22,7 @@ import { PendingResponses, HistoryCache, laneOf } from './response-state.mjs';
 import { GatewaySources } from './gateway-sources.mjs';
 import { overrideKey, redact } from './settings.mjs';
 import { canRequestFast } from './model-strength.mjs';
+import { cleanManagedLogs, createDiagnosticLog, errorDetails, describeError } from './diagnostics.mjs';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const root = process.env.CHATGPT_API_ROOT || path.dirname(dir);
@@ -57,13 +58,17 @@ const gatewayDispatcher = gatewayDispatcherFor(gatewayEnabled ? gatewayBase : 'h
 const officialDispatcher = officialDispatcherFor(officialProxy);
 const sourceId = crypto.createHash('sha256').update(gatewayBase + '\n' + (env.API_KEY || '')).digest('hex');
 const buildHash = crypto.createHash('sha256');
-for (const name of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs','responses-images.mjs','model-context.mjs','model-strength.mjs','transport.mjs','response-state.mjs','settings.mjs','gateway-sources.mjs']) buildHash.update(fs.readFileSync(path.join(dir, name)));
+for (const name of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs','responses-images.mjs','model-context.mjs','model-strength.mjs','transport.mjs','response-state.mjs','diagnostics.mjs','settings.mjs','gateway-sources.mjs']) buildHash.update(fs.readFileSync(path.join(dir, name)));
 for (const name of ['model-contexts.json', 'model-template.json']) {
   if (fs.existsSync(path.join(root, 'assets', name))) buildHash.update(fs.readFileSync(path.join(root, 'assets', name)));
 }
 const buildId = buildHash.digest('hex');
 const cachePath = path.join(cacheDir, 'catalog-state.json');
-const logFile = path.join(dataDir, 'logs', 'shim.log');
+cleanManagedLogs(root);
+const debug = process.env.CHATGPT_API_DEBUG === '1';
+const log = createDiagnosticLog(path.join(dataDir, 'logs', 'shim.log'), {
+  sanitize: text => redact(text, sources.settings, [env.API_KEY, ...sources.secrets]),
+});
 const CACHE_MAX_AGE = 24 * 60 * 60 * 1000;
 let catalog = { official: [], gatewayIds: [], gatewayModels: [], gatewayAt: null, officialAt: null, sourceId };
 let status = { gateway: { ready: false }, official: { ready: false } };
@@ -73,15 +78,6 @@ const controllers = new Set();
 export let routerReady;
 export let closeRouter;
 
-function log(text) {
-  try {
-    fs.mkdirSync(path.dirname(logFile), { recursive: true });
-    if (fs.existsSync(logFile) && fs.statSync(logFile).size > 5 * 1024 * 1024) {
-      fs.rmSync(logFile + '.1', { force: true }); fs.renameSync(logFile, logFile + '.1');
-    }
-    fs.appendFileSync(logFile, '[' + new Date().toISOString() + '] ' + redact(text, sources.settings, [env.API_KEY, ...sources.secrets]) + '\n');
-  } catch {}
-}
 function auth() {
   const saved = readJson(path.join(codexHome, 'auth.json'), {});
   if (saved.auth_mode && saved.auth_mode !== 'chatgpt') return {};
@@ -125,7 +121,7 @@ async function fetchJson(url, headers, dispatcher, timeout = 12000, signal) {
   const boundedSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout);
   const r = await request(url, { headers, dispatcher, signal: boundedSignal, headersTimeout: timeout, bodyTimeout: timeout });
   const text = await r.body.text();
-  if (r.statusCode < 200 || r.statusCode >= 300) throw new Error('HTTP ' + r.statusCode);
+  if (r.statusCode < 200 || r.statusCode >= 300) throw Object.assign(new Error('HTTP ' + r.statusCode), { code: 'upstream_http_error', status: r.statusCode });
   return JSON.parse(text);
 }
 async function refreshCatalog() {
@@ -139,7 +135,7 @@ async function refreshCatalog() {
           catalog.gatewayModels = sources.models;
           catalog.gatewayIds = sources.models.map(model => model.id);
           catalog.gatewayAt = sources.sources.map(source => source.checkedAt).sort().at(-1) || null;
-        } catch (e) { status.gateway = { ready: false, error: e.message, checkedAt: new Date().toISOString(), cachedAt: catalog.gatewayAt }; }
+        } catch (e) { status.gateway = { ready: false, error: describeError(e), failure: errorDetails(e), checkedAt: new Date().toISOString(), cachedAt: catalog.gatewayAt }; }
       })(),
       (async () => {
         if (mode !== 'mixed') { status.official = { ready: false, enabled: false }; return; }
@@ -151,12 +147,13 @@ async function refreshCatalog() {
           const headers = { authorization: 'Bearer ' + a.token, ...(a.accountId ? { 'chatgpt-account-id': a.accountId } : {}) };
           const data = await fetchJson(officialBase + '/models?client_version=' + encodeURIComponent(version), headers, officialDispatcher);
           acceptOfficialCatalog(data, version);
-        } catch (e) { status.official = { ready: false, error: e.message, cached: catalog.official.length > 0 }; }
+        } catch (e) { status.official = { ready: false, error: describeError(e), failure: errorDetails(e), cached: catalog.official.length > 0 }; }
       })(),
     ]);
     saveCatalog();
     writeDesktopCatalog();
-    log('catalog refresh gateway=' + status.gateway.ready + ' official=' + status.official.ready);
+    if (gatewayEnabled && !status.gateway.ready) log('catalog gateway ' + JSON.stringify(status.gateway));
+    if (mode === 'mixed' && !status.official.ready) log('catalog official ' + JSON.stringify(status.official));
   })().finally(() => { refreshInFlight = null; });
   return refreshInFlight;
 }
@@ -221,7 +218,7 @@ function historyForTarget(payload, which) {
   const images = restoreHostedImageHistory(payload, codexHome);
   if (which !== 'official' && !isGptModel(payload.model)) return images;
   const result = which === 'official' ? normalizeOfficialHistory(images.payload) : normalizeGptHistory(images.payload);
-  if (result.changed) log('history compatibility model=' + payload.model + ' ' + JSON.stringify(result.stats));
+  if (debug && result.changed) log('history compatibility model=' + payload.model + ' ' + JSON.stringify(result.stats));
   return { ...result, changed: images.changed || result.changed };
 }
 function prepareRequest(payload, which, pathname = '/v1/responses', metadata) {
@@ -442,7 +439,7 @@ async function handleHttp(req, res) {
   const started = Date.now();
   const requestId = crypto.randomUUID();
   let phase = 'conversion', firstByteMs = null, upstreamBytes = null, upstreamStatus = null, upstreamBody;
-  log('request start ' + JSON.stringify({ requestId, route: which, model: parsed.model,
+  if (debug) log('request start ' + JSON.stringify({ requestId, route: which, model: parsed.model,
     wireBytes: incoming.raw.length, decodedBytes: incoming.decoded.length, encoding: incoming.encoding || 'identity',
     readDecodeMs: started - receivedAt }));
   try {
@@ -458,7 +455,7 @@ async function handleHttp(req, res) {
       signal: controller.signal, ...RESPONSE_TIMEOUTS });
     upstreamBody = upstream.body;
     upstreamStatus = upstream.statusCode; phase = 'stream';
-    log('request headers ' + JSON.stringify({ requestId, status: upstreamStatus, upstreamBytes,
+    if (debug) log('request headers ' + JSON.stringify({ requestId, status: upstreamStatus, upstreamBytes,
       encoding: outgoingBodyData.encoding || 'identity', ms: Date.now() - started }));
     const outgoing = { ...upstream.headers }; for (const name of ['connection','transfer-encoding','keep-alive']) delete outgoing[name];
     const images = gateway && /^\/(?:v1\/)?responses$/.test(url.pathname) ? new ResponseImages(codexHome) : null;
@@ -476,7 +473,7 @@ async function handleHttp(req, res) {
           }
         } catch (e) {
           if (!res.destroyed) await writeChunk(res, encodeSse(protocolError(e)));
-          log('Stream conversion error ' + e.message);
+          log('stream conversion ' + JSON.stringify({ requestId, route: which, failure: errorDetails(e) }));
         }
       } else {
         const chunks = []; let size = 0;
@@ -490,7 +487,7 @@ async function handleHttp(req, res) {
         firstByteMs ??= Date.now() - started;
         await writeChunk(res, JSON.stringify(response));
       }
-      if (adapted.adapter) log('non-GPT compatibility model=' + parsed.model + ' ' + JSON.stringify(adapted.adapter.stats));
+      if (debug && adapted.adapter) log('non-GPT compatibility model=' + parsed.model + ' ' + JSON.stringify(adapted.adapter.stats));
     } else {
       res.writeHead(upstream.statusCode, outgoing);
       for await (const chunk of upstream.body) {
@@ -499,12 +496,12 @@ async function handleHttp(req, res) {
         await writeChunk(res, chunk);
       }
     }
-    res.end(); log(which + ' HTTP model=' + parsed.model + ' status=' + upstream.statusCode + ' ms=' + (Date.now() - started));
-    log('request end ' + JSON.stringify({ requestId, status: upstreamStatus, firstByteMs, ms: Date.now() - started }));
+    res.end(); if (debug || upstreamStatus >= 400) log(which + ' HTTP model=' + parsed.model + ' status=' + upstream.statusCode + ' ms=' + (Date.now() - started));
+    if (debug) log('request end ' + JSON.stringify({ requestId, status: upstreamStatus, firstByteMs, ms: Date.now() - started }));
   } catch (error) {
-    log('request error ' + JSON.stringify({ requestId, route: which, model: parsed.model, phase,
+    if (!controller.signal.aborted) log('request error ' + JSON.stringify({ requestId, route: which, model: parsed.model, phase,
       upstreamBytes, status: upstreamStatus, firstByteMs, cancelled: controller.signal.aborted,
-      code: error.code || error.name, ms: Date.now() - started }));
+      failure: errorDetails(error), ms: Date.now() - started }));
     throw error;
   } finally { releaseResponseBody(upstreamBody); controllers.delete(controller); }
 }
@@ -535,7 +532,8 @@ if (process.argv.includes('--prepare')) {
   if (saved.sourceId === sourceId && saved.status) status = saved.status;
   const server = http.createServer((req, res) => handleHttp(req, res).catch(e => {
     const failure = protocolError(e);
-    log('HTTP error ' + failure.error.code + ' ' + e.message); if (!res.headersSent) json(res, failure.status, { error: failure.error }); else res.destroy();
+    if (failure.status !== 499) log('HTTP error ' + JSON.stringify(errorDetails(e)));
+    if (!res.headersSent) json(res, failure.status, { error: failure.error }); else res.destroy();
   }));
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_REQUEST_BYTES });
   server.on('upgrade', (req, socket, head) => {
@@ -550,7 +548,11 @@ if (process.argv.includes('--prepare')) {
       const gatewayHistory = new HistoryCache();
       const officialPending = new PendingResponses(), officialBodies = new Map(), officialLanes = new Map();
       const send = value => { if (client.readyState === WebSocket.OPEN) client.send(typeof value === 'string' ? value : JSON.stringify(value)); };
-      const failure = (e, lane) => { const value = protocolError(e); send({ ...value, code: value.error.code, message: value.error.message, ...(lane ? { stream_id: lane } : {}) }); };
+      const failure = (e, lane) => {
+        const value = protocolError(e);
+        if (value.status !== 499) log('WebSocket error ' + JSON.stringify({ connectionId, failure: errorDetails(e) }));
+        send({ ...value, code: value.error.code, message: value.error.message, ...(lane ? { stream_id: lane } : {}) });
+      };
       function rememberGateway(id, body, output, which = 'gateway', { complete = true, connection = null, lane = laneOf(body) } = {}) {
         if (!id) return;
         const input = [...body.input, ...(output || [])];
@@ -576,13 +578,13 @@ if (process.argv.includes('--prepare')) {
           if (event.previous_response_id && (foreign || reconnected)) {
             if (!complete) throw Object.assign(new Error('Previous response is not cached. Retry with the full input history.'), { status: 400, code: 'previous_response_not_found' });
             event = { ...context }; delete event.previous_response_id; changed = true;
-            log('official WS full-context recovery reason=' + (foreign ? 'provider-switch' : 'upstream-reconnect'));
+            if (debug) log('official WS full-context recovery reason=' + (foreign ? 'provider-switch' : 'upstream-reconnect'));
           }
           const normalized = historyForTarget(event, 'official');
           if (changed || normalized.changed) text = JSON.stringify(normalized.payload);
           const trace = { requestId: crypto.randomUUID(), started: Date.now() };
           officialPending.push(laneOf(event), { body: context, complete, incremental: Boolean(event.previous_response_id), trace });
-          log('WS request ' + JSON.stringify({ connectionId, requestId: trace.requestId, route: 'official',
+          if (debug) log('WS request ' + JSON.stringify({ connectionId, requestId: trace.requestId, route: 'official',
             model: event.model, bytes: Buffer.byteLength(text), incremental: Boolean(event.previous_response_id) }));
         }
         officialQueue.push(text);
@@ -597,7 +599,7 @@ if (process.argv.includes('--prepare')) {
         connection.on('open', () => {
           if (connection !== upstream || closed) return connection.close();
           officialOpening = false;
-          log('official WS connected');
+          if (debug) log('official WS connected');
           while (officialQueue.length) connection.send(officialQueue.shift());
         });
         connection.on('message', data => {
@@ -619,7 +621,7 @@ if (process.argv.includes('--prepare')) {
                 // using the already assembled context, without the expired ID.
                 // The retry is non-incremental, so it cannot enter this branch again.
                 const replay = { ...pending.body }; delete replay.previous_response_id;
-                log('official WS full-context recovery reason=invalid-previous-response');
+                if (debug) log('official WS full-context recovery reason=invalid-previous-response');
                 officialSend(JSON.stringify(replay));
                 return;
               }
@@ -634,7 +636,7 @@ if (process.argv.includes('--prepare')) {
             if (event.type === 'response.created' && id) {
               const pending = officialPending.shift(lane);
               if (pending) officialBodies.set(id, { ...pending, output: new ResponseOutput() });
-              if (pending?.trace) log('WS accepted ' + JSON.stringify({ connectionId, requestId: pending.trace.requestId, ms: Date.now() - pending.trace.started }));
+              if (debug && pending?.trace) log('WS accepted ' + JSON.stringify({ connectionId, requestId: pending.trace.requestId, ms: Date.now() - pending.trace.started }));
               officialLanes.set(lane, id);
             }
             const responseId = id || event.response_id || officialLanes.get(lane);
@@ -645,7 +647,7 @@ if (process.argv.includes('--prepare')) {
               const pending = officialBodies.get(id);
               const result = pending.output.finish(event.response.output);
               rememberGateway(id, pending.body, result.output, 'official', { complete: pending.complete && (result.complete || pending.interrupted === true), connection }); officialBodies.delete(id);
-              if (pending.trace) log('WS end ' + JSON.stringify({ connectionId, requestId: pending.trace.requestId, status: event.response.status, ms: Date.now() - pending.trace.started }));
+              if (debug && pending.trace) log('WS end ' + JSON.stringify({ connectionId, requestId: pending.trace.requestId, status: event.response.status, ms: Date.now() - pending.trace.started }));
               if (officialLanes.get(lane) === id) officialLanes.delete(lane);
             }
             if (event.type === 'response.failed') {
@@ -661,7 +663,7 @@ if (process.argv.includes('--prepare')) {
         connection.on('close', (code, reason) => {
           if (connection !== upstream) return;
           officialOpening = false; upstream = null;
-          log('official WS closed code=' + code + ' lifetime_ms=' + (Date.now() - openedAt) + ' connection=' + connectionId);
+          if (debug || !closed && (officialPending.size || officialBodies.size || ![1000, 1001, 1005].includes(code))) log('official WS closed code=' + code + ' lifetime_ms=' + (Date.now() - openedAt) + ' connection=' + connectionId);
           // If generation was in flight, let the native client handle the broken
           // transport. Never silently replay possibly accepted work or tool calls.
           if (!closed && (officialPending.size || officialBodies.size || ![1000, 1001, 1005].includes(code))) relayClose(client, code, reason);
@@ -696,10 +698,10 @@ if (process.argv.includes('--prepare')) {
           const wireBody = adapted.payload;
           const headers = gatewayResponseHeaders({ ...headersFor(req.headers, 'gateway', gateway.profile), 'content-type': 'application/json' }, !adapted.adapter, gateway.metadata?._nativeHeaderPrefix);
           const wireText = JSON.stringify(wireBody);
-          log('WS request ' + JSON.stringify({ connectionId, requestId, route: 'gateway', model: event.model, bytes: Buffer.byteLength(wireText) }));
+          if (debug) log('WS request ' + JSON.stringify({ connectionId, requestId, route: 'gateway', model: event.model, bytes: Buffer.byteLength(wireText) }));
           const up = await request(gateway.base + (adapted.chat ? '/chat/completions' : '/responses'), { method: 'POST', headers, body: wireText, dispatcher: gateway.dispatcher, signal: controller.signal, ...RESPONSE_TIMEOUTS });
           upstreamBody = up.body;
-          log('WS headers ' + JSON.stringify({ connectionId, requestId, status: up.statusCode, ms: Date.now() - started }));
+          if (debug) log('WS headers ' + JSON.stringify({ connectionId, requestId, status: up.statusCode, ms: Date.now() - started }));
           if (up.statusCode < 200 || up.statusCode >= 300) {
             const text = await up.body.text(); let message = text.slice(0,1800), upstreamError;
             try { const obj = JSON.parse(text); message = obj.error?.message || obj.message || message; if (obj.error && typeof obj.error === 'object') upstreamError = obj.error; } catch {}
@@ -723,13 +725,13 @@ if (process.argv.includes('--prepare')) {
               if (event.stream_id) response.stream_id = event.stream_id;
               send(response);
           }
-          if (adapted.adapter) log('non-GPT compatibility model=' + event.model + ' ' + JSON.stringify(adapted.adapter.stats));
-          log('gateway WS-to-HTTP model=' + event.model + ' status=' + up.statusCode);
+          if (debug && adapted.adapter) log('non-GPT compatibility model=' + event.model + ' ' + JSON.stringify(adapted.adapter.stats));
+          if (debug) log('gateway WS-to-HTTP model=' + event.model + ' status=' + up.statusCode);
         } catch (error) {
           // A successful native interrupt owns the terminal acknowledgement;
           // the deliberate HTTP abort must not fail it or a following turn.
           if (pending.interrupted) return;
-          log('WS error ' + JSON.stringify({ connectionId, requestId, code: error.code || error.name, status: error.status,
+          if (!controller.signal.aborted) log('WS error ' + JSON.stringify({ connectionId, requestId, failure: errorDetails(error), status: error.status,
             cancelled: controller.signal.aborted, ms: Date.now() - started }));
           throw error;
         } finally { releaseResponseBody(upstreamBody); if (active.get(lane) === pending) active.delete(lane); controllers.delete(controller); }
@@ -765,7 +767,7 @@ if (process.argv.includes('--prepare')) {
         rememberGateway(id, pending.body, output, 'gateway', { lane });
         send({ type: 'response.interrupt.accepted', response_id: id, sequence_number: pending.nextSequence++, ...extra });
         send({ type: 'response.completed', response, sequence_number: pending.nextSequence++, ...extra });
-        log('gateway WS interrupted response=' + id);
+        if (debug) log('gateway WS interrupted response=' + id);
       }
       // Attach immediately, before opening either upstream, so the first frame is retained.
       client.on('message', data => {
@@ -790,7 +792,7 @@ if (process.argv.includes('--prepare')) {
   routerReady = new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(Number(process.env.CHATGPT_SHIM_PORT || env.SHIM_PORT || 8102), host, () => {
-      log('router v2 listening mode=' + mode + ' transport=' + transport); resolve();
+      if (debug) log('router v2 listening mode=' + mode + ' transport=' + transport); resolve();
     });
   });
   if (runtime.refreshOnStart) routerReady.then(() => refreshCatalog()).catch(error => log('catalog refresh ' + error.message));

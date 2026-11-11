@@ -7,6 +7,7 @@ import { once } from 'node:events';
 import { pathToFileURL } from 'node:url';
 import { atomicPrivate } from './settings.mjs';
 import { startQuotaCompatibleClient } from './native-quota.mjs';
+import { cleanManagedLogs, errorDetails, describeError, createDiagnosticLog } from './diagnostics.mjs';
 
 export async function runNativeSession({ router, start, recover, onStatus = () => {} }) {
   let child, stopping = false, clientStderr = '';
@@ -16,7 +17,7 @@ export async function runNativeSession({ router, start, recover, onStatus = () =
   const track = nativeClient => {
     child = nativeClient;
     child.stderr?.setEncoding('utf8');
-    child.stderr?.on('data', chunk => { clientStderr = (clientStderr + chunk.toString()).slice(-32768); });
+    child.stderr?.on('data', chunk => { clientStderr = (clientStderr + chunk.toString()).slice(-8192); });
     report({ phase: 'client', pid: child.pid, nativeSpawnedAt: new Date().toISOString() });
     if (stopping) stop();
   };
@@ -36,7 +37,7 @@ export async function runNativeSession({ router, start, recover, onStatus = () =
     if (!stopping && (child.exitCode !== 0 || child.signalCode)) {
       throw new Error('Native client exited with ' + (child.signalCode ? 'signal ' + child.signalCode : 'code ' + child.exitCode));
     }
-  } catch (error) { errors.push(error); }
+  } catch (error) { state.failurePhase = state.phase; errors.push(error); }
   finally {
     process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop);
     try {
@@ -55,7 +56,8 @@ export async function runNativeSession({ router, start, recover, onStatus = () =
     try {
       report({ ready: false, stopped: true, phase: error ? 'failed' : 'stopped',
         exitCode: child?.exitCode ?? null, signal: child?.signalCode ?? null,
-        error: error || null, ...(clientStderr ? { clientStderr: clientStderr.trim() } : {}) });
+        error: error || null, ...(errors.length ? { failures: errors.map(value => errorDetails(value)),
+          ...(clientStderr ? { clientStderr: clientStderr.trim() } : {}) } : {}) });
     } catch (error) { errors.push(error); }
   }
   if (errors.length) throw new AggregateError(errors, errors.map(error => error.message || String(error)).join('\n'), { cause: errors[0] });
@@ -67,6 +69,9 @@ async function main() {
       || !['official', 'api', 'apionly'].includes(entryMode) || !/^[a-f0-9]{32}$/.test(session || '')) throw new Error('Invalid native session.');
   process.env.CODEX_HOME = home;
   process.env.CHATGPT_API_ROOT = root;
+  cleanManagedLogs(root);
+  // The file describes the latest attempt, never a previous launch failure.
+  try { fs.unlinkSync(path.join(root, 'data/logs/native-session-stderr.log')); } catch {}
   const status = path.join(root, 'data/state/native-session.json');
   const startedAt = new Date().toISOString();
   const state = { session, entryMode, controllerPid: process.pid, startedAt,
@@ -109,8 +114,8 @@ async function main() {
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   main().catch(error => {
-    const detail = (error.stack || error.message) + '\n';
-    try { fs.writeFileSync(path.join(process.argv[2], 'data/logs/native-session-stderr.log'), detail); } catch {}
-    process.stderr.write(detail); process.exitCode = 1;
+    const detail = describeError(error) + '\n' + JSON.stringify(errorDetails(error));
+    createDiagnosticLog(path.join(process.argv[2], 'data/logs/native-session-stderr.log'))(detail);
+    process.stderr.write(describeError(error) + '\n'); process.exitCode = 1;
   });
 }

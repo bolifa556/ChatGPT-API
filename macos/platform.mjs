@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { execFileSync, spawn } from 'node:child_process';
+import { atomicPrivate } from '../src/settings.mjs';
 
 // Keep dates predictable without replacing UTF-8 installation paths with '?'.
 const psEnv = () => ({ ...process.env, LC_ALL: '', LC_TIME: 'C',
@@ -102,6 +103,7 @@ export async function startNativeClient(client, args, home, options = {}) {
     const { startQuotaCompatibleClient } = await import('../src/native-quota.mjs');
     const bundle = client.match(/^(.*\.app)\/Contents\/MacOS\//)?.[1];
     return startQuotaCompatibleClient({ executable: client, archive: path.join(bundle, 'Contents/Resources/app.asar'), root: options.quotaRoot, home, args,
+      onStatus: value => atomicPrivate(path.join(options.quotaRoot, 'data/state/native-quota.json'), { updatedAt: new Date().toISOString(), ...value }),
       launch: debugArgs => startNativeClient(client, debugArgs, home, { ...options, quotaRoot: null }) });
   }
   const launch = clientLaunchCommand(client, args, home, options);

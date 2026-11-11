@@ -16,6 +16,7 @@ $lock = $null
 $apiLaunched = $false
 $apiKey = ''
 $recoverySession = ''
+$launchPhase = '恢复上次入口'
 function Show-Message([string]$message) {
     Add-Type -AssemblyName System.Windows.Forms
     [void][System.Windows.Forms.MessageBox]::Show($message,'ChatGPT 启动器')
@@ -59,6 +60,7 @@ try {
     }
     try { $lock = [IO.File]::Open($lockPath,'OpenOrCreate','ReadWrite','None') }
     catch { throw '另一个入口正在准备配置，请稍后再点击。' }
+    $launchPhase = '检查官方客户端'
     $package = Get-AppxPackage -Name OpenAI.Codex | Sort-Object Version -Descending | Select-Object -First 1
     if (-not $package) { throw '未找到已安装的 ChatGPT/Codex 桌面应用。' }
     $appId = $package.PackageFamilyName + '!App'
@@ -78,6 +80,7 @@ try {
         } else { & (Join-Path $env:WINDIR 'explorer.exe') "shell:AppsFolder\$appId" }
         exit 0
     }
+    $launchPhase = '读取并恢复配置'
     Initialize-DeferredLauncherSettings $packageDir
     Restore-LauncherConfig $packageDir $configPath
     Stop-Helpers
@@ -86,6 +89,7 @@ try {
     if (-not (Test-Path -LiteralPath $nodePath)) { throw '缺少 runtime\node.exe，请使用完整安装包。' }
     $shimPath = Join-Path $packageDir 'src\shim.mjs'
     $authMode = Get-LauncherRouteMode $Mode (Get-CodexHome)
+    $launchPhase = '准备模型目录'
     if ($Mode -eq 'official') { $prepared = Ensure-LocalRouter $packageDir $authMode $Mode -PrepareOnly }
     else {
         $prepared = Invoke-GatewayPreparation { Ensure-LocalRouter $packageDir $authMode $Mode -PrepareOnly } { Show-ApiSettings $packageDir } {
@@ -99,12 +103,14 @@ try {
     $baseUrl = if ($settings['BASE_URL']) { Normalize-BaseUrl ([string]$settings['BASE_URL']) } else { '' }
     $shimPort = if ($settings['SHIM_PORT']) { [int]$settings['SHIM_PORT'] } else { 8102 }
     $shimBase = 'http://127.0.0.1:' + $shimPort + '/v1'
+    $launchPhase = '准备临时配置'
     $recoverySession = Register-LauncherRecovery $packageDir $configPath
     if ($Mode -eq 'apionly' -or $authMode -eq 'gateway') {
         & $nodePath (Join-Path $packageDir 'src\desktop-state.mjs') 'begin' (Get-CodexHome) $packageDir
         if ($LASTEXITCODE -ne 0) { throw '桌面项目配置兼容准备失败。' }
     }
     Apply-LauncherConfig $packageDir $configPath $authMode $shimBase $baseUrl $Mode
+    $launchPhase = '兼容历史对话'
     $repair = & $nodePath (Join-Path $packageDir 'src\repair-thread-providers.mjs') 'begin' (Get-CodexHome) $packageDir 2> (Join-Path $packageDir 'data\logs\provider-repair-stderr.log')
     if ($LASTEXITCODE -ne 0) { throw '对话兼容准备未完成，请查看 data\logs\provider-repair-stderr.log。' }
     $sessionStartedAt = (Read-LauncherState $packageDir).startedAt
@@ -112,6 +118,7 @@ try {
         $notice = if ($authMode -eq 'mixed') { '网关目前不可用。有效缓存中的网关模型请求可能失败；已登录的官方模型仍使用官方通道。' } else { '网关目前不可用。此入口只使用网关模型，请检查网关连接。' }
         Show-Message $notice
     }
+    $launchPhase = '启动客户端并连接界面'
     $nativeAlias = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\chatgpt-desktop.exe'
     if (-not (Test-Path -LiteralPath $nativeAlias)) { $nativeAlias = Join-Path $package.InstallLocation 'app\ChatGPT.exe' }
     $sessionState = Join-Path $packageDir 'data\state\native-session.json'
@@ -131,10 +138,10 @@ try {
     # recovery. Release startup PowerShell and its loaded modules.
     exit 0
 } catch {
-    $message=$_.Exception.Message
+    $message='阶段：' + $launchPhase + [Environment]::NewLine + $_.Exception.Message
     if($apiKey){$message=$message.Replace($apiKey,'[redacted]')}
     if ($apiLaunched) {
-        Add-Content -LiteralPath (Join-Path $packageDir 'data\logs\recovery.log') -Value ([DateTime]::UtcNow.ToString('o') + ' ' + $message)
+        Write-LauncherDiagnostic $packageDir 'recovery.log' $message
         exit 1
     }
     if (-not $apiLaunched -and $lock -and $recoverySession) {
@@ -161,9 +168,10 @@ try {
             }
         } catch {
             $message += [Environment]::NewLine + $_.Exception.Message
-            Add-Content -LiteralPath (Join-Path $packageDir 'data\logs\recovery.log') -Value ([DateTime]::UtcNow.ToString('o') + ' ' + $_.Exception.Message)
+            Write-LauncherDiagnostic $packageDir 'recovery.log' $_.Exception.Message
         }
     }
+    Write-LauncherDiagnostic $packageDir 'launcher-error.log' $message
     Show-Message ('启动 ChatGPT 失败：'+$message)
     exit 1
 } finally {

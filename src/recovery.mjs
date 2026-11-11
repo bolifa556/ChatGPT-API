@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { atomicPrivate } from './settings.mjs';
+import { createDiagnosticLog, errorDetails } from './diagnostics.mjs';
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const journalPath = ctx => path.join(ctx.root, 'data/state/recovery.json');
@@ -97,6 +98,7 @@ export async function recoverPending(ctx, platform) {
   return true;
 }
 async function watch(ctx, platform) {
+  const log = createDiagnosticLog(path.join(ctx.root, 'data/logs/recovery.log'));
   const provider = await import(pathToFileURL(path.join(ctx.root, platform, 'provider.mjs')));
   const file = watcherPath(ctx), owner = provider.processIdentity(process.pid);
   const prior = read(file);
@@ -123,7 +125,7 @@ async function watch(ctx, platform) {
       if ((!saved.boot || saved.boot === bootIdentity()) && provider.alive(saved.owner)) return;
       try { await recoverPending(ctx, platform); }
       catch (error) {
-        fs.appendFileSync(path.join(ctx.root, 'data/logs/recovery.log'), new Date().toISOString() + ' ' + error.message + '\n', { mode: 0o600 });
+        log(JSON.stringify({ phase: 'recovery', failure: errorDetails(error) }));
       }
       // Only an abnormal owner exit can reach this retry path with its native
       // client still alive. Normal operation has no monitoring timer.

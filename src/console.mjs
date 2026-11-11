@@ -9,6 +9,7 @@ import { readEnvFile, readSettings, publicSettings, saveSettings, settingsRevisi
 import { rememberContexts, contextKey, applyContext } from './model-context.mjs';
 import { imageOnlyModel, imageCapabilities, automaticImageCandidates } from './image-compat.mjs';
 import { modelStrengths } from './model-strength.mjs';
+import { cleanManagedLogs, createDiagnosticLog, describeError, errorDetails } from './diagnostics.mjs';
 
 const moduleRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const readJson = (file, fallback = null) => { try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { return fallback; } };
@@ -24,6 +25,7 @@ async function requestBody(req) {
 }
 export async function startConsole({ root = process.env.CHATGPT_API_ROOT || moduleRoot, open = true, opener = openBrowser } = {}) {
   root = path.resolve(root);
+  cleanManagedLogs(root);
   let env = readEnvFile(path.join(root, 'data/.env'));
   const version = readJson(path.join(root, 'package.json'), { version: '3.1.5' }).version;
   const buildId = crypto.createHash('sha256').update(fs.readFileSync(fileURLToPath(import.meta.url))).digest('hex');
@@ -168,5 +170,8 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
   return { server, url, close };
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  startConsole({ open: !process.argv.includes('--no-open') }).catch(error => { console.error('无法打开控制台，请检查安装目录中的配置文件和运行时。'); process.exitCode = 1; });
+  startConsole({ open: !process.argv.includes('--no-open') }).catch(error => {
+    createDiagnosticLog(path.join(process.env.CHATGPT_API_ROOT || moduleRoot, 'data/logs/console-stderr.log'))(JSON.stringify(errorDetails(error)));
+    console.error('无法打开控制台：' + describeError(error)); process.exitCode = 1;
+  });
 }

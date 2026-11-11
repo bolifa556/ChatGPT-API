@@ -1,5 +1,24 @@
 ﻿$ErrorActionPreference = 'Stop'
 
+function Write-LauncherDiagnostic([string]$packageDir, [string]$name, [string]$message) {
+    # Called only on failures. Keep one bounded file; no monitoring or rotation task.
+    if ($name -notin @('launcher-error.log','recovery.log')) { return }
+    try {
+        $directory = Join-Path $packageDir 'data\logs'
+        [void][IO.Directory]::CreateDirectory($directory)
+        $text = ([DateTime]::UtcNow.ToString('o') + ' ' + $message)
+        $text = [regex]::Replace($text, '(?i)(Bearer\s+)[^\s"'']+', '$1[redacted]')
+        if ($text.Length -gt 8000) { $text = $text.Substring(0,8000) }
+        $bytes = [Text.Encoding]::UTF8.GetBytes($text + [Environment]::NewLine)
+        $stream = [IO.File]::Open((Join-Path $directory $name),'OpenOrCreate','ReadWrite',([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+        try {
+            if ($stream.Length + $bytes.Length -gt 262144) { $stream.SetLength(0) }
+            [void]$stream.Seek(0,[IO.SeekOrigin]::End)
+            $stream.Write($bytes,0,$bytes.Length)
+        } finally { $stream.Dispose() }
+    } catch {}
+}
+
 function Read-LauncherText([string]$path) {
     # Status and preferences are atomically replaced by Node/native writers.
     # Share deletion as well as reads, so a status read cannot block a rename.

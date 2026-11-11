@@ -5,6 +5,7 @@ import { requestWithAbort as request, normalizeGatewayTransport, gatewayDispatch
 import { contextFields } from './model-context.mjs';
 import { strengthMetadataFields } from './model-strength.mjs';
 import { readSettings, settingsRevision, publicModelId, atomicPrivate, redact } from './settings.mjs';
+import { describeError, errorDetails } from './diagnostics.mjs';
 
 const TTL = 24 * 60 * 60 * 1000;
 const fields = ['id', 'type', 'capabilities', 'supported_endpoints', 'output_modalities', 'architecture',
@@ -79,16 +80,17 @@ export class GatewaySources {
           headers: { authorization: 'Bearer ' + profile.apiKey, accept: 'application/json', 'accept-encoding': 'identity' },
           signal: AbortSignal.timeout(12000), headersTimeout: 12000, bodyTimeout: 12000 });
         const body = await up.body.text();
-        if (up.statusCode < 200 || up.statusCode >= 300) throw new Error('HTTP ' + up.statusCode);
+        if (up.statusCode < 200 || up.statusCode >= 300) throw Object.assign(new Error('HTTP ' + up.statusCode), { code: 'model_catalog_http_error', status: up.statusCode });
         const data = JSON.parse(body), ids = new Set();
         const models = (data.data || []).filter(item => typeof item?.id === 'string' && item.id && item.id.length <= 500 && !ids.has(item.id) && ids.add(item.id))
           .map(item => Object.fromEntries(fields.filter(key => item[key] !== undefined).map(key => [key, item[key]])));
-        if (!models.length) throw new Error('Gateway returned no models.');
+        if (!models.length) throw Object.assign(new Error('Gateway returned no models.'), { code: 'model_catalog_empty' });
         const nativeHeaderPrefix = Object.keys(up.headers).some(name => /^x-bifrost-/i.test(name)) ? 'x-bf-eh-' : '';
         const record = { id: profile.id, fingerprint: this.identity(profile), checkedAt: new Date().toISOString(), models, nativeHeaderPrefix };
         records.push(record); Object.assign(status, { ready: true, checkedAt: record.checkedAt, models: models.length });
       } catch (error) {
-        status.error = redact(error.message, this.settings);
+        status.error = redact(describeError(error), this.settings);
+        status.failure = errorDetails(error, text => redact(text, this.settings));
         if (previous && Date.now() - Date.parse(previous.checkedAt) < TTL) {
           records.push(previous); Object.assign(status, { cached: true, cachedAt: previous.checkedAt, models: previous.models.length });
         }

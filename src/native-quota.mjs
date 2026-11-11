@@ -10,6 +10,7 @@ import net from 'node:net';
 import { pathToFileURL } from 'node:url';
 import WebSocket from 'ws';
 import { atomicPrivate } from './settings.mjs';
+import { errorDetails, describeError } from './diagnostics.mjs';
 
 const quotaGuard = /(?<![\w$])([A-Za-z_$][\w$]*)="local"===([A-Za-z_$][\w$]*)&&([A-Za-z_$][\w$]*)\|\|\(0,([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)/g;
 const quotaAssetRevision = 2;
@@ -84,7 +85,7 @@ export function nativeQuotaAssets(archive, cacheFile = '') {
       const buffer = Buffer.alloc(entry.size); fs.readSync(fd, buffer, 0, buffer.length, entry.offset);
       const source = buffer.toString(), adapted = scopeNativeQuota(source, 'quota_probe');
       if (!adapted.count && !adapted.legacySubmitCount) return null;
-      if (!source.includes('export const __webpack_modules__=')) throw new Error('Unsupported native quota module format.');
+      if (!source.includes('export const __webpack_modules__=')) throw Object.assign(new Error('客户端界面模块格式不兼容，请更新官方客户端和适配层。'), { code: 'native_module_format' });
       return { url: entry.url, source, submitCount: adapted.submitCount, legacySubmitCount: adapted.legacySubmitCount };
     };
     if (cacheFile) {
@@ -112,7 +113,7 @@ export function nativeQuotaAssets(archive, cacheFile = '') {
       }
     }
     scan(tree);
-    if (!assets.length) throw new Error('当前客户端的 API 界面兼容检查未通过，请更新适配层。');
+    if (!assets.length) throw Object.assign(new Error('当前客户端的 API 界面兼容检查未通过，请更新官方客户端和适配层。'), { code: 'native_ui_unsupported' });
     if (cacheFile) atomicPrivate(cacheFile, { revision: quotaAssetRevision, identity, entries });
     return assets;
   } finally { fs.closeSync(fd); }
@@ -126,22 +127,24 @@ export function quotaBootstrap(assets, models, key, binding) {
     const adapted = scopeNativeQuota(asset.source, key);
     const source = adapted.text.replace('export const __rspack_esm_ids=', 'const __rspack_esm_ids=')
       .replace('export const __webpack_modules__=', 'const __webpack_modules__=');
-    return '{const prepared=(()=>{"use strict";\n' + source + '\nreturn __webpack_modules__})();' +
+    return '{const asset=' + JSON.stringify(asset.url) + ';try{const prepared=(()=>{"use strict";\n' + source + '\nreturn __webpack_modules__})();' +
       'for(const id of Object.keys(prepared))if(!prepared[id].toString().includes(key))delete prepared[id];' +
       'import(' + JSON.stringify(asset.url) + ').then(native=>{' +
       'const ids=Object.keys(prepared);if(!ids.length)throw Error("Native quota module was not found");' +
       'for(const id of ids){if(typeof native.__webpack_modules__[id]!=="function")throw Error("Native quota module changed");native.__webpack_modules__[id]=function(...args){if(!state.executed.has(id)){state.executed.add(id);notify()}return Reflect.apply(prepared[id],this,args)}}' +
       'state.installed+=ids.length;state.pending--;notify()' +
-      '}).catch(error=>{state.error=String(error);notify()})}';
+      '}).catch(error=>{state.error=String(error);state.failedAsset=asset;notify()})' +
+      '}catch(error){state.error=String(error);state.failedAsset=asset;notify()}}';
   }).join('\n');
   return '(()=>{if(typeof location!=="undefined"&&(location.protocol!=="app:"||location.host!=="-"))return;const key=' + JSON.stringify(key) + ';if(globalThis[key])return;' +
     'const state=globalThis[key]={models:new Set(' + JSON.stringify(models) + '),pending:' + assets.length + ',installed:0,executed:new Set(),error:null};' +
-    'const notify=()=>{const fn=globalThis[' + JSON.stringify(binding) + '];if(typeof fn==="function")fn(JSON.stringify({pending:state.pending,installed:state.installed,executed:[...state.executed],error:state.error}))};' +
+    'const notify=()=>{const fn=globalThis[' + JSON.stringify(binding) + '];if(typeof fn==="function")fn(JSON.stringify({pending:state.pending,installed:state.installed,executed:[...state.executed],error:state.error,failedAsset:state.failedAsset}))};' +
     modules + '\n})()';
 }
 function nativePipe(child, socket, timeoutMs) {
   const pending = new Map(), listeners = new Set(); let serial = 0, buffer = Buffer.alloc(0), closedError;
   function fail(error) {
+    error.code ||= child.exitCode !== null || child.signalCode !== null ? 'native_client_exited' : 'native_debugger_closed';
     closedError ||= error;
     for (const call of pending.values()) { clearTimeout(call.timer); call.reject(closedError); }
     pending.clear(); buffer = Buffer.alloc(0);
@@ -161,17 +164,18 @@ function nativePipe(child, socket, timeoutMs) {
       const raw = buffer.subarray(0, end); buffer = buffer.subarray(end + 1);
       let event; try { event = JSON.parse(raw); } catch { continue; }
       const call = pending.get(event.id);
-      if (call) { pending.delete(event.id); clearTimeout(call.timer); event.error ? call.reject(new Error(event.error.message)) : call.resolve(event.result); }
+      if (call) { pending.delete(event.id); clearTimeout(call.timer); event.error ? call.reject(Object.assign(new Error(event.error.message), { code: 'native_command_failed' })) : call.resolve(event.result); }
       else for (const listener of listeners) listener(event);
     }
   });
   return {
     onEvent(listener) { listeners.add(listener); },
+    pendingMethods() { return [...new Set([...pending.values()].map(call => call.method))]; },
     send(method, params = {}, sessionId) {
       if (closedError) return Promise.reject(closedError);
       return new Promise((resolve, reject) => {
-        const id = ++serial, timer = setTimeout(() => { pending.delete(id); reject(new Error('Native compatibility setup timed out: ' + method)); }, timeoutMs);
-        timer.unref(); pending.set(id, { resolve, reject, timer });
+        const id = ++serial, timer = setTimeout(() => { pending.delete(id); reject(Object.assign(new Error('客户端兼容命令未响应：' + method), { code: 'native_command_timeout', method })); }, timeoutMs);
+        timer.unref(); pending.set(id, { resolve, reject: error => reject(Object.assign(error, { method })), timer, method });
         const message = JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) });
         if (socket) socket.send(message); else child.stdio[3].write(message + '\0');
       });
@@ -189,24 +193,28 @@ async function debuggerAddress(port) {
 }
 export async function startQuotaCompatibleClient({ executable, archive, root, home, args = [], env = process.env, onStatus = () => {},
   onSpawn, launch, startupTimeoutMs = 90000 }) {
-  const status = { phase: 'scanning', ready: false, installed: 0, errors: 0 };
-  let child, socket, deadline, resolveReady, rejectReady;
+  const started = Date.now(), status = { phase: 'scanning', ready: false, installed: 0, errors: 0, targets: 0, pages: 0 };
+  const clientVersion = archive.match(/OpenAI\.Codex_([\d.]+)_/)?.[1];
+  if (clientVersion) status.clientVersion = clientVersion;
+  let child, socket, deadline, resolveReady, rejectReady, pipe, lastReport;
   const report = () => {
-    onStatus({ ...status });
+    const signature = JSON.stringify(status);
+    if (signature !== lastReport) { onStatus({ ...status }); lastReport = signature; }
     if (status.ready) resolveReady?.();
-    else if (status.errors) rejectReady?.(new Error(status.lastError));
+    else if (status.errors) rejectReady?.(Object.assign(new Error(status.lastError), { code: status.code || 'native_setup_failed' }));
   };
   try {
     report();
     const assets = nativeQuotaAssets(archive, path.join(root, 'data/cache/native-ui-index.json')),
       key = '__chatgpt_api_quota_' + crypto.randomBytes(8).toString('hex'), binding = key + '_notify';
+    status.modules = assets.length;
     const cache = path.join(root, 'data/cache/catalog-state.json');
     let routeMode = 'mixed';
     try { routeMode = JSON.parse(fs.readFileSync(path.join(root, 'data/state/route-state.json'), 'utf8')).mode; } catch {}
     const models = () => gatewayQuotaModels(JSON.parse(fs.readFileSync(cache, 'utf8')), routeMode);
     // Validate every detected quota gate, including modules with no other
     // patches. Installing a Fast/banner module cannot certify the send button.
-    if (models().length && assets.some(asset => asset.legacySubmitCount > asset.submitCount)) throw new Error('当前客户端的 API 发送兼容检查未通过，请更新适配层。');
+    if (models().length && assets.some(asset => asset.legacySubmitCount > asset.submitCount)) throw Object.assign(new Error('当前客户端的 API 发送兼容检查未通过，请更新官方客户端和适配层。'), { code: 'native_send_unsupported' });
     const bootstrapSource = quotaBootstrap(assets, [], key, binding);
     status.phase = 'launching'; report();
     if (launch) {
@@ -217,12 +225,12 @@ export async function startQuotaCompatibleClient({ executable, archive, root, ho
       child = await launch(['--remote-debugging-address=127.0.0.1', '--remote-debugging-port=' + port, ...args]);
       onSpawn?.(child); status.pid = child.pid; status.phase = 'connecting'; report();
       const until = Date.now() + startupTimeoutMs;
-      let address;
+      let address, endpointError;
       while (!address && Date.now() < until && child.exitCode === null) {
-        try { address = await debuggerAddress(port); } catch {}
+        try { address = await debuggerAddress(port); } catch (error) { endpointError = error; }
         if (!address) await new Promise(resolve => setTimeout(resolve, 50));
       }
-      if (!address) throw new Error('Native compatibility endpoint did not become ready.');
+      if (!address) throw Object.assign(new Error('客户端兼容连接未建立，请先更新官方客户端。'), { code: 'native_endpoint_unavailable', cause: endpointError });
       const parsed = new URL(address);
       if (parsed.protocol !== 'ws:' || !['127.0.0.1', 'localhost'].includes(parsed.hostname) || Number(parsed.port) !== port) throw new Error('Invalid native compatibility endpoint.');
       socket = new WebSocket(address, { handshakeTimeout: startupTimeoutMs }); await once(socket, 'open');
@@ -232,7 +240,30 @@ export async function startQuotaCompatibleClient({ executable, archive, root, ho
       await once(child, 'spawn');
       onSpawn?.(child); status.pid = child.pid; status.phase = 'connecting'; report();
     }
-    const pipe = nativePipe(child, socket, startupTimeoutMs), sessions = new Set();
+    pipe = nativePipe(child, socket, startupTimeoutMs);
+    const sessions = new Set();
+    const evaluate = async (expression, id) => {
+      const value = await pipe.send('Runtime.evaluate', { expression, returnByValue: true }, id);
+      if (value.exceptionDetails) {
+        const detail = value.exceptionDetails;
+        throw Object.assign(new Error((detail.exception?.description || detail.text || 'Unknown script exception').slice(0, 1600)),
+          { code: 'native_script_exception', method: 'Runtime.evaluate' });
+      }
+      return value;
+    };
+    const accept = value => {
+      if (status.ready && !value.error) return;
+      status.pending = value.pending;
+      status.installed = Math.max(status.installed, value.installed || 0);
+      if (!status.ready) status.executed = value.executed;
+      status.ready ||= value.pending === 0 && value.installed > 0 && !value.error;
+      status.phase = status.ready ? 'ready' : 'installing';
+      if (value.error) {
+        status.errors++; status.lastError = value.error; status.code = 'native_module_failed';
+        status.failedAsset = value.failedAsset;
+      }
+      report();
+    };
     const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
     // Attach the handler before renderer events can arrive.
     ready.catch(() => {});
@@ -241,39 +272,39 @@ export async function startQuotaCompatibleClient({ executable, archive, root, ho
         if (event.method === 'Target.detachedFromTarget') { sessions.delete(event.params.sessionId); return; }
         if (event.method === 'Runtime.bindingCalled' && event.params.name === binding) {
           const result = JSON.parse(event.params.payload);
-          status.installed = Math.max(status.installed, result.installed || 0);
-          status.executed = result.executed;
-          status.ready = result.pending === 0 && result.installed > 0 && !result.error;
-          status.phase = status.ready ? 'ready' : 'installing';
-          if (result.error) { status.errors++; status.lastError = result.error; }
-          report(); return;
+          accept(result); return;
         }
         if (event.method !== 'Target.attachedToTarget') return;
         const id = event.params.sessionId, target = event.params.targetInfo;
+        status.targets++;
         if (target.type !== 'page' || target.url && !target.url.startsWith('app://-') && target.url !== 'about:blank') {
           await pipe.send('Runtime.runIfWaitingForDebugger', {}, id); return;
         }
         sessions.add(id);
-        status.phase = 'installing'; report();
+        status.pages++; if (!status.ready) status.phase = 'installing'; report();
         const source = bootstrapSource + ';if(globalThis[' + JSON.stringify(key) + '])globalThis[' + JSON.stringify(key) + '].models=new Set(' + JSON.stringify(models()) + ')';
         // Queue the document bootstrap before releasing native script execution.
         const setup = pipe.send('Page.addScriptToEvaluateOnNewDocument', { source }, id);
-        await pipe.send('Runtime.runIfWaitingForDebugger', {}, id);
-        await setup;
-        await pipe.send('Runtime.addBinding', { name: binding }, id);
-        await pipe.send('Runtime.evaluate', { expression: source }, id);
-        const result = await pipe.send('Runtime.evaluate', { expression: 'JSON.stringify(globalThis[' + JSON.stringify(key) + ']&&{pending:globalThis[' + JSON.stringify(key) + '].pending,installed:globalThis[' + JSON.stringify(key) + '].installed,error:globalThis[' + JSON.stringify(key) + '].error})', returnByValue: true }, id);
+        const bound = pipe.send('Runtime.addBinding', { name: binding }, id);
+        await Promise.all([setup, bound, pipe.send('Runtime.runIfWaitingForDebugger', {}, id)]);
+        await evaluate(source, id);
+        const result = await evaluate('JSON.stringify(globalThis[' + JSON.stringify(key) + ']&&{pending:globalThis[' + JSON.stringify(key) + '].pending,installed:globalThis[' + JSON.stringify(key) + '].installed,error:globalThis[' + JSON.stringify(key) + '].error,failedAsset:globalThis[' + JSON.stringify(key) + '].failedAsset})', id);
         if (result.result?.value) {
           const value = JSON.parse(result.result.value);
-          status.installed = Math.max(status.installed, value.installed || 0); status.ready = value.pending === 0 && value.installed > 0 && !value.error;
-          status.phase = status.ready ? 'ready' : 'installing';
-          if (value.error) { status.errors++; status.lastError = value.error; }
+          accept(value);
         }
         report();
-      })().catch(error => { if (child.exitCode === null) { status.errors++; status.lastError = error.message; report(); } });
+      })().catch(error => { if (child.exitCode === null) { status.errors++; status.code = error.code || 'native_setup_failed'; status.lastError = error.message; status.failure = errorDetails(error); report(); } });
     });
-    deadline = setTimeout(() => rejectReady(new Error('Native quota compatibility did not become ready.')), startupTimeoutMs);
-    const exited = () => rejectReady(new Error('Native client exited during compatibility startup (' + (child.signalCode || child.exitCode) + ').'));
+    deadline = setTimeout(() => {
+      const commands = pipe.pendingMethods();
+      const code = commands.length ? 'native_command_timeout' : !status.pages ? 'native_page_not_attached'
+        : status.pending === undefined ? 'native_bootstrap_not_started' : 'native_module_load_timeout';
+      const reason = commands.length ? '客户端兼容命令未响应：' + commands.join(', ') : !status.pages ? '未连接到客户端主页面'
+        : status.pending === undefined ? '客户端主页面兼容脚本未开始执行' : '客户端界面模块加载未完成（剩余 ' + status.pending + ' 个）';
+      rejectReady(Object.assign(new Error(reason + '。请先更新官方客户端；详细原因见 data/state/native-quota.json。'), { code }));
+    }, startupTimeoutMs);
+    const exited = () => rejectReady(Object.assign(new Error('客户端在兼容初始化期间退出（' + (child.signalCode || child.exitCode) + '）。'), { code: 'native_client_exited' }));
     child.once('exit', exited);
     if (child.exitCode !== null || child.signalCode !== null) exited();
     await pipe.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
@@ -285,7 +316,10 @@ export async function startQuotaCompatibleClient({ executable, archive, root, ho
       clearTimeout(refresh); refresh = setTimeout(() => {
         let ids; try { ids = models(); } catch { return; }
         const expression = 'if(globalThis[' + JSON.stringify(key) + '])globalThis[' + JSON.stringify(key) + '].models=new Set(' + JSON.stringify(ids) + ')';
-        for (const session of sessions) pipe.send('Runtime.evaluate', { expression }, session).catch(() => {});
+        for (const session of sessions) evaluate(expression, session).catch(error => {
+          if (!sessions.has(session) || child.exitCode !== null) return;
+          status.errors++; status.lastError = describeError(error); status.failure = errorDetails(error); report();
+        });
       }, 100);
     });
     child.once('exit', () => {
@@ -295,6 +329,8 @@ export async function startQuotaCompatibleClient({ executable, archive, root, ho
     });
     return child;
   } catch (error) {
+    status.failurePhase = status.phase; status.elapsedMs = Date.now() - started;
+    status.pendingCommands = pipe?.pendingMethods();
     socket?.terminate();
     let failure = error;
     try {
@@ -303,7 +339,8 @@ export async function startQuotaCompatibleClient({ executable, archive, root, ho
       failure = new AggregateError([error, cleanupError], error.message + '\n' + cleanupError.message, { cause: error });
     }
     child?.stdio?.[3]?.destroy(); child?.stdio?.[4]?.destroy();
-    status.ready = false; status.phase = 'failed'; status.errors++; status.lastError = failure.message;
+    status.ready = false; status.phase = 'failed'; status.errors = Math.max(1, status.errors); status.lastError = describeError(failure);
+    status.code ||= error.code || 'native_setup_failed'; status.failure ||= errorDetails(failure);
     try { report(); } catch {}
     throw failure;
   } finally { clearTimeout(deadline); }
