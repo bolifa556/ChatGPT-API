@@ -37,7 +37,8 @@ try {
   atomic(path.join(ctx.data, '.env'), 'BASE_URL=https://example.invalid/v1\nAPI_KEY=' + key + '\n');
   atomic(path.join(ctx.data, 'cache/models-gateway.json'), { models: [{ slug: 'Vendor/model' }, { slug: 'GPT/model' }] });
   applyConfig(ctx); const config = fs.readFileSync(ctx.config, 'utf8');
-  assert(config.includes('requires_openai_auth = false')); assert(config.includes(JSON.stringify(path.join(ctx.root, 'macos/provider.mjs'))));
+  assert(config.includes('requires_openai_auth = false')); assert(config.includes('experimental_bearer_token = "chatgpt-api-local"'));
+  assert(!config.includes('[model_providers.chatgpt_api_launcher.auth]'));
   assert(config.includes('model = "Vendor/model"')); assert(config.includes('openai_base_url = "http://127.0.0.1:8102/v1"'));
   assert(config.includes('localeOverride = "zh-CN"')); assert(config.includes('[model_providers.keep]'));
   assert(!config.includes(key)); assert.equal(authHash(), authBefore);
