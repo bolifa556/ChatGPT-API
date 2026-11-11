@@ -7,7 +7,7 @@
 保留官方桌面客户端的原生界面、快捷键与交互质感，接入自定义模型。不想用了，退出后就能回到原来的使用方式。  
 **原生界面与快捷键 · 官方 / 混合 / 纯 API · 同一对话切换模型 · 生图与本地工具**
 
-[![Version](https://img.shields.io/badge/Release-v3.2.3-blue.svg)](https://github.com/bolifa556/ChatGPT-API/releases/tag/v3.2.3)
+[![Version](https://img.shields.io/badge/Release-v3.2.2-blue.svg)](https://github.com/bolifa556/ChatGPT-API/releases/tag/v3.2.2)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-brightgreen.svg)](#快速开始)
 [![Client Files](https://img.shields.io/badge/Client%20Files-Unmodified-success.svg)](#你的客户端照常保留)
 
@@ -45,7 +45,7 @@ ChatGPT API Launcher 是已有 **ChatGPT / Codex 官方客户端** 旁边的一�
 - **同一对话中切换官方与 API 模型**  
   已有官方账号时，模型菜单可以同时显示官方模型和你的 API 模型。根据任务难度随心选择合适的模型，不必为了换模型频繁重新建对话。（*注：图片、附件和已压缩的旧对话仍受相应能力限制*）
 - **官方额度用完，切自己的 API 接着聊**  
-  当前 3.2.3 支持在官方额度耗尽后切到自定义模型继续发送。使用的是你自己的 API 额度，不会增加或改变官方账号的实际额度。
+  当前 3.2.2 支持在官方额度耗尽后切到自定义模型继续发送。使用的是你自己的 API 额度，不会增加或改变官方账号的实际额度。
 - **多个 API 统一集中管理**  
   最多可添加 32 个来源，分别命名、启用或停用。模型列表带有来源名称标注，同名模型也会分开显示，方便明确选择对应的服务。
 - **保留原有对话和项目分类**  
@@ -70,10 +70,10 @@ ChatGPT API Launcher 是已有 **ChatGPT / Codex 官方客户端** 旁边的一�
 
 | 平台 | 下载地址 | 安装说明 |
 | :--- | :--- | :--- |
-| **Windows x64** | [ChatGPT-API-Launcher-3.2.3-win-x64.zip](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.3/ChatGPT-API-Launcher-3.2.3-win-x64.zip) | 解压后双击运行 `安装.cmd`，按提示选择安装目录完成安装。 |
-| **macOS (Apple Silicon)** | [ChatGPT-API-Provider-3.2.3-macos-arm64.dmg](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.3/ChatGPT-API-Provider-3.2.3-macos-arm64.dmg) | 打开 DMG，将需要的启动入口与控制台 App 拖到“应用程序”。首次打开被系统拦截时，按 [macOS 说明](docs/macos-dmg-readme.md) 中的步骤允许打开。 |
-| **Linux x64** | [ChatGPT-API-Provider-3.2.3-linux-x64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.3/ChatGPT-API-Provider-3.2.3-linux-x64.tar.gz) | 解压后，以桌面用户身份运行 `./install.sh`。（详见 [Linux 说明](docs/linux-readme.md)） |
-| **Linux ARM64** | [ChatGPT-API-Provider-3.2.3-linux-arm64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.3/ChatGPT-API-Provider-3.2.3-linux-arm64.tar.gz) | 解压后同样运行 `./install.sh` 即可。 |
+| **Windows x64** | [ChatGPT-API-Launcher-3.2.2-win-x64.zip](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.2/ChatGPT-API-Launcher-3.2.2-win-x64.zip) | 解压后双击运行 `安装.cmd`，按提示选择安装目录完成安装。 |
+| **macOS (Apple Silicon)** | [ChatGPT-API-Provider-3.2.2-macos-arm64.dmg](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.2/ChatGPT-API-Provider-3.2.2-macos-arm64.dmg) | 打开 DMG，将需要的启动入口与控制台 App 拖到“应用程序”。首次打开被系统拦截时，按 [macOS 说明](docs/macos-dmg-readme.md) 中的步骤允许打开。 |
+| **Linux x64** | [ChatGPT-API-Provider-3.2.2-linux-x64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.2/ChatGPT-API-Provider-3.2.2-linux-x64.tar.gz) | 解压后，以桌面用户身份运行 `./install.sh`。（详见 [Linux 说明](docs/linux-readme.md)） |
+| **Linux ARM64** | [ChatGPT-API-Provider-3.2.2-linux-arm64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.2/ChatGPT-API-Provider-3.2.2-linux-arm64.tar.gz) | 解压后同样运行 `./install.sh` 即可。 |
 
 ### 2. 填写自己的 API
 
@@ -224,7 +224,7 @@ Windows、macOS 提供三个入口，Linux 使用纯 API 模式。官方入口�
 <details>
 <summary><b>Q2: 官方额度用完，还能用自己的 API 吗？</b></summary>
 
-> 可以。当前 3.2.3 支持在 `chatgpt-api` 中切到自定义模型继续发送，或完全退出后从纯 API 入口使用。需要你的 API 自身仍可用；权限、任务状态等其他发送限制仍然有效。
+> 可以。当前 3.2.2 支持在 `chatgpt-api` 中切到自定义模型继续发送，或完全退出后从纯 API 入口使用。需要你的 API 自身仍可用；权限、任务状态等其他发送限制仍然有效。
 </details>
 
 <details>

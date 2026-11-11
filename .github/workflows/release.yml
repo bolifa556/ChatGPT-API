@@ -120,6 +120,7 @@ jobs:
       - run: node tests/configuration-update-test.mjs
       - run: node tests/feature-matrix-test.mjs
       - run: node tests/protocol-fidelity-test.mjs
+      - run: node tests/stream-fidelity-test.mjs
       - run: node tests/toml-edit-test.mjs
       - run: node tests/universal-api-test.mjs
       - run: node tests/transport-test.mjs

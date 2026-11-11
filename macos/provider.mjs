@@ -14,7 +14,7 @@ import { repairThreadProviders, restoreThreadProviders } from '../src/repair-thr
 import { overlayDesktopState, restoreDesktopState } from '../src/desktop-state.mjs';
 import { registerRecovery, recordRecoveryClient, unregisterRecovery, recoverPending } from '../src/recovery.mjs';
 import { prepareWithRecovery, updateEnv, restoreRootLine } from '../src/gateway-recovery.mjs';
-import { syncLegacySettings, userApiSettings, initializeDeferredSettings, requireApiConfiguration, atomicPrivate } from '../src/settings.mjs';
+import { syncLegacySettings, userApiSettings, initializeDeferredSettings, requireApiConfiguration, atomicPrivate, normalizeBaseUrl } from '../src/settings.mjs';
 import { getRoot, setRoot, getTable, setTable } from '../src/toml-edit.mjs';
 export { getRoot, setRoot, getTable, setTable } from '../src/toml-edit.mjs';
 export { requireClosedClient } from './platform.mjs';
@@ -46,14 +46,13 @@ export function readSettings(ctx) {
 }
 export function userSettings(ctx) { return userApiSettings(ctx.root, readSettings(ctx)); }
 export function settingsChecked(settings) {
-  const base = (settings.BASE_URL || '').trim().replace(/\/+$/, '').replace(/\/(models|responses)$/, '');
-  let url; try { url = new URL(base); } catch { throw new Error('Enter a valid http:// or https:// API base URL.'); }
-  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || /[\r\n]/.test(base)) throw new Error('API URL must not contain credentials, a query, or a fragment.');
+  let base; try { base = normalizeBaseUrl(settings.BASE_URL || ''); }
+  catch (error) { throw Object.assign(error, { code: 'gateway_unavailable' }); }
   const key = (settings.API_KEY || '').trim();
   if (!key || /[\r\n]/.test(key)) throw new Error('API Key is missing or invalid. Run chatgpt-apionly configure.');
   const port = Number(settings.SHIM_PORT || 8102);
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Local port must be between 1024 and 65535.');
-  return { BASE_URL: base.endsWith('/v1') ? base : base + '/v1', API_KEY: key, SHIM_PORT: port };
+  return { BASE_URL: base, API_KEY: key, SHIM_PORT: port };
 }
 function statePath(ctx, name) { return path.join(ctx.data, 'state', name + '.json'); }
 async function locked(ctx, action, name = 'provider-lock') {
@@ -126,8 +125,10 @@ async function prepare(ctx, settings, selection) {
   }
   const env = { ...process.env, CHATGPT_API_ROOT: ctx.root, CODEX_HOME: ctx.home, CHATGPT_API_ENV_PATH: envPath, CHATGPT_SHIM_PORT: String(settings.SHIM_PORT) };
   delete env.CHATGPT_GATEWAY_BASE;
-  const result = await run(ctx.node, [path.join(ctx.root, 'src/shim.mjs'), '--prepare'], { env, timeout: 30000, maxBuffer: 2 * 1024 * 1024 });
-  return { env, prepared: JSON.parse(result.stdout) };
+  const result = await run(ctx.node, [path.join(ctx.root, 'src/shim.mjs'), '--prepare', '--cached'], { env, timeout: 30000, maxBuffer: 2 * 1024 * 1024 });
+  const prepared = JSON.parse(result.stdout);
+  if (prepared.refreshOnStart) atomic(statePath(ctx, 'route-state'), { version: 2, ...selection, refreshOnStart: true });
+  return { env, prepared };
 }
 export async function ensureRouter(ctx, refresh = false, selection) {
   selection ??= await entrySelection(ctx, 'apionly');

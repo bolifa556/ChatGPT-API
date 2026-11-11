@@ -21,6 +21,7 @@ export class GatewaySources {
     this.file = path.join(root, 'data/cache/gateway-sources.json');
     this.saved = readJson(this.file) || { version: 1, sources: [] };
     this.models = []; this.sources = [];
+    this.protocols = new WeakMap();
   }
   profiles() {
     return this.settings.providers.filter(provider => provider.enabled).sort((a, b) => Number(b.id === this.settings.preferredProviderId) - Number(a.id === this.settings.preferredProviderId));
@@ -39,7 +40,14 @@ export class GatewaySources {
     const metadata = catalog.find(candidate => candidate.id === model);
     const profile = this.profile(metadata?._providerId || 'default');
     if (!profile || !metadata) throw Object.assign(new Error('The selected API model or source is no longer enabled.'), { status: 400, code: 'unknown_model' });
-    return { profile, metadata, base: this.base(profile), dispatcher: this.dispatcher(profile), model: metadata._upstreamId || metadata.id };
+    const modelId = metadata._upstreamId || metadata.id;
+    const protocol = this.protocols.get(profile)?.get(modelId);
+    return { profile, metadata: protocol ? { ...metadata, _protocol: protocol } : metadata,
+      base: this.base(profile), dispatcher: this.dispatcher(profile), model: modelId };
+  }
+  rememberChat({ profile, model }) {
+    if (!this.protocols.has(profile)) this.protocols.set(profile, new Map());
+    this.protocols.get(profile).set(model, 'chat');
   }
   adoptLegacy(catalog) {
     const profile = this.profile('default');

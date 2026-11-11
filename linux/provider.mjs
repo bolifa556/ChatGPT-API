@@ -10,7 +10,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { prepareWithRecovery, updateEnv, restoreRootLine } from '../src/gateway-recovery.mjs';
 import { requestSettings, showError } from './settings.mjs';
-import { syncLegacySettings, userApiSettings, initializeDeferredSettings, requireApiConfiguration, atomicPrivate } from '../src/settings.mjs';
+import { syncLegacySettings, userApiSettings, initializeDeferredSettings, requireApiConfiguration, atomicPrivate, normalizeBaseUrl } from '../src/settings.mjs';
 import { getRoot, setRoot, getTable, setTable } from '../src/toml-edit.mjs';
 export { getRoot, setRoot, getTable, setTable } from '../src/toml-edit.mjs';
 import { repairThreadProviders, restoreThreadProviders } from '../src/repair-thread-providers.mjs';
@@ -45,14 +45,13 @@ export function readSettings(ctx) {
     .map(line => { const at = line.indexOf('='); return [line.slice(0, at).trim(), line.slice(at + 1).trim()]; }));
 }
 export function settingsChecked(settings) {
-  const base = (settings.BASE_URL || '').trim().replace(/\/+$/, '').replace(/\/(models|responses)$/, '');
-  let url; try { url = new URL(base); } catch { throw new Error('Enter a valid http:// or https:// API base URL.'); }
-  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || /[\r\n]/.test(base)) throw new Error('API URL must not contain credentials, a query, or a fragment.');
+  let base; try { base = normalizeBaseUrl(settings.BASE_URL || ''); }
+  catch (error) { throw Object.assign(error, { code: 'gateway_unavailable' }); }
   const key = (settings.API_KEY || '').trim();
   if (!key || /[\r\n]/.test(key)) throw new Error('API Key is missing or invalid. Run chatgpt-api configure.');
   const port = Number(settings.SHIM_PORT || 8102);
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Local port must be between 1024 and 65535.');
-  return { BASE_URL: base.endsWith('/v1') ? base : base + '/v1', API_KEY: key, SHIM_PORT: port };
+  return { BASE_URL: base, API_KEY: key, SHIM_PORT: port };
 }
 function statePath(ctx, name) { return path.join(ctx.data, 'state', name + '.json'); }
 export function processIdentity(pid) {
@@ -124,8 +123,10 @@ async function prepare(ctx, settings) {
   // API-only discovery never borrows the saved subscription account.
   const env = { ...process.env, CHATGPT_API_ROOT: ctx.root, CODEX_HOME: ctx.home, CHATGPT_API_ENV_PATH: path.join(ctx.data, '.env'), CHATGPT_SHIM_PORT: String(settings.SHIM_PORT) };
   delete env.CHATGPT_GATEWAY_BASE;
-  const result = await run(ctx.node, [path.join(ctx.root, 'src/shim.mjs'), '--prepare'], { env, timeout: 30000, maxBuffer: 2 * 1024 * 1024 });
-  return { env, prepared: JSON.parse(result.stdout) };
+  const result = await run(ctx.node, [path.join(ctx.root, 'src/shim.mjs'), '--prepare', '--cached'], { env, timeout: 30000, maxBuffer: 2 * 1024 * 1024 });
+  const prepared = JSON.parse(result.stdout);
+  if (prepared.refreshOnStart) atomic(statePath(ctx, 'route-state'), { version: 2, entryMode: 'apionly', mode: 'gateway', nativeAccount, gatewayTransport: 'direct', officialProxy: '', refreshOnStart: true });
+  return { env, prepared };
 }
 export async function ensureRouter(ctx, refresh = false) {
   return locked(ctx, async () => {

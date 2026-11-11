@@ -96,12 +96,18 @@ export async function outgoingBody(incoming, payload, changed, official) {
   return { body: encoded, encoding };
 }
 
+const cancellations = new WeakSet();
+function cancellation(signal) {
+  const error = signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason || 'Request aborted'));
+  if (error.name !== 'TimeoutError') cancellations.add(error);
+  return error;
+}
 export function protocolError(error) {
   // Upstream error objects belong to that service; preserve their type, code,
   // message and parameter instead of presenting them as a local server error.
   if (error.upstreamError) return { type: 'error', status: error.status || 502, error: error.upstreamError };
   const timeoutCodes = { UND_ERR_CONNECT_TIMEOUT: 'upstream_connect_timeout', UND_ERR_HEADERS_TIMEOUT: 'upstream_headers_timeout', UND_ERR_BODY_TIMEOUT: 'upstream_body_timeout' };
-  const cancelled = error.name === 'AbortError' || error.code === 'ABORT_ERR';
+  const cancelled = cancellations.has(error) || error.code === 'ABORT_ERR';
   const code = timeoutCodes[error.code] || (cancelled ? 'request_cancelled' : typeof error.code === 'string' ? error.code : 'upstream_error');
   const status = error.status || (timeoutCodes[error.code] ? 504 : cancelled ? 499 : 502);
   const type = status === 401 ? 'authentication_error' : status === 403 ? 'permission_error' : status === 429 ? 'rate_limit_error' : status < 500 ? 'invalid_request_error' : 'server_error';
@@ -111,16 +117,19 @@ export function protocolError(error) {
 export function requestWithAbort(url, options) {
   const signal = options.signal;
   if (!signal) return request(url, options);
-  signal.throwIfAborted();
+  if (signal.aborted) throw cancellation(signal);
   return new Promise((resolve, reject) => {
     let cancelled = false;
-    const abort = () => { cancelled = true; reject(signal.reason || new Error('Request aborted')); };
+    const abort = () => { cancelled = true; reject(cancellation(signal)); };
     signal.addEventListener('abort', abort, { once: true });
     request(url, options).then(response => {
       signal.removeEventListener('abort', abort);
       // A connector can finish after cancellation. Never forward its late reply.
       if (cancelled) releaseResponseBody(response.body);
-      else resolve(response);
+      else {
+        response.body.once('error', error => { if (signal.aborted && signal.reason?.name !== 'TimeoutError') cancellations.add(error); });
+        resolve(response);
+      }
     }, error => { signal.removeEventListener('abort', abort); reject(error); });
   });
 }
@@ -143,6 +152,11 @@ export async function writeChunk(res, chunk) {
     res.once('drain', drain); res.once('close', close); res.once('error', error);
     if (res.destroyed) close();
   });
+}
+
+export function writeWebSocket(socket, value) {
+  if (socket.readyState !== 1) return Promise.reject(Object.assign(new Error('Client disconnected'), { code: 'ABORT_ERR' }));
+  return new Promise((resolve, reject) => socket.send(value, error => error ? reject(error) : resolve()));
 }
 
 export function relayClose(client, code, reason) {

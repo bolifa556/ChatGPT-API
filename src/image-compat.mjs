@@ -103,7 +103,8 @@ async function imageBytes(reference, dispatcher, signal) {
   for (let redirects = 0; redirects <= 3; redirects++) {
     if (!['http:','https:'].includes(url.protocol) || url.username || url.password) throw fail('Only HTTP(S) image URLs are supported.', 'invalid_upstream_image_response', 502);
     // Signed image URLs must never receive either the API key or ChatGPT OAuth.
-    const upstream = await request(url, { dispatcher, signal, headers: { accept: 'image/*' }, headersTimeout: 30000, bodyTimeout: 60000 });
+    const upstream = await request(url, { dispatcher: typeof dispatcher === 'function' ? dispatcher(url.href, reference) : dispatcher,
+      signal, headers: { accept: 'image/*' }, headersTimeout: 30000, bodyTimeout: 60000 });
     if ([301,302,303,307,308].includes(upstream.statusCode) && upstream.headers.location) {
       upstream.body.destroy(); url = new URL(upstream.headers.location, url); continue;
     }
@@ -170,7 +171,7 @@ async function nativeImageResponse(data, dispatcher, signal) {
 // Image calls are independent of the conversational model menu and adapters.
 // Fallback is allowed only after a definitive rejection, never after accepted
 // output, an ambiguous network failure, or a content-policy rejection.
-export async function forwardImages({ req,res,url,body,operation,env,hasLogin,allowGateway = true,routing = hasLogin ? 'official' : 'custom',getModels,headersFor,targetUrl,officialDispatcher,gatewayDispatcher,imageDispatcher,decodeBody,resolveFile,resolveGateway,signal,log }) {
+export async function forwardImages({ req,res,url,body,operation,env,hasLogin,allowGateway = true,routing = hasLogin ? 'official' : 'custom',getModels,headersFor,targetUrl,officialDispatcher,gatewayDispatcher,imageDispatcher,imageDispatcherFor,decodeBody,resolveFile,resolveGateway,signal,log }) {
   let original; try { original = JSON.parse(body.toString('utf8')); } catch { throw fail('Images requests must contain JSON.', 'invalid_image_request'); }
   if (!original || Array.isArray(original) || typeof original !== 'object') throw fail('Invalid Images request.', 'invalid_image_request');
   // The current native image tool has no model argument and always supplies
@@ -178,6 +179,7 @@ export async function forwardImages({ req,res,url,body,operation,env,hasLogin,al
   // model selected by an ordinary Images API caller. Never inspect the prompt.
   const nativeDefault = Boolean(req.headers['x-codex-image-turn-id']) && original.model === 'gpt-image-2';
   const nativeImage = Boolean(req.headers['x-codex-image-turn-id']);
+  const downloads = gateway => imageDispatcherFor ? (reference, original) => imageDispatcherFor(reference, gateway, original) : imageDispatcher;
   const forward = async (which, model, outgoing = { body, contentType: req.headers['content-type'] || 'application/json' }, gateway) => {
     let headers = headersFor(req.headers, which, gateway?.profile); headers['content-type'] = outgoing.contentType;
     if (which === 'gateway') {
@@ -196,7 +198,7 @@ export async function forwardImages({ req,res,url,body,operation,env,hasLogin,al
       const decoded = decodeBody(raw, upstream.headers['content-encoding'] || '');
       let data; try { data = JSON.parse(decoded.toString('utf8')); } catch {}
       if (which === 'gateway' && ok(upstream.statusCode)) {
-        const normalized = await nativeImageResponse(data, imageDispatcher, signal);
+        const normalized = await nativeImageResponse(data, downloads(gateway), signal);
         log('gateway image options model=' + model + ' requested=' + JSON.stringify(outgoing.imageOptions || {})
           + ' returned=' + JSON.stringify({ quality: data.quality, output_format: data.output_format }));
         res.writeHead(upstream.statusCode, responseHeaders(upstream.headers, normalized.changed));
@@ -218,10 +220,10 @@ export async function forwardImages({ req,res,url,body,operation,env,hasLogin,al
   for (const model of candidates) {
     const gateway = resolveGateway?.(model);
     const selectedModel = gateway ? { ...model, id: gateway.model } : model, settings = gateway?.env || env;
-    const outgoing = await gatewayBody(original, selectedModel, operation, settings, imageDispatcher, signal, resolveFile, gateway?.strengths, nativeImage);
+    const outgoing = await gatewayBody(original, selectedModel, operation, settings, downloads(gateway), signal, resolveFile, gateway?.strengths, nativeImage);
     let result = await forward('gateway', model.id, outgoing, gateway);
     if (operation === 'edits' && outgoing.contentType === 'application/json' && original.images?.length && imageEditNeedsMultipart(result)) {
-      const multipart = await gatewayBody(original, selectedModel, operation, { ...settings, IMAGE_EDIT_FORMAT: 'multipart' }, imageDispatcher, signal, resolveFile, gateway?.strengths, nativeImage);
+      const multipart = await gatewayBody(original, selectedModel, operation, { ...settings, IMAGE_EDIT_FORMAT: 'multipart' }, downloads(gateway), signal, resolveFile, gateway?.strengths, nativeImage);
       log('gateway images operation=edits model=' + model.id + ' format=multipart after JSON image-field rejection');
       result = await forward('gateway', model.id, multipart, gateway);
     }

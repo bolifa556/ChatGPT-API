@@ -1,6 +1,9 @@
 import zlib from 'node:zlib';
 import { MAX_EVENT_BYTES } from './non-gpt-compat.mjs';
 
+const control = Symbol('SSE control');
+export const isSseControl = value => Boolean(value?.[control]);
+
 export function decodedStream(body, encoding = '') {
   const decoders = { gzip: zlib.createGunzip, deflate: zlib.createInflate, br: zlib.createBrotliDecompress, zstd: zlib.createZstdDecompress };
   if (!encoding || encoding === 'identity') return body;
@@ -13,29 +16,43 @@ export function decodedStream(body, encoding = '') {
 }
 export async function* ssePackets(stream, { maxEventBytes = MAX_EVENT_BYTES } = {}) {
   const decoder = new TextDecoder();
-  let parts = [], bytes = 0, carriage = '', newline = '';
-  function packet(raw) {
-    const data = raw.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
-    return data && data !== '[DONE]' ? { raw, data: JSON.parse(data) } : { raw, done: data === '[DONE]' };
+  let parts = [], bytes = 0, lines = [], eventBytes = 0, carriage = '';
+  function packet() {
+    const raw = lines.join('\n'), values = []; let event;
+    for (const line of lines) {
+      const at = line.indexOf(':'), field = at < 0 ? line : line.slice(0, at);
+      const value = at < 0 ? '' : line.slice(at + 1).replace(/^ /, '');
+      if (field === 'data') values.push(value);
+      else if (field === 'event') event = value;
+    }
+    lines = []; eventBytes = 0;
+    if (!values.length) return { raw: raw + '\n\n', [control]: true };
+    const data = values.join('\n');
+    return data && data !== '[DONE]' ? { raw, event, data: JSON.parse(data) } : { raw, done: data === '[DONE]' };
   }
   function append(text) {
     bytes += Buffer.byteLength(text);
-    if (bytes > maxEventBytes) throw new Error('Upstream event exceeds limit');
+    if (bytes + eventBytes > maxEventBytes) throw new Error('Upstream event exceeds limit');
     if (text) parts.push(text);
+  }
+  function* line() {
+    const raw = parts.join(''); parts = []; const length = bytes; bytes = 0;
+    // Comments need no blank line and do not dispatch an SSE event. Deliver
+    // them while an upstream is otherwise idle, without inventing a message.
+    if (raw.startsWith(':')) yield { raw: raw + '\n', [control]: true };
+    else if (!raw) { if (lines.length) yield packet(); }
+    else { lines.push(raw); eventBytes += length; }
   }
   function* consume(text, final = false) {
     text = carriage + text; carriage = '';
     if (!final && text.endsWith('\r')) { carriage = '\r'; text = text.slice(0, -1); }
-    text = newline + text.replace(/\r\n/g, '\n'); newline = '';
+    text = text.replace(/\r\n|\r/g, '\n');
     let start = 0, at;
-    while ((at = text.indexOf('\n\n', start)) >= 0) {
+    while ((at = text.indexOf('\n', start)) >= 0) {
       append(text.slice(start, at));
-      const raw = parts.join(''); parts = []; bytes = 0;
-      yield packet(raw); start = at + 2;
+      yield* line(); start = at + 1;
     }
-    let tail = text.slice(start);
-    if (!final && tail.endsWith('\n')) { newline = '\n'; tail = tail.slice(0, -1); }
-    append(tail);
+    append(text.slice(start));
   }
   for await (const chunk of stream) {
     // Keep large base64 events in chunks; repeatedly scanning/copying the whole
@@ -43,7 +60,7 @@ export async function* ssePackets(stream, { maxEventBytes = MAX_EVENT_BYTES } = 
     yield* consume(decoder.decode(chunk, { stream: true }));
   }
   yield* consume(decoder.decode(), true);
-  const raw = parts.join('');
-  if (raw.trim()) yield packet(raw);
+  if (parts.length) yield* line();
+  if (lines.length) yield packet();
 }
-export const encodeSse = event => 'event: ' + event.type + '\ndata: ' + JSON.stringify(event) + '\n\n';
+export const encodeSse = event => isSseControl(event) ? event.raw : 'event: ' + event.type + '\ndata: ' + JSON.stringify(event) + '\n\n';

@@ -26,10 +26,11 @@ export class PendingResponses {
 // Connection-local references only. Shared history items count once; neither
 // serialized chat copies nor synthetic summaries are kept on disk.
 export class HistoryCache {
-  constructor({ maxBytes = MAX_REQUEST_BYTES, maxEntries = 64 } = {}) {
+  constructor({ maxBytes = MAX_REQUEST_BYTES, maxEntries = 64, onDelete = () => {} } = {}) {
     this.maxBytes = maxBytes; this.maxEntries = maxEntries;
     this.entries = new Map(); this.refs = new Map(); this.sizes = new WeakMap();
     this.latest = new Map(); this.bytes = 0;
+    this.onDelete = onDelete;
   }
   get(id) {
     const entry = this.entries.get(id);
@@ -52,6 +53,7 @@ export class HistoryCache {
       if (--ref.count === 0) { this.bytes -= ref.bytes; this.refs.delete(item); }
     }
     if (this.latest.get(entry.lane) === id) this.latest.delete(entry.lane);
+    this.onDelete(id);
   }
   set(id, entry) {
     this.delete(id);

@@ -10,12 +10,12 @@ import WebSocket, { WebSocketServer } from 'ws';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { normalizeGptHistory, normalizeOfficialHistory, isGptModel, ResponseOutput } from './history-compat.mjs';
 import { NonGptAdapter, NonGptEvents, validateNonGptCompaction } from './non-gpt-compat.mjs';
-import { usesChat, chatRequest, chatResponse, ChatEvents } from './chat-compat.mjs';
-import { decodedStream, ssePackets, encodeSse } from './sse.mjs';
+import { usesChat, chatRequest, chatResponse, ChatEvents, chatEndpointUnavailable } from './chat-compat.mjs';
+import { decodedStream, ssePackets, encodeSse, isSseControl } from './sse.mjs';
 import { forwardImages, imageOnlyModel, imageCapabilities } from './image-compat.mjs';
 import { ResponseImages, restoreHostedImageHistory } from './responses-images.mjs';
 import { contextFields, rememberContexts, contextKey, applyContext } from './model-context.mjs';
-import { officialDispatcherFor, readEncodedBody, outgoingBody, writeChunk, relayClose,
+import { officialDispatcherFor, readEncodedBody, outgoingBody, writeChunk, writeWebSocket, relayClose,
   requestWithAbort as request, protocolError, releaseResponseBody, RESPONSE_TIMEOUTS, MAX_REQUEST_BYTES,
   gatewayResponseHeaders, FORWARDED_NATIVE_HEADERS, normalizeGatewayTransport, gatewayDispatcherFor } from './transport.mjs';
 import { PendingResponses, HistoryCache, laneOf } from './response-state.mjs';
@@ -55,6 +55,7 @@ const transport = normalizeGatewayTransport(runtime.gatewayTransport || env.GATE
 const tunnelPort = Number(env.GATEWAY_TUNNEL_PORT || 18003);
 const sources = new GatewaySources(root, env, { transport, tunnelPort, baseOverride: process.env.CHATGPT_GATEWAY_BASE || '' });
 const gatewayDispatcher = gatewayDispatcherFor(gatewayEnabled ? gatewayBase : 'http://127.0.0.1', transport, tunnelPort);
+const mediaDispatcher = transport === 'direct' ? gatewayDispatcher : gatewayDispatcherFor('http://127.0.0.1', 'direct');
 const officialDispatcher = officialDispatcherFor(officialProxy);
 const sourceId = crypto.createHash('sha256').update(gatewayBase + '\n' + (env.API_KEY || '')).digest('hex');
 const buildHash = crypto.createHash('sha256');
@@ -221,15 +222,31 @@ function historyForTarget(payload, which) {
   if (debug && result.changed) log('history compatibility model=' + payload.model + ' ' + JSON.stringify(result.stats));
   return { ...result, changed: images.changed || result.changed };
 }
-function prepareRequest(payload, which, pathname = '/v1/responses', metadata) {
-  if (which === 'gateway' && (!isGptModel(payload.model) || usesChat(payload, metadata))) {
+function prepareRequest(payload, which, pathname = '/v1/responses', metadata, forceChat = false) {
+  if (which === 'gateway' && (!isGptModel(payload.model) || usesChat(payload, metadata) || forceChat)) {
     if (pathname.endsWith('/responses/compact')) throw Object.assign(new Error('GPT opaque compaction is unavailable for non-GPT models.'), { status: 400, code: 'incompatible_compacted_history' });
-    const adapter = new NonGptAdapter(payload, { preserveReasoning: /^(阿里云订阅|词元计划|vllm)\//.test(payload.model) });
+    const adapter = new NonGptAdapter(payload, { preserveReasoning: true });
     const converted = adapter.request();
-    const chat = usesChat(converted, metadata);
+    const chat = forceChat || usesChat(converted, metadata);
     return { payload: chat ? chatRequest(converted) : restoreHostedImageHistory(converted, codexHome).payload, changed: true, adapter, chat };
   }
   return historyForTarget(payload, which);
+}
+async function chatFallback(upstream, payload, gateway, url, incomingHeaders, signal) {
+  if (!/\/(?:v1\/)?responses$/.test(url.pathname) || ![400, 404, 405, 501].includes(upstream.statusCode)
+      || !usesChat(payload, { ...gateway.metadata, _protocol: 'chat' })) return null;
+  const rejectedBody = Buffer.from(await upstream.body.arrayBuffer());
+  let data, text = ''; try { text = decodeBody(rejectedBody, upstream.headers['content-encoding']).toString('utf8'); data = JSON.parse(text); } catch {}
+  if (!chatEndpointUnavailable(upstream.statusCode, data, text)) return { rejectedBody };
+  // Only a definitive, unaccepted endpoint rejection permits this conversion.
+  // Reuse the original request, never a synthetic prompt or a partial result.
+  const adapted = prepareRequest(payload, 'gateway', url.pathname, gateway.metadata, true);
+  const body = Buffer.from(JSON.stringify(adapted.payload));
+  const headers = gatewayResponseHeaders({ ...headersFor(incomingHeaders, 'gateway', gateway.profile), 'content-type': 'application/json' }, false);
+  const next = await request(gateway.base + '/chat/completions' + url.search, {
+    method: 'POST', body, headers, dispatcher: gateway.dispatcher, signal, ...RESPONSE_TIMEOUTS });
+  if (next.statusCode >= 200 && next.statusCode < 300) sources.rememberChat(gateway);
+  return { upstream: next, adapted, body };
 }
 async function gatewayImageReferences(payload, incoming, signal) {
   if (!isGptModel(payload.model)) validateNonGptCompaction(payload);
@@ -332,9 +349,11 @@ async function* convertedEvents(stream, adapted, images) {
   // Responses events can contain base64 images. Match the buffered Responses
   // body limit; Chat events and accumulated tool arguments keep their own limit.
   for await (const packet of ssePackets(stream, { maxEventBytes: chat ? undefined : 64 * 1024 * 1024 })) {
+    if (isSseControl(packet)) { yield packet; continue; }
     if (packet.done && chat) break;
     if (!packet.data) continue;
-    for (const event of chat ? chat.convert(packet.data) : [packet.data]) {
+    const data = !chat && !packet.data.type && packet.event ? { ...packet.data, type: packet.event } : packet.data;
+    for (const event of chat ? chat.convert(data) : [data]) {
       if (['response.completed','response.incomplete','response.failed','error'].includes(event.type)) terminal = true;
       for (const converted of events ? events.convert(event) : [event]) yield* images ? images.convert(converted) : [converted];
     }
@@ -405,6 +424,7 @@ async function handleHttp(req, res) {
   if (imageRoute) {
     if (req.method !== 'POST') throw Object.assign(new Error('Images endpoints require POST.'), { status: 405, code: 'invalid_image_request' });
     const controller = new AbortController(); controllers.add(controller);
+    const nativeImageUrls = new Set();
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
     try {
       const imageLogin = hasOfficialAuth(req.headers);
@@ -422,12 +442,15 @@ async function handleHttp(req, res) {
           return { ...selected, strengths: sources.settings.imageStrengths[overrideKey(selected.profile.id, selected.model)],
             env: { ...env, IMAGE_EDIT_FORMAT: selected.profile.imageEditFormat } };
         },
-        headersFor,targetUrl,officialDispatcher,gatewayDispatcher,imageDispatcher: officialDispatcher,decodeBody,signal: controller.signal,log,
+        headersFor,targetUrl,officialDispatcher,gatewayDispatcher,imageDispatcher: mediaDispatcher,
+        imageDispatcherFor: (reference, gateway, original = reference) => nativeImageUrls.has(original) ? officialDispatcher
+          : gateway && new URL(reference).origin === new URL(gateway.base).origin ? gateway.dispatcher : mediaDispatcher,
+        decodeBody,signal: controller.signal,log,
         resolveFile: async id => {
           if (!hasOfficialAuth(req.headers)) throw Object.assign(new Error('A native file ID requires its owning ChatGPT sign-in; use a URL or local reference image.'), { status: 400, code: 'image_reference_unavailable' });
           const result = await fetchJson(officialBase.replace(/\/codex$/, '') + '/files/download/' + encodeURIComponent(id), headersFor(req.headers, 'official'), officialDispatcher, 12000, controller.signal);
           if (typeof result.download_url !== 'string' || !/^https?:\/\//.test(result.download_url)) throw Object.assign(new Error('The native file service did not provide an image URL.'), { status: 502, code: 'image_reference_unavailable' });
-          return result.download_url;
+          nativeImageUrls.add(result.download_url); return result.download_url;
         } });
     } finally { controllers.delete(controller); }
   }
@@ -444,16 +467,24 @@ async function handleHttp(req, res) {
     readDecodeMs: started - receivedAt }));
   try {
     const resolved = which === 'gateway' ? await gatewayImageReferences(gatewayRequest(parsed, gateway), req.headers, controller.signal) : parsed;
-    const adapted = prepareRequest(resolved, which, url.pathname, gateway?.metadata);
-    const outgoingBodyData = await outgoingBody(incoming, adapted.payload, adapted.changed || resolved !== parsed, which === 'official');
+    let adapted = prepareRequest(resolved, which, url.pathname, gateway?.metadata);
+    let outgoingBodyData = await outgoingBody(incoming, adapted.payload, adapted.changed || resolved !== parsed, which === 'official');
     body = outgoingBodyData.body; upstreamBytes = body.length;
     const originalHeaders = headersFor(req.headers, which, gateway?.profile);
     const headers = which === 'gateway' ? gatewayResponseHeaders(originalHeaders, !adapted.adapter, gateway.metadata?._nativeHeaderPrefix) : originalHeaders;
     if (outgoingBodyData.encoding) headers['content-encoding'] = outgoingBodyData.encoding;
     phase = 'upstream_headers';
-    const upstream = await request(adapted.chat ? gateway.base + '/chat/completions' + url.search : targetUrl(which, url, gateway), { method: req.method, body, headers, dispatcher: which === 'official' ? officialDispatcher : gateway.dispatcher,
+    let upstream = await request(adapted.chat ? gateway.base + '/chat/completions' + url.search : targetUrl(which, url, gateway), { method: req.method, body, headers, dispatcher: which === 'official' ? officialDispatcher : gateway.dispatcher,
       signal: controller.signal, ...RESPONSE_TIMEOUTS });
     upstreamBody = upstream.body;
+    let rejectedBody;
+    if (gateway && !adapted.chat && req.method === 'POST') {
+      const fallback = await chatFallback(upstream, resolved, gateway, url, req.headers, controller.signal);
+      if (fallback?.upstream) {
+        upstream = fallback.upstream; upstreamBody = upstream.body; adapted = fallback.adapted;
+        body = fallback.body; upstreamBytes = body.length; outgoingBodyData = { body, encoding: '' };
+      } else rejectedBody = fallback?.rejectedBody;
+    }
     upstreamStatus = upstream.statusCode; phase = 'stream';
     if (debug) log('request headers ' + JSON.stringify({ requestId, status: upstreamStatus, upstreamBytes,
       encoding: outgoingBodyData.encoding || 'identity', ms: Date.now() - started }));
@@ -465,6 +496,7 @@ async function handleHttp(req, res) {
       outgoing['x-chatgpt-api-adapted'] = 'true';
       if (String(upstream.headers['content-type']).includes('text/event-stream')) {
         res.writeHead(upstream.statusCode, outgoing);
+        res.flushHeaders();
         try {
           for await (const event of convertedEvents(stream, adapted, images)) {
             if (res.destroyed) break;
@@ -490,7 +522,8 @@ async function handleHttp(req, res) {
       if (debug && adapted.adapter) log('non-GPT compatibility model=' + parsed.model + ' ' + JSON.stringify(adapted.adapter.stats));
     } else {
       res.writeHead(upstream.statusCode, outgoing);
-      for await (const chunk of upstream.body) {
+      res.flushHeaders();
+      for await (const chunk of rejectedBody !== undefined ? [rejectedBody] : upstream.body) {
         if (res.destroyed) break;
         firstByteMs ??= Date.now() - started;
         await writeChunk(res, chunk);
@@ -527,6 +560,7 @@ if (process.argv.includes('--prepare')) {
     process.stdout.write(JSON.stringify({ ...health(), refreshOnStart: Boolean(deferred) }) + '\n');
   } catch (e) { process.stderr.write((e.code === 'gateway_unavailable' ? '[gateway_unavailable] ' : '') + redact(e.message, sources.settings, [env.API_KEY, ...sources.secrets]) + '\n'); process.exitCode = 1; }
   await sources.close(); await gatewayDispatcher.close(); await officialDispatcher.close();
+  if (mediaDispatcher !== gatewayDispatcher) await mediaDispatcher.close();
 } else {
   const saved = readJson(cachePath, {});
   if (saved.sourceId === sourceId && saved.status) status = saved.status;
@@ -545,9 +579,13 @@ if (process.argv.includes('--prepare')) {
       const officialQueue = []; const laneRoutes = new Map(); const responseRoutes = new Map(); const active = new Map();
       // HTTP gateways are usually stateless. Preserve WS incremental context only
       // for this connection, with bounded memory; never write conversation copies.
-      const gatewayHistory = new HistoryCache();
+      const gatewayHistory = new HistoryCache({ onDelete: id => responseRoutes.delete(id) });
       const officialPending = new PendingResponses(), officialBodies = new Map(), officialLanes = new Map();
-      const send = value => { if (client.readyState === WebSocket.OPEN) client.send(typeof value === 'string' ? value : JSON.stringify(value)); };
+      const send = (value, wait = false) => {
+        const text = typeof value === 'string' ? value : JSON.stringify(value);
+        if (wait) return writeWebSocket(client, text);
+        if (client.readyState === WebSocket.OPEN) client.send(text);
+      };
       const failure = (e, lane) => {
         const value = protocolError(e);
         if (value.status !== 499) log('WebSocket error ' + JSON.stringify({ connectionId, failure: errorDetails(e) }));
@@ -558,9 +596,10 @@ if (process.argv.includes('--prepare')) {
         const input = [...body.input, ...(output || [])];
         const defaults = { ...body };
         for (const key of ['input','stream','type','stream_id','previous_response_id','generate']) delete defaults[key];
-        if (!gatewayHistory.set(id, { input, defaults, complete, connection, lane }))
+        if (!gatewayHistory.set(id, { input, defaults, complete, connection, lane })) {
+          responseRoutes.delete(id);
           log('history cache miss reason=capacity route=' + which);
-        responseRoutes.set(id, which);
+        } else responseRoutes.set(id, which);
       }
       function officialSend(text) {
         let event = JSON.parse(text);
@@ -602,6 +641,7 @@ if (process.argv.includes('--prepare')) {
           if (debug) log('official WS connected');
           while (officialQueue.length) connection.send(officialQueue.shift());
         });
+        let writes = 0;
         connection.on('message', data => {
           if (connection !== upstream || closed) return;
           const text = data.toString();
@@ -628,7 +668,7 @@ if (process.argv.includes('--prepare')) {
               if (accepted) officialPending.delete(lane);
               officialLanes.delete(lane);
               for (const [responseId, pendingBody] of officialBodies) {
-                if (laneOf(pendingBody.body) === lane) officialBodies.delete(responseId);
+                if (laneOf(pendingBody.body) === lane) { officialBodies.delete(responseId); responseRoutes.delete(responseId); }
               }
               log('official WS error status=' + (event.status || '') + ' code=' + (error.code || '') + ' invalid_previous=' + invalidPrevious);
             }
@@ -651,10 +691,11 @@ if (process.argv.includes('--prepare')) {
               if (officialLanes.get(lane) === id) officialLanes.delete(lane);
             }
             if (event.type === 'response.failed') {
-              officialBodies.delete(id); if (officialLanes.get(lane) === id) officialLanes.delete(lane);
+              officialBodies.delete(id); responseRoutes.delete(id); if (officialLanes.get(lane) === id) officialLanes.delete(lane);
             }
           } catch (e) { log('Official context cache: ' + e.message); }
-          send(text);
+          writes++; connection.pause();
+          send(text, true).catch(() => connection.terminate()).finally(() => { if (--writes === 0 && !closed) connection.resume(); });
         });
         connection.on('error', e => {
           if (connection !== upstream || closed) return;
@@ -694,21 +735,30 @@ if (process.argv.includes('--prepare')) {
         let upstreamBody;
         const requestId = crypto.randomUUID(), started = Date.now();
         try {
-          const adapted = prepareRequest(await gatewayImageReferences(gatewayRequest(body, gateway), req.headers, controller.signal), 'gateway', '/v1/responses', gateway.metadata);
+          const resolved = await gatewayImageReferences(gatewayRequest(body, gateway), req.headers, controller.signal);
+          let adapted = prepareRequest(resolved, 'gateway', '/v1/responses', gateway.metadata);
           const wireBody = adapted.payload;
           const headers = gatewayResponseHeaders({ ...headersFor(req.headers, 'gateway', gateway.profile), 'content-type': 'application/json' }, !adapted.adapter, gateway.metadata?._nativeHeaderPrefix);
           const wireText = JSON.stringify(wireBody);
           if (debug) log('WS request ' + JSON.stringify({ connectionId, requestId, route: 'gateway', model: event.model, bytes: Buffer.byteLength(wireText) }));
-          const up = await request(gateway.base + (adapted.chat ? '/chat/completions' : '/responses'), { method: 'POST', headers, body: wireText, dispatcher: gateway.dispatcher, signal: controller.signal, ...RESPONSE_TIMEOUTS });
+          let up = await request(gateway.base + (adapted.chat ? '/chat/completions' : '/responses'), { method: 'POST', headers, body: wireText, dispatcher: gateway.dispatcher, signal: controller.signal, ...RESPONSE_TIMEOUTS });
           upstreamBody = up.body;
+          let rejectedBody;
+          if (!adapted.chat) {
+            const fallback = await chatFallback(up, resolved, gateway, new URL('/v1/responses', 'http://localhost'), req.headers, controller.signal);
+            if (fallback?.upstream) { up = fallback.upstream; upstreamBody = up.body; adapted = fallback.adapted; }
+            else rejectedBody = fallback?.rejectedBody;
+          }
           if (debug) log('WS headers ' + JSON.stringify({ connectionId, requestId, status: up.statusCode, ms: Date.now() - started }));
           if (up.statusCode < 200 || up.statusCode >= 300) {
-            const text = await up.body.text(); let message = text.slice(0,1800), upstreamError;
+            const raw = rejectedBody !== undefined ? rejectedBody : Buffer.from(await up.body.arrayBuffer());
+            const text = decodeBody(raw, up.headers['content-encoding']).toString('utf8'); let message = text.slice(0,1800), upstreamError;
             try { const obj = JSON.parse(text); message = obj.error?.message || obj.message || message; if (obj.error && typeof obj.error === 'object') upstreamError = obj.error; } catch {}
             throw Object.assign(new Error(message), { status: up.statusCode, upstreamError });
           }
           if (!String(up.headers['content-type']).includes('text/event-stream')) throw Object.assign(new Error('Gateway did not return an SSE response'), { status: 502, code: 'invalid_upstream_content_type' });
           for await (const original of convertedEvents(decodedStream(up.body, up.headers['content-encoding']), adapted, new ResponseImages(codexHome))) {
+              if (isSseControl(original)) continue;
               const response = clientEvent(original, body.model, gateway);
               if (pending.interrupted) break;
               pending.output.observe(response);
@@ -723,7 +773,7 @@ if (process.argv.includes('--prepare')) {
                 if (active.get(lane) === pending) active.delete(lane);
               }
               if (event.stream_id) response.stream_id = event.stream_id;
-              send(response);
+              await send(response, true);
           }
           if (debug && adapted.adapter) log('non-GPT compatibility model=' + event.model + ' ' + JSON.stringify(adapted.adapter.stats));
           if (debug) log('gateway WS-to-HTTP model=' + event.model + ' status=' + up.statusCode);
@@ -734,7 +784,11 @@ if (process.argv.includes('--prepare')) {
           if (!controller.signal.aborted) log('WS error ' + JSON.stringify({ connectionId, requestId, failure: errorDetails(error), status: error.status,
             cancelled: controller.signal.aborted, ms: Date.now() - started }));
           throw error;
-        } finally { releaseResponseBody(upstreamBody); if (active.get(lane) === pending) active.delete(lane); controllers.delete(controller); }
+        } finally {
+          releaseResponseBody(upstreamBody);
+          if (pending.response?.id && !gatewayHistory.entries.has(pending.response.id)) responseRoutes.delete(pending.response.id);
+          if (active.get(lane) === pending) active.delete(lane); controllers.delete(controller);
+        }
       }
       function gatewayInterrupt(event) {
         const id = event.response_id;
@@ -803,7 +857,8 @@ if (process.argv.includes('--prepare')) {
     const closed = new Promise(resolve => server.close(resolve));
     server.closeAllConnections();
     sources.destroy();
-    await Promise.allSettled([gatewayDispatcher.destroy(), officialDispatcher.destroy(), closed]);
+    await Promise.allSettled([gatewayDispatcher.destroy(), officialDispatcher.destroy(),
+      ...(mediaDispatcher !== gatewayDispatcher ? [mediaDispatcher.destroy()] : []), closed]);
   })();
   if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
     await routerReady;

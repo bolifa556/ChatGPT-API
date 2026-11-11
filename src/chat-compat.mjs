@@ -14,8 +14,23 @@ export function usesChat(payload, metadata) {
     const responses = endpoints.some(value => typeof value === 'string' && /(?:^|\/)responses(?:$|[/?])/i.test(value));
     if (chat !== responses) return chat;
   }
+  if (metadata?._protocol === 'chat') return true;
   return payload.model?.startsWith('词元计划/') ||
     (payload.model?.startsWith('阿里云订阅/') && ['json_schema','json_object'].includes(payload.text?.format?.type));
+}
+export function chatEndpointUnavailable(status, data, raw = '') {
+  if (![400, 404, 405, 501].includes(status)) return false;
+  const error = data?.error || data || {}, code = String(error.code || error.type || '');
+  if (error.param === 'model' || /model_not_found|unknown_model|auth|permission|quota|rate_limit/i.test(code)) return false;
+  if (/^(?:unsupported_endpoint|endpoint_not_found|unsupported_api|not_implemented|method_not_allowed)$/.test(code)) return true;
+  if (status === 400) return false;
+  if (code && !['not_found', 'invalid_request_error', 'http_error', String(status)].includes(code)) return false;
+  const message = typeof error.message === 'string' ? error.message : typeof data?.detail === 'string' ? data.detail
+    : typeof data?.error === 'string' ? data.error : raw;
+  if (/\bmodel\b/i.test(message)) return false;
+  if (status === 405 || status === 501) return true;
+  return /^(?:404(?: page)?[ :.-]*)?not found[.!]?$/i.test(message.trim())
+    || /Cannot POST [^\s<>]*\/responses(?:[?\s<]|$)/i.test(message);
 }
 function content(value) {
   if (typeof value === 'string' || value === null) return value;
@@ -183,7 +198,9 @@ export class ChatEvents {
   }
   convert(chunk) {
     if (this.finished) return [];
-    if (chunk.error) throw Object.assign(new Error(chunk.error.message || 'Chat upstream failed.'), { status: 502, code: chunk.error.code || 'upstream_error' });
+    if (chunk.error) throw Object.assign(new Error(chunk.error.message || 'Chat upstream failed.'), {
+      status: Number.isInteger(chunk.status) && chunk.status >= 400 && chunk.status <= 599 ? chunk.status : 502,
+      upstreamError: copy(chunk.error), code: chunk.error.code || 'upstream_error' });
     const events = this.start(chunk);
     if (chunk.usage) this.usage = usage(chunk.usage);
     for (const choice of chunk.choices || []) {

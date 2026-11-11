@@ -73,7 +73,7 @@ export class NonGptAdapter {
   }
   request() {
     validateNonGptCompaction(this.original);
-    const data = structuredClone(this.original), carriers = [], removedIds = new Set();
+    const data = structuredClone(this.original), carriers = [], removedIds = new Set(), renames = new Map();
     if (Array.isArray(data.input)) {
       data.input = data.input.flatMap(item => {
         if (item?.type === 'configuration_update') {
@@ -112,8 +112,10 @@ export class NonGptAdapter {
     }
     if (carriers.length || data.tools) data.tools = this.tools(mergeTools([...carriers, ...(data.tools || [])]));
     if (data.reasoning) delete data.reasoning.context;
+    const references = new Set((Array.isArray(data.input) ? data.input : []).filter(item => item?.type === 'item_reference').map(item => item.id));
     for (const item of Array.isArray(data.input) ? data.input : []) {
       if (!item || typeof item !== 'object') continue;
+      const originalId = item.id;
       delete item.internal_chat_message_metadata_passthrough;
       if (item.type === 'compaction') {
         throw Object.assign(new Error('This history contains an opaque GPT compaction block. Restore readable context before switching to a non-GPT model.'), { status: 400, code: 'incompatible_compacted_history' });
@@ -130,12 +132,16 @@ export class NonGptAdapter {
       } else if (item.type === 'function_call' && item.namespace) {
         item.name = this.historyName(item.name, item.namespace, false); delete item.namespace; delete item.id;
       } else if (item.type === 'message' && item.id) item.id = safeId(item.id, 'message');
+      if (originalId && !item.id && references.has(originalId) && ['function_call', 'function_call_output'].includes(item.type))
+        item.id = safeId(originalId, item.type, item.type === 'function_call' ? 'fc_' : 'fco_');
+      if (originalId && item.id && originalId !== item.id) renames.set(originalId, item.id);
       if (item.type === 'function_call_output' && !item.call_id && item.name) {
         const matches = [...this.mapping].filter(([, meta]) => meta.name === item.name && (!item.namespace || meta.namespace === item.namespace));
         if (matches.length === 1) { item.name = matches[0][0]; delete item.namespace; }
         else if (item.namespace) { item.name = this.historyName(item.name, item.namespace, false); delete item.namespace; }
       }
     }
+    if (renames.size) data.input = data.input.map(item => item?.type === 'item_reference' && renames.has(item.id) ? { ...item, id: renames.get(item.id) } : item);
     if (data.tool_choice) data.tool_choice = this.choice(data.tool_choice);
     return data;
   }
