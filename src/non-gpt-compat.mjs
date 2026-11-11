@@ -130,6 +130,11 @@ export class NonGptAdapter {
       } else if (item.type === 'function_call' && item.namespace) {
         item.name = this.historyName(item.name, item.namespace, false); delete item.namespace; delete item.id;
       } else if (item.type === 'message' && item.id) item.id = safeId(item.id, 'message');
+      if (item.type === 'function_call_output' && !item.call_id && item.name) {
+        const matches = [...this.mapping].filter(([, meta]) => meta.name === item.name && (!item.namespace || meta.namespace === item.namespace));
+        if (matches.length === 1) { item.name = matches[0][0]; delete item.namespace; }
+        else if (item.namespace) { item.name = this.historyName(item.name, item.namespace, false); delete item.namespace; }
+      }
     }
     if (data.tool_choice) data.tool_choice = this.choice(data.tool_choice);
     return data;

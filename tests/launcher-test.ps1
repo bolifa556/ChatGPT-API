@@ -18,27 +18,22 @@ foreach ($file in $files) {
 $fixture=Join-Path $root 'data\testing\launcher'
 $null=Initialize-PackageLayout $fixture
 $fakePackage=Join-Path $fixture 'native-package'
-$fakeCliCache=Join-Path $fixture 'native-cache'
 [void][IO.Directory]::CreateDirectory((Join-Path $fakePackage 'app\resources'))
-[void][IO.Directory]::CreateDirectory((Join-Path $fakeCliCache 'matching'))
-[void][IO.Directory]::CreateDirectory((Join-Path $fakeCliCache 'different'))
-Write-Utf8File (Join-Path $fakePackage 'app\resources\codex.exe') 'inert-cli-fixture'
-Write-Utf8File (Join-Path $fakeCliCache 'matching\codex.exe') 'inert-cli-fixture'
-Write-Utf8File (Join-Path $fakeCliCache 'different\codex.exe') 'wrong-cli-fixture'
-Assert ((Get-NativeRepairCli $fakePackage $fakeCliCache) -eq (Join-Path $fakeCliCache 'matching\codex.exe')) 'Native CLI resolver selected a different client build.'
-$nativeResolver = (Get-Item Function:Get-NativeRepairCli).ScriptBlock
+$versionCache = Join-Path $fixture 'native-version.json'
+$fixtureCli = Join-Path $fakePackage 'app\resources\codex.exe'
+foreach ($path in @($fixtureCli,$versionCache)) { if(Test-Path -LiteralPath $path){Remove-Item -LiteralPath $path} }
 try {
-    function Invoke-FixtureNativeVersion { $global:LASTEXITCODE = 0; 'codex-cli 0.159.0-alpha.2.1' }
-    function Get-NativeRepairCli { param($installLocation) return 'Invoke-FixtureNativeVersion' }
-    Assert ((Get-NativeClientVersion $fakePackage) -eq '0.159.0') 'Official catalog version did not come from the actual native CLI.'
-    function Get-NativeRepairCli { param($installLocation) return $null }
-    Assert (-not (Get-NativeClientVersion $fakePackage)) 'Missing native CLI must not invent a fixed version.'
-    $fixtureCli = Join-Path $fakePackage 'app\resources\codex.exe'
-    Remove-Item -LiteralPath $fixtureCli
+    function Get-FileHash { throw 'Version discovery must not depend on Get-FileHash.' }
+    Assert (-not (Get-NativeClientVersion $fakePackage $versionCache)) 'Missing native CLI must not invent a fixed version.'
     Add-Type -TypeDefinition 'public static class FixtureNativeVersion { public static void Main() { System.Console.WriteLine("codex-cli 0.999.0-alpha.1"); } }' -OutputAssembly $fixtureCli -OutputType ConsoleApplication
-    Assert ((Get-NativeClientVersion $fakePackage) -eq '0.999.0') 'A new client without a relocated CLI cache could not supply its actual version.'
-    Assert (@(Get-ChildItem -LiteralPath (Join-Path $root 'data\cache') -Filter 'native-version-*.exe').Count -eq 0) 'The native version probe left a temporary executable behind.'
-} finally { Set-Item Function:Get-NativeRepairCli $nativeResolver; Remove-Item Function:Invoke-FixtureNativeVersion }
+    Assert ((Get-NativeClientVersion $fakePackage $versionCache) -eq '0.999.0') 'A new client without a relocated CLI cache could not supply its actual version.'
+    $savedAt = (Get-Item -LiteralPath $versionCache).LastWriteTimeUtc
+    Assert ((Get-NativeClientVersion $fakePackage $versionCache) -eq '0.999.0') 'The installed binary version was not cached.'
+    Assert ((Get-Item -LiteralPath $versionCache).LastWriteTimeUtc -eq $savedAt) 'An unchanged client needlessly rewrote its version cache.'
+    Write-Utf8File $fixtureCli 'changed-client-without-version'
+    Assert (-not (Get-NativeClientVersion $fakePackage $versionCache)) 'An updated binary reused a stale CLI version.'
+    Assert (@(Get-ChildItem -LiteralPath $fixture -Filter 'native-version-*.exe').Count -eq 0) 'The native version probe left a temporary executable behind.'
+} finally { Remove-Item Function:Get-FileHash }
 $config=Join-Path $fixture 'config.toml'
 $baseline="model = `"gpt-6-sol`"`r`nmodel_reasoning_effort = `"ultra`"`r`n[app]`r`nlocaleOverride = `"zh-CN`"`r`nshowMax = true`r`n"
 $baseline=Set-RootLine $baseline 'model_context_window' "model_context_window = 500000`r`n"
@@ -53,6 +48,24 @@ Write-Utf8File $config $bareNative
 Apply-LauncherConfig $fixture $config 'mixed' 'http://127.0.0.1:8102/v1' ''
 Restore-LauncherConfig $fixture $config
 Assert ([IO.File]::ReadAllText($config) -ceq $bareNative) 'Runtime provider definitions remained in the original native configuration.'
+$embeddedInstructions = @'
+developer_instructions = """
+Preserve this literal example:
+model_provider = "instruction-example"
+[model_providers.chatgpt_api_launcher]
+model = "instruction-model"
+"""
+model = "gpt-6-sol"
+[desktop]
+localeOverride = "zh-CN"
+'@
+Write-Utf8File $config $embeddedInstructions
+Apply-LauncherConfig $fixture $config 'gateway' 'http://127.0.0.1:8102/v1' '' 'apionly'
+$embeddedApplied = [IO.File]::ReadAllText($config)
+Assert ($embeddedApplied.Contains('model_provider = "instruction-example"') -and $embeddedApplied.Contains('model = "instruction-model"')) 'Native instructions were rewritten as configuration.'
+Assert ((Get-RootString $embeddedApplied 'model_provider') -eq 'chatgpt_api_launcher') 'The real provider key was hidden by a multiline instruction.'
+Restore-LauncherConfig $fixture $config
+Assert ([IO.File]::ReadAllText($config) -ceq $embeddedInstructions) 'Multiline native instructions did not restore byte-for-byte.'
 $missingConfig=Join-Path $fixture 'previously-absent.toml'
 if(Test-Path -LiteralPath $missingConfig){Remove-Item -LiteralPath $missingConfig}
 Apply-LauncherConfig $fixture $missingConfig 'gateway' 'http://127.0.0.1:8102/v1' ''
@@ -141,7 +154,8 @@ $apiOnlyApplied = [IO.File]::ReadAllText($config)
 Assert ((Get-RootString $apiOnlyApplied 'model_provider') -eq 'chatgpt_api_launcher') 'API-only selected official authentication.'
 Assert ((Get-RootString $apiOnlyApplied 'model') -in @('Example/model','Other/model')) 'API-only retained an official initial model.'
 Assert ((Get-TableText $apiOnlyApplied 'model_providers.chatgpt_api_launcher').Contains('requires_openai_auth = false')) 'API-only borrowed the subscription identity.'
-Assert (Get-TableText $apiOnlyApplied 'model_providers.chatgpt_api_launcher.auth') 'API-only lost its API-key helper.'
+Assert (-not (Get-TableText $apiOnlyApplied 'model_providers.chatgpt_api_launcher.auth')) 'API-only still creates a credential helper process.'
+Assert ((Get-TableText $apiOnlyApplied 'model_providers.chatgpt_api_launcher').Contains('experimental_bearer_token = "chatgpt-api-local"')) 'API-only lost native loopback authentication.'
 Assert ((Get-RootString $apiOnlyApplied 'cli_auth_credentials_store') -eq (Get-RootString $baseline 'cli_auth_credentials_store')) 'API-only changed persistent sign-in storage.'
 $helperSelection = Get-LauncherRouterSelection $fixture
 Assert ($helperSelection.mode -eq 'gateway' -and $helperSelection.entryMode -eq 'apionly') 'API-key helper did not retain the active API-only route.'

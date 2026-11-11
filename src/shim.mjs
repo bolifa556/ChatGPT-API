@@ -224,12 +224,12 @@ function historyForTarget(payload, which) {
   if (result.changed) log('history compatibility model=' + payload.model + ' ' + JSON.stringify(result.stats));
   return { ...result, changed: images.changed || result.changed };
 }
-function prepareRequest(payload, which, pathname = '/v1/responses') {
-  if (which === 'gateway' && !isGptModel(payload.model)) {
+function prepareRequest(payload, which, pathname = '/v1/responses', metadata) {
+  if (which === 'gateway' && (!isGptModel(payload.model) || usesChat(payload, metadata))) {
     if (pathname.endsWith('/responses/compact')) throw Object.assign(new Error('GPT opaque compaction is unavailable for non-GPT models.'), { status: 400, code: 'incompatible_compacted_history' });
     const adapter = new NonGptAdapter(payload, { preserveReasoning: /^(阿里云订阅|词元计划|vllm)\//.test(payload.model) });
     const converted = adapter.request();
-    const chat = usesChat(converted);
+    const chat = usesChat(converted, metadata);
     return { payload: chat ? chatRequest(converted) : restoreHostedImageHistory(converted, codexHome).payload, changed: true, adapter, chat };
   }
   return historyForTarget(payload, which);
@@ -267,7 +267,7 @@ function hasOfficialAuth(incoming) {
   return (mode === 'mixed' || runtime.nativeAccount === true) && (!!auth().token ||
     ((entryMode === 'official' || runtime.nativeAccount === true) && !!token && !isGatewayKey(token)));
 }
-function isGatewayKey(token) { return token === env.API_KEY || sources.secrets.has(token); }
+function isGatewayKey(token) { return token === 'chatgpt-api-local' || token === env.API_KEY || sources.secrets.has(token); }
 function headersFor(incoming, target, profile) {
   const headers = {};
   for (const [k, v] of Object.entries(incoming)) {
@@ -303,7 +303,7 @@ function gatewayRequest(payload, gateway) {
   return payload.model === gateway.model ? payload : { ...payload, model: gateway.model };
 }
 function clientEvent(event, model, gateway) {
-  return gateway && gateway.model !== model && event.response?.model ? { ...event, response: { ...event.response, model } } : event;
+  return gateway && gateway.model !== model && event.response?.model === gateway.model ? { ...event, response: { ...event.response, model } } : event;
 }
 function imageSettings() {
   const selected = sources.settings.defaultImageModel;
@@ -447,11 +447,11 @@ async function handleHttp(req, res) {
     readDecodeMs: started - receivedAt }));
   try {
     const resolved = which === 'gateway' ? await gatewayImageReferences(gatewayRequest(parsed, gateway), req.headers, controller.signal) : parsed;
-    const adapted = prepareRequest(resolved, which, url.pathname);
+    const adapted = prepareRequest(resolved, which, url.pathname, gateway?.metadata);
     const outgoingBodyData = await outgoingBody(incoming, adapted.payload, adapted.changed || resolved !== parsed, which === 'official');
     body = outgoingBodyData.body; upstreamBytes = body.length;
     const originalHeaders = headersFor(req.headers, which, gateway?.profile);
-    const headers = which === 'gateway' ? gatewayResponseHeaders(originalHeaders, !adapted.adapter) : originalHeaders;
+    const headers = which === 'gateway' ? gatewayResponseHeaders(originalHeaders, !adapted.adapter, gateway.metadata?._nativeHeaderPrefix) : originalHeaders;
     if (outgoingBodyData.encoding) headers['content-encoding'] = outgoingBodyData.encoding;
     phase = 'upstream_headers';
     const upstream = await request(adapted.chat ? gateway.base + '/chat/completions' + url.search : targetUrl(which, url, gateway), { method: req.method, body, headers, dispatcher: which === 'official' ? officialDispatcher : gateway.dispatcher,
@@ -485,7 +485,7 @@ async function handleHttp(req, res) {
         const converted = adapted.chat ? chatResponse(data, gateway.model) : data;
         const native = adapted.adapter ? adapted.adapter.response(converted) : converted;
         const response = images ? images.response(native) : native;
-        if (gateway && gateway.model !== parsed.model && response.model) response.model = parsed.model;
+        if (gateway && gateway.model !== parsed.model && response.model === gateway.model) response.model = parsed.model;
         res.writeHead(upstream.statusCode, outgoing);
         firstByteMs ??= Date.now() - started;
         await writeChunk(res, JSON.stringify(response));
@@ -511,7 +511,14 @@ async function handleHttp(req, res) {
 loadCatalog();
 if (process.argv.includes('--prepare')) {
   try {
-    await refreshCatalog();
+    const saved = readJson(cachePath, {});
+    const deferred = process.argv.includes('--cached') &&
+      (!gatewayEnabled || saved.configurationId === sources.revision && catalog.gatewayIds.length && Date.now() - Date.parse(catalog.gatewayAt) < CACHE_MAX_AGE) &&
+      (mode !== 'mixed' || catalog.official.length);
+    if (deferred) {
+      status = { gateway: { ...saved.status?.gateway, ready: gatewayEnabled && catalog.gatewayIds.length > 0, cached: true },
+        official: { ...saved.status?.official, ready: mode === 'mixed' && catalog.official.length > 0, cached: true } };
+    } else await refreshCatalog();
     const gatewayAvailable = catalog.gatewayIds.length && Date.now() - Date.parse(catalog.gatewayAt) < CACHE_MAX_AGE;
     if (gatewayEnabled && !gatewayAvailable) {
       catalog.gatewayIds = [];
@@ -520,7 +527,7 @@ if (process.argv.includes('--prepare')) {
       saveCatalog();
     }
     writeDesktopCatalog();
-    process.stdout.write(JSON.stringify(health()) + '\n');
+    process.stdout.write(JSON.stringify({ ...health(), refreshOnStart: Boolean(deferred) }) + '\n');
   } catch (e) { process.stderr.write((e.code === 'gateway_unavailable' ? '[gateway_unavailable] ' : '') + redact(e.message, sources.settings, [env.API_KEY, ...sources.secrets]) + '\n'); process.exitCode = 1; }
   await sources.close(); await gatewayDispatcher.close(); await officialDispatcher.close();
 } else {
@@ -685,9 +692,9 @@ if (process.argv.includes('--prepare')) {
         let upstreamBody;
         const requestId = crypto.randomUUID(), started = Date.now();
         try {
-          const adapted = prepareRequest(await gatewayImageReferences(gatewayRequest(body, gateway), req.headers, controller.signal), 'gateway');
+          const adapted = prepareRequest(await gatewayImageReferences(gatewayRequest(body, gateway), req.headers, controller.signal), 'gateway', '/v1/responses', gateway.metadata);
           const wireBody = adapted.payload;
-          const headers = gatewayResponseHeaders({ ...headersFor(req.headers, 'gateway', gateway.profile), 'content-type': 'application/json' }, !adapted.adapter);
+          const headers = gatewayResponseHeaders({ ...headersFor(req.headers, 'gateway', gateway.profile), 'content-type': 'application/json' }, !adapted.adapter, gateway.metadata?._nativeHeaderPrefix);
           const wireText = JSON.stringify(wireBody);
           log('WS request ' + JSON.stringify({ connectionId, requestId, route: 'gateway', model: event.model, bytes: Buffer.byteLength(wireText) }));
           const up = await request(gateway.base + (adapted.chat ? '/chat/completions' : '/responses'), { method: 'POST', headers, body: wireText, dispatcher: gateway.dispatcher, signal: controller.signal, ...RESPONSE_TIMEOUTS });
@@ -786,6 +793,7 @@ if (process.argv.includes('--prepare')) {
       log('router v2 listening mode=' + mode + ' transport=' + transport); resolve();
     });
   });
+  if (runtime.refreshOnStart) routerReady.then(() => refreshCatalog()).catch(error => log('catalog refresh ' + error.message));
   let closing;
   closeRouter = () => closing ||= (async () => {
     for (const c of controllers) c.abort();

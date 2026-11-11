@@ -3,6 +3,13 @@ const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&a
 const tokens = value => value == null ? '未提供' : value >= 1000000 ? (value / 1000000).toLocaleString('en-US', { maximumFractionDigits: 2 }) + 'M' : value >= 1000 ? (value / 1000).toLocaleString('en-US', { maximumFractionDigits: 1 }) + 'K' : value.toLocaleString();
 let token = location.hash.slice(1) || sessionStorage.getItem('console-token') || '';
 if (token) sessionStorage.setItem('console-token', token);
+const lifetime = new AbortController();
+fetch('/api/lifetime', { headers: { authorization: 'Bearer ' + token }, signal: lifetime.signal }).then(async response => {
+  if (!response.ok) return;
+  const reader = response.body.getReader();
+  while (!(await reader.read()).done) {}
+}).catch(() => {});
+window.addEventListener('pagehide', () => lifetime.abort(), { once: true });
 history.replaceState(null, '', location.pathname);
 let data, draft, dirty = false, busy = false, toastTimer;
 const savedKeyMask = '••••••••••••••••';

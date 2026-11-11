@@ -1,6 +1,7 @@
 ﻿$script:LauncherRootKeys = @('openai_base_url', 'model_provider', 'model_catalog_json', 'model', 'model_reasoning_effort', 'model_context_window', 'model_auto_compact_token_limit')
 $script:LauncherTables = @('model_providers.chatgpt_api_launcher', 'model_providers.chatgpt_api_launcher.auth', 'model_providers.chatgpt_api_mixed', 'model_providers.chatgpt_api_mixed.auth', 'model_providers.smr', 'model_providers.smr.auth')
 $script:LauncherRootKeys += @('cli_auth_credentials_store', 'forced_login_method')
+$script:NativeVersionCachePath = Join-Path (Split-Path -Parent $PSScriptRoot) 'data\cache\native-client-version.json'
 function Write-LauncherFile([string]$path, [string]$content) {
     $directory = Split-Path -Parent $path
     [void][IO.Directory]::CreateDirectory($directory)
@@ -10,7 +11,7 @@ function Write-LauncherFile([string]$path, [string]$content) {
         $stream = [IO.File]::Open($temporary,'Create','Write','None')
         try { $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($content); $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) }
         finally { $stream.Dispose() }
-        if (Test-Path -LiteralPath $path) { [IO.File]::Replace($temporary,$path,$backup) }
+        if (Test-Path -LiteralPath $path) { [IO.File]::Replace($temporary,$path,[NullString]::Value) }
         else { [IO.File]::Move($temporary,$path) }
     } finally {
         foreach ($scratch in @($temporary,$backup)) { if (Test-Path -LiteralPath $scratch) { Remove-Item -LiteralPath $scratch } }
@@ -20,32 +21,80 @@ function Get-CodexHome {
     if ($env:CODEX_HOME) { return $env:CODEX_HOME }
     return (Join-Path $env:USERPROFILE '.codex')
 }
+function Get-LauncherTomlMask([string]$content) {
+    $mask = $content.ToCharArray()
+    $quote = ''; $triple = $false; $isValue = $false; $depth = 0; $comment = $false
+    for ($at = 0; $at -lt $content.Length; $at++) {
+        $character = $content[$at]
+        if ($comment) {
+            if ($character -ne "`r" -and $character -ne "`n") { $mask[$at] = ' ' }
+            if ($character -eq "`n") { $comment = $false; if (-not $depth) { $isValue = $false } }
+            continue
+        }
+        if ($quote) {
+            if ($isValue -and $character -ne "`r" -and $character -ne "`n") { $mask[$at] = ' ' }
+            if ($quote -eq '"' -and $character -eq '\') {
+                if ($at + 1 -lt $content.Length) { $at++; if ($isValue -and $content[$at] -ne "`r" -and $content[$at] -ne "`n") { $mask[$at] = ' ' } }
+                continue
+            }
+            if ($character -eq $quote) {
+                if (-not $triple) { $quote = '' }
+                elseif ($at + 3 -le $content.Length -and $content.Substring($at,3) -eq (([string]$quote) * 3)) {
+                    $end = $at + 3
+                    while ($end -lt $at + 5 -and $end -lt $content.Length -and $content[$end] -eq $quote) { $end++ }
+                    if ($isValue) { for ($i = $at + 1; $i -lt $end; $i++) { $mask[$i] = ' ' } }
+                    $at = $end - 1; $quote = ''; $triple = $false
+                }
+            }
+            continue
+        }
+        if ($character -eq "`n") { if (-not $depth) { $isValue = $false }; continue }
+        if ($character -eq '#') { $comment = $true; $mask[$at] = ' '; continue }
+        if ($character -eq '"' -or $character -eq [char]39) {
+            $quote = $character
+            $triple = $at + 3 -le $content.Length -and $content.Substring($at,3) -eq (([string]$character) * 3)
+            $count = if ($triple) { 3 } else { 1 }
+            if ($isValue) { for ($i = $at; $i -lt $at + $count; $i++) { $mask[$i] = ' ' } }
+            $at += $count - 1; continue
+        }
+        if ($isValue) {
+            if ($character -eq '[' -or $character -eq '{') { $depth++ }
+            elseif ($character -eq ']' -or $character -eq '}') { $depth-- }
+            $mask[$at] = ' '
+        } elseif ($character -eq '=') { $isValue = $true }
+    }
+    return -join $mask
+}
+function Get-LauncherRootPattern([string]$key) {
+    $escaped = [regex]::Escape($key)
+    return '(?m)^[ \t]*(?:' + $escaped + '|"' + $escaped + '"|' + [char]39 + $escaped + [char]39 + ')[ \t]*=[^\r\n]*(?:\r?\n|$)'
+}
 function Get-RootHead([string]$content) {
-    $table = [regex]::Match($content, '(?m)^[ \t]*\[')
+    $table = [regex]::Match((Get-LauncherTomlMask $content), '(?m)^[ \t]*\[')
     if ($table.Success) { return $content.Substring(0, $table.Index) }
     return $content
 }
 function Get-RootLine([string]$content, [string]$key) {
-    $pattern = '(?m)^[ \t]*' + [regex]::Escape($key) + '[ \t]*=[^\r\n]*(?:\r?\n|$)'
-    $match = [regex]::Match((Get-RootHead $content), $pattern)
-    if ($match.Success) { return $match.Value }
+    $pattern = Get-LauncherRootPattern $key
+    $match = [regex]::Match((Get-LauncherTomlMask (Get-RootHead $content)), $pattern)
+    if ($match.Success) { return $content.Substring($match.Index,$match.Length) }
     return $null
 }
 function Get-RootString([string]$content, [string]$key) {
     $line = Get-RootLine $content $key
     if (-not $line) { return '' }
     $value = ($line -split '=', 2)[1].Trim()
-    if ($value.StartsWith('"')) { try { return [string]($value | ConvertFrom-Json) } catch {} }
+    $literal = [regex]::Match($value, '^("(?:[^"\\]|\\.)*"|''[^'']*'')')
+    if ($literal.Success) {
+        if ($literal.Value.StartsWith('"')) { try { return [string]($literal.Value | ConvertFrom-Json) } catch {} }
+        else { return $literal.Value.Substring(1,$literal.Value.Length-2) }
+    }
     return $value.Trim([char]39, [char]34)
 }
 function Set-RootLine([string]$content, [string]$key, $line) {
-    $head = Get-RootHead $content
-    $tail = $content.Substring($head.Length)
-    $pattern = '(?m)^[ \t]*' + [regex]::Escape($key) + '[ \t]*=[^\r\n]*(?:\r?\n|$)'
-    if ([regex]::IsMatch($head, $pattern)) {
-        $head = [regex]::Replace($head, $pattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) [string]$line })
-    } elseif ($null -ne $line) { $head = [string]$line + $head }
-    return $head + $tail
+    $match = [regex]::Match((Get-LauncherTomlMask (Get-RootHead $content)), (Get-LauncherRootPattern $key))
+    if ($match.Success) { return $content.Substring(0,$match.Index) + [string]$line + $content.Substring($match.Index+$match.Length) }
+    return [string]$line + $content
 }
 function Set-RootString([string]$content, [string]$key, [string]$value) {
     return Set-RootLine $content $key ($key + ' = ' + (Quote-TomlString $value) + [Environment]::NewLine)
@@ -54,15 +103,13 @@ function Get-TablePattern([string]$name) {
     return '(?ms)^[ \t]*\[' + [regex]::Escape($name) + '\][^\r\n]*(?:\r?\n|$).*?(?=^[ \t]*\[|\z)'
 }
 function Get-TableText([string]$content, [string]$name) {
-    $match = [regex]::Match($content, (Get-TablePattern $name))
-    if ($match.Success) { return $match.Value }
+    $match = [regex]::Match((Get-LauncherTomlMask $content), (Get-TablePattern $name))
+    if ($match.Success) { return $content.Substring($match.Index,$match.Length) }
     return $null
 }
 function Set-TableText([string]$content, [string]$name, $text) {
-    $pattern = Get-TablePattern $name
-    if ([regex]::IsMatch($content, $pattern)) {
-        return [regex]::Replace($content, $pattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) [string]$text })
-    }
+    $match = [regex]::Match((Get-LauncherTomlMask $content), (Get-TablePattern $name))
+    if ($match.Success) { return $content.Substring(0,$match.Index) + [string]$text + $content.Substring($match.Index+$match.Length) }
     if ($null -ne $text) { return $content.TrimEnd() + [Environment]::NewLine + [Environment]::NewLine + [string]$text }
     return $content
 }
@@ -70,7 +117,7 @@ function Get-SavedChatGPTLogin([string]$homePath) {
     $authPath = Join-Path $homePath 'auth.json'
     if (-not (Test-Path -LiteralPath $authPath)) { return $false }
     try {
-        $auth = [System.IO.File]::ReadAllText($authPath) | ConvertFrom-Json
+        $auth = (Read-LauncherText $authPath) | ConvertFrom-Json
         return ((-not $auth.auth_mode -or $auth.auth_mode -eq 'chatgpt') -and [bool]$auth.tokens.access_token)
     } catch { return $false }
 }
@@ -82,58 +129,44 @@ function Get-LauncherRouteMode([ValidateSet('official','api','apionly')][string]
 function Set-LauncherProvider([string]$content, [string]$id, [string]$baseUrl, [string]$packageDir, [bool]$websocket) {
     $nl = [Environment]::NewLine
     $table = 'model_providers.' + $id
-    $body = @(('[' + $table + ']'), 'name = "Custom API"', ('base_url = ' + (Quote-TomlString $baseUrl)), 'wire_api = "responses"', 'requires_openai_auth = false', 'http_headers = { "x-openai-actor-authorization" = "chatgpt-api-local" }', ('supports_websockets = ' + $websocket.ToString().ToLowerInvariant()), '') -join $nl
-    $command = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $argsText = ConvertTo-Json -InputObject @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $packageDir 'Read-ApiKey.ps1')) -Compress
-    $auth = @(('[' + $table + '.auth]'), ('command = ' + (Quote-TomlString $command)), ('args = ' + $argsText), 'timeout_ms = 30000', 'refresh_interval_ms = 0', '') -join $nl
+    $body = @(('[' + $table + ']'), ('# chatgpt-api-root = ' + (Quote-TomlString $packageDir)), 'name = "Custom API"', ('base_url = ' + (Quote-TomlString $baseUrl)), 'wire_api = "responses"', 'requires_openai_auth = false', 'experimental_bearer_token = "chatgpt-api-local"', 'http_headers = { "x-openai-actor-authorization" = "chatgpt-api-local" }', ('supports_websockets = ' + $websocket.ToString().ToLowerInvariant()), '') -join $nl
     $existingBody = Get-TableText $content $table
     if (-not $existingBody -or $existingBody.TrimEnd() -cne $body.TrimEnd()) {
         $content = Set-TableText $content $table $body
     }
-    $existingAuth = Get-TableText $content ($table + '.auth')
-    if ($existingAuth -and $existingAuth.TrimEnd() -ceq $auth.TrimEnd()) { return $content }
-    return Set-TableText $content ($table + '.auth') $auth
+    # The native client authenticates only to the loopback bridge. The router
+    # owns upstream keys; no credential subprocess or router probe is needed.
+    return Set-TableText $content ($table + '.auth') $null
 }
-function Get-NativeRepairCli([string]$installLocation, [string]$cacheRoot = (Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin')) {
-    # WindowsApps executables cannot necessarily be launched outside package
-    # activation. Reuse the client's own relocated, byte-identical executable.
-    $source = Join-Path $installLocation 'app\resources\codex.exe'
-    if (-not (Test-Path -LiteralPath $source) -or -not (Test-Path -LiteralPath $cacheRoot)) { return $null }
-    $sourceFile = Get-Item -LiteralPath $source
-    $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
-    foreach ($directory in @(Get-ChildItem -LiteralPath $cacheRoot -Directory | Sort-Object LastWriteTimeUtc -Descending)) {
-        $candidate = Join-Path $directory.FullName 'codex.exe'
-        if (-not (Test-Path -LiteralPath $candidate)) { continue }
-        if ((Get-Item -LiteralPath $candidate).Length -eq $sourceFile.Length -and (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash -eq $sourceHash) { return $candidate }
-    }
-    return $null
-}
-function Get-NativeClientVersion([string]$installLocation = '') {
+function Get-NativeClientVersion([string]$installLocation = '', [string]$cacheFile = $script:NativeVersionCachePath) {
     if (-not $installLocation) {
         $package = Get-AppxPackage -Name OpenAI.Codex | Sort-Object Version -Descending | Select-Object -First 1
         if (-not $package) { return '' }
         $installLocation = $package.InstallLocation
     }
-    $cli = Get-NativeRepairCli $installLocation
-    # A saved model catalog describes the client that fetched it, not the
-    # currently installed client. Ask the byte-identical native executable.
     $temporaryCli = $null
     try {
-        if (-not $cli) {
-            # Immediately after an app update the native relocated CLI cache
-            # may not exist yet. Probe an exact temporary copy in the adapter;
-            # WindowsApps executables cannot run directly outside activation.
-            $source = Join-Path $installLocation 'app\resources\codex.exe'
-            if (-not (Test-Path -LiteralPath $source)) { return '' }
-            $scriptFile = $MyInvocation.MyCommand.ScriptBlock.File
-            $cache = Join-Path (Split-Path -Parent (Split-Path -Parent $scriptFile)) 'data\cache'
-            [void][IO.Directory]::CreateDirectory($cache)
-            $temporaryCli = Join-Path $cache ('native-version-' + [Guid]::NewGuid().ToString('N') + '.exe')
-            [IO.File]::Copy($source,$temporaryCli,$false)
-            $cli = $temporaryCli
+        $source = Get-Item -LiteralPath (Join-Path $installLocation 'app\resources\codex.exe') -ErrorAction Stop
+        # Store packages are immutable and their path changes on update. Read
+        # the real CLI version once per installed binary, without scanning or
+        # hashing the native client's executable cache on every launch.
+        if (Test-Path -LiteralPath $cacheFile) {
+            try {
+                $saved = (Read-LauncherText $cacheFile) | ConvertFrom-Json
+                if ($saved.source -ceq $source.FullName -and $saved.length -eq $source.Length -and
+                    $saved.modified -eq $source.LastWriteTimeUtc.Ticks.ToString() -and $saved.version -match '^\d+\.\d+\.\d+$') { return [string]$saved.version }
+            } catch {}
         }
-        $version = (& $cli --version 2>$null | Out-String).Trim()
-        if ($LASTEXITCODE -eq 0 -and $version -match '^codex-cli (\d+\.\d+\.\d+)(?:[-+\s]|$)') { return $Matches[1] }
+        $cache = Split-Path -Parent $cacheFile
+        [void][IO.Directory]::CreateDirectory($cache)
+        $temporaryCli = Join-Path $cache ('native-version-' + [Guid]::NewGuid().ToString('N') + '.exe')
+        [IO.File]::Copy($source.FullName,$temporaryCli,$false)
+        $output = (& $temporaryCli --version 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0 -and $output -match '^codex-cli (\d+\.\d+\.\d+)(?:[-+\s]|$)') {
+            $version = $Matches[1]
+            Write-LauncherFile $cacheFile (@{source=$source.FullName;length=$source.Length;modified=$source.LastWriteTimeUtc.Ticks.ToString();version=$version}|ConvertTo-Json -Compress)
+            return $version
+        }
     } catch { return '' }
     finally { if ($temporaryCli -and (Test-Path -LiteralPath $temporaryCli)) { Remove-Item -LiteralPath $temporaryCli -Force } }
     return ''
@@ -147,24 +180,24 @@ function Set-LauncherMixedProvider([string]$content, [string]$baseUrl, [string]$
     # Native OpenAI provider behavior (including remote compaction) is selected
     # by its name. Use it only for the entry whose router is official-only.
     $name = if ($officialOnly) { 'OpenAI' } else { 'ChatGPT API compatibility' }
-    $body = @(('[' + $table + ']'), ('name = ' + (Quote-TomlString $name)), ('base_url = ' + (Quote-TomlString $baseUrl)), 'wire_api = "responses"', 'requires_openai_auth = true', 'supports_websockets = true', '') -join [Environment]::NewLine
+    $body = @(('[' + $table + ']'), ('# chatgpt-api-root = ' + (Quote-TomlString $packageDir)), ('name = ' + (Quote-TomlString $name)), ('base_url = ' + (Quote-TomlString $baseUrl)), 'wire_api = "responses"', 'requires_openai_auth = true', 'supports_websockets = true', '') -join [Environment]::NewLine
     $content = Set-TableText $content ($table + '.auth') $null
     return Set-TableText $content $table $body
 }
 function Read-LauncherState([string]$packageDir) {
     $path = Get-LauncherDataPath $packageDir 'launcher-state.json'
-    if (Test-Path -LiteralPath $path) { return ([System.IO.File]::ReadAllText($path) | ConvertFrom-Json) }
+    if (Test-Path -LiteralPath $path) { return ((Read-LauncherText $path) | ConvertFrom-Json) }
     return $null
 }
 function Restore-LauncherRootLine([string]$content, [string]$key, [string]$line, [string]$original) {
     if (-not $line -or (Get-RootLine $content $key)) { return Set-RootLine $content $key $line }
     $head = Get-RootHead $content
     $oldHead = Get-RootHead $original
-    $pattern = '(?m)^[ \t]*' + [regex]::Escape($key) + '[ \t]*=[^\r\n]*(?:\r?\n|$)'
-    $old = [regex]::Match($oldHead, $pattern)
+    $pattern = Get-LauncherRootPattern $key
+    $old = [regex]::Match((Get-LauncherTomlMask $oldHead), $pattern)
     if (-not $old.Success) { return Set-RootLine $content $key $line }
-    foreach ($next in [regex]::Matches($oldHead.Substring($old.Index + $old.Length), '(?m)^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*=')) {
-        $position = [regex]::Match($head, '(?m)^[ \t]*' + [regex]::Escape($next.Groups[1].Value) + '[ \t]*=')
+    foreach ($next in [regex]::Matches((Get-LauncherTomlMask $oldHead).Substring($old.Index + $old.Length), '(?m)^[ \t]*["'']?([A-Za-z_][A-Za-z0-9_]*)["'']?[ \t]*=')) {
+        $position = [regex]::Match((Get-LauncherTomlMask $head), (Get-LauncherRootPattern $next.Groups[1].Value))
         if ($position.Success) { return $content.Insert($position.Index, $line) }
     }
     return $content.Insert($head.Length, $line)
@@ -174,9 +207,9 @@ function Restore-LauncherTable([string]$content, [string]$name, [string]$origina
     if (-not $table -or (Get-TableText $content $name)) { return Set-TableText $content $name $table }
     # Signing in temporarily removes the API-key auth table. Restore it in its
     # original position even when the user changed another setting meanwhile.
-    $old = [regex]::Match($original, (Get-TablePattern $name))
-    foreach ($next in [regex]::Matches($original.Substring($old.Index + $old.Length), '(?m)^[ \t]*(\[[^\r\n]+\])')) {
-        $position = [regex]::Match($content, '(?m)^[ \t]*' + [regex]::Escape($next.Groups[1].Value))
+    $old = [regex]::Match((Get-LauncherTomlMask $original), (Get-TablePattern $name))
+    foreach ($next in [regex]::Matches((Get-LauncherTomlMask $original).Substring($old.Index + $old.Length), '(?m)^[ \t]*(\[[^\r\n]+\])')) {
+        $position = [regex]::Match((Get-LauncherTomlMask $content), '(?m)^[ \t]*' + [regex]::Escape($next.Groups[1].Value))
         if ($position.Success) { return $content.Insert($position.Index, $table) }
     }
     return Set-TableText $content $name $table
@@ -186,7 +219,7 @@ function Restore-LauncherConfig([string]$packageDir, [string]$configPath) {
     $state = Read-LauncherState $packageDir
     if ($state -and $state.active) {
         if ([IO.Path]::GetFullPath($state.configPath) -ne [IO.Path]::GetFullPath($configPath)) { throw '切换记录属于另一个配置目录，已停止自动恢复。' }
-        $current = if (Test-Path -LiteralPath $configPath) { [System.IO.File]::ReadAllText($configPath) } else { '' }
+        $current = if (Test-Path -LiteralPath $configPath) { (Read-LauncherText $configPath) } else { '' }
         if ($state.entryMode -eq 'apionly') {
             $state | Add-Member -NotePropertyName lastApiOnlyModel -NotePropertyValue (Get-RootString $current 'model') -Force
             $state | Add-Member -NotePropertyName lastApiOnlyEffort -NotePropertyValue (Get-RootString $current 'model_reasoning_effort') -Force
@@ -227,7 +260,7 @@ function Apply-LauncherConfig([string]$packageDir, [string]$configPath, [string]
     if ($entryMode -eq 'apionly') { $mode = 'gateway' }
     $signedIn = $mode -eq 'mixed'
     $originalExisted = Test-Path -LiteralPath $configPath
-    $original = if ($originalExisted) { [IO.File]::ReadAllText($configPath) } else { '' }
+    $original = if ($originalExisted) { (Read-LauncherText $configPath) } else { '' }
     $previous = Read-LauncherState $packageDir
     $content = Set-RootString $original 'openai_base_url' $shimBase
     if (-not $signedIn) {
@@ -245,13 +278,20 @@ function Apply-LauncherConfig([string]$packageDir, [string]$configPath, [string]
     $provider = 'chatgpt_api_launcher'
     $content = Set-LauncherMixedProvider $content $shimBase $packageDir $signedIn $provider ($entryMode -eq 'official')
     if ($entryMode -eq 'official') {
-        $catalog = [IO.File]::ReadAllText((Get-LauncherDataPath $packageDir 'catalog-state.json')) | ConvertFrom-Json
+        $catalog = (Read-LauncherText (Get-LauncherDataPath $packageDir 'catalog-state.json')) | ConvertFrom-Json
         $ids = @($catalog.official | ForEach-Object { [string]$_.slug })
     } else {
-        $catalog = [IO.File]::ReadAllText((Get-LauncherDataPath $packageDir 'models-smr.json')) | ConvertFrom-Json
+        $catalog = (Read-LauncherText (Get-LauncherDataPath $packageDir 'models-smr.json')) | ConvertFrom-Json
         $ids = @($catalog.models | ForEach-Object { [string]$_.slug })
     }
     $selected = Get-RootString $original 'model'
+    $savedModel = if ($entryMode -eq 'apionly') { $previous.lastApiOnlyModel } elseif ($entryMode -eq 'api') { $previous.lastApiModel } else { '' }
+    $savedEffort = if ($entryMode -eq 'apionly') { $previous.lastApiOnlyEffort } elseif ($entryMode -eq 'api') { $previous.lastApiEffort } else { '' }
+    if ($savedModel -and $ids -ccontains $savedModel) {
+        $selected = $savedModel
+        $content = Set-RootString $content 'model' $selected
+        if ($savedEffort) { $content = Set-RootString $content 'model_reasoning_effort' $savedEffort }
+    }
     if ($ids.Count -and $ids -cnotcontains $selected) {
         if ($entryMode -eq 'apionly' -and $previous.lastApiOnlyModel -and $ids -ccontains $previous.lastApiOnlyModel) { $selected = $previous.lastApiOnlyModel }
         elseif ($entryMode -eq 'api' -and $previous.lastApiModel -and $ids -ccontains $previous.lastApiModel) { $selected = $previous.lastApiModel }

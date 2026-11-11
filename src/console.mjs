@@ -42,6 +42,13 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
     } catch {}
   }
   let settings = readSettings(root, env), refresh = null;
+  const views = new Set(); let idleTimer, closing;
+  const close = () => closing ||= new Promise(resolve => {
+    clearTimeout(idleTimer);
+    for (const view of views) view.destroy();
+    server.close(resolve);
+  });
+  const idle = ms => { if (open) { clearTimeout(idleTimer); idleTimer = setTimeout(close, ms); idleTimer.unref(); } };
   const token = crypto.randomBytes(32).toString('hex');
   const assetRoot = path.join(root, 'assets/console');
   async function runtime() {
@@ -107,6 +114,13 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
     try {
       if (url.pathname.startsWith('/api/')) {
         if (req.headers.authorization !== 'Bearer ' + token) return json(res, 401, { error: '控制台连接已失效，请重新打开控制台。' });
+        if (req.method === 'GET' && url.pathname === '/api/lifetime') {
+          clearTimeout(idleTimer); views.add(res);
+          res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' });
+          res.write(': connected\n\n');
+          res.once('close', () => { views.delete(res); if (!views.size && !closing) idle(5000); });
+          return;
+        }
         if (req.method === 'GET' && url.pathname === '/api/ping') return json(res, 200, { service: 'chatgpt-api-console', version, identity, buildId });
         if (req.method === 'GET' && url.pathname === '/api/state') return json(res, 200, await state());
         if (req.method === 'POST' && url.pathname === '/api/keys/reveal') {
@@ -148,9 +162,10 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   const port = server.address().port, url = 'http://127.0.0.1:' + port + '/#' + token;
   atomicPrivate(stateFile, { pid: process.pid, port, token, version, identity });
-  server.on('close', () => { if (readJson(stateFile)?.token === token) fs.rmSync(stateFile, { force: true }); });
+  server.on('close', () => { clearTimeout(idleTimer); if (readJson(stateFile)?.token === token) fs.rmSync(stateFile, { force: true }); });
+  idle(30000);
   if (open) opener(url);
-  return { server, url, close: () => new Promise(resolve => server.close(resolve)) };
+  return { server, url, close };
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   startConsole({ open: !process.argv.includes('--no-open') }).catch(error => { console.error('无法打开控制台，请检查安装目录中的配置文件和运行时。'); process.exitCode = 1; });

@@ -62,34 +62,49 @@ export function scopeNativeQuota(source, key) {
   const submission = scopeComposerSubmission(text, key);
   return { text: submission.text, count: quotaCount + fastCount + submission.count, quotaCount, fastCount, submitCount: submission.count, legacySubmitCount: submission.legacyCount };
 }
-export function nativeQuotaAssets(archive) {
+export function nativeQuotaAssets(archive, cacheFile = '') {
   const fd = fs.openSync(archive, 'r');
   try {
+    const stat = fs.fstatSync(fd), identity = [path.resolve(archive), stat.size, stat.mtimeMs].join('|');
+    const read = entry => {
+      const buffer = Buffer.alloc(entry.size); fs.readSync(fd, buffer, 0, buffer.length, entry.offset);
+      const source = buffer.toString(), adapted = scopeNativeQuota(source, 'quota_probe');
+      if (!adapted.count) return null;
+      if (!source.includes('export const __webpack_modules__=')) throw new Error('Unsupported native quota module format.');
+      return { url: entry.url, source, submitCount: adapted.submitCount, legacySubmitCount: adapted.legacySubmitCount };
+    };
+    if (cacheFile) {
+      try {
+        const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+        if (cached.identity === identity && cached.entries?.length) {
+          const assets = cached.entries.map(read);
+          if (assets.every(Boolean)) return assets;
+        }
+      } catch {}
+    }
     const prefix = Buffer.alloc(16); fs.readSync(fd, prefix, 0, 16, 0);
     const length = prefix.readUInt32LE(12);
     if (length > 32 * 1024 * 1024) throw new Error('Native asset index is too large.');
     const bytes = Buffer.alloc(length); fs.readSync(fd, bytes, 0, length, 16);
-    const tree = JSON.parse(bytes), base = 8 + prefix.readUInt32LE(4), assets = [];
+    const tree = JSON.parse(bytes), base = 8 + prefix.readUInt32LE(4), assets = [], entries = [];
     function scan(directory, parent = '') {
       for (const [name, entry] of Object.entries(directory.files || {})) {
         const file = parent + name;
         if (entry.files) { if ('webview'.startsWith(file) || file.startsWith('webview/')) scan(entry, file + '/'); continue; }
         if (entry.unpacked || !file.startsWith('webview/assets/') || !file.endsWith('.js')) continue;
-        const buffer = Buffer.alloc(Number(entry.size)); fs.readSync(fd, buffer, 0, buffer.length, base + Number(entry.offset));
-        const source = buffer.toString();
-        const adapted = scopeNativeQuota(source, 'quota_probe');
-        if (!adapted.count) continue;
-        if (!source.includes('export const __webpack_modules__=')) throw new Error('Unsupported native quota module format.');
-        assets.push({ url: 'app://-/' + file.slice('webview/'.length), source, submitCount: adapted.submitCount, legacySubmitCount: adapted.legacySubmitCount });
+        const location = { url: 'app://-/' + file.slice('webview/'.length), offset: base + Number(entry.offset), size: Number(entry.size) };
+        const asset = read(location);
+        if (asset) { assets.push(asset); entries.push(location); }
       }
     }
     scan(tree);
     if (!assets.length) throw new Error('当前客户端的 API 界面兼容检查未通过，请更新适配层。');
+    if (cacheFile) atomicPrivate(cacheFile, { identity, entries });
     return assets;
   } finally { fs.closeSync(fd); }
 }
-export function gatewayQuotaModels(catalog) {
-  const official = new Set((catalog.official || []).map(model => model.slug));
+export function gatewayQuotaModels(catalog, mode = 'mixed') {
+  const official = new Set(mode === 'gateway' ? [] : (catalog.official || []).map(model => model.slug));
   return (catalog.gatewayIds || []).filter(model => !official.has(model));
 }
 export function quotaBootstrap(assets, models, key, binding) {
@@ -169,12 +184,16 @@ export async function startQuotaCompatibleClient({ executable, archive, root, ho
   };
   try {
     report();
-    const assets = nativeQuotaAssets(archive), key = '__chatgpt_api_quota_' + crypto.randomBytes(8).toString('hex'), binding = key + '_notify';
+    const assets = nativeQuotaAssets(archive, path.join(root, 'data/cache/native-ui-index.json')),
+      key = '__chatgpt_api_quota_' + crypto.randomBytes(8).toString('hex'), binding = key + '_notify';
     const cache = path.join(root, 'data/cache/catalog-state.json');
-    const models = () => gatewayQuotaModels(JSON.parse(fs.readFileSync(cache, 'utf8')));
+    let routeMode = 'mixed';
+    try { routeMode = JSON.parse(fs.readFileSync(path.join(root, 'data/state/route-state.json'), 'utf8')).mode; } catch {}
+    const models = () => gatewayQuotaModels(JSON.parse(fs.readFileSync(cache, 'utf8')), routeMode);
     // Older clients duplicate subscription quota checks in the composer. New
     // clients removed those operands; keep their native submission path intact.
     if (models().length && assets.some(asset => asset.legacySubmitCount) && !assets.some(asset => asset.submitCount)) throw new Error('当前客户端的 API 发送兼容检查未通过，请更新适配层。');
+    const bootstrapSource = quotaBootstrap(assets, [], key, binding);
     status.phase = 'launching'; report();
     if (launch) {
       // LaunchServices preserves macOS permission attribution. Its application
@@ -222,7 +241,7 @@ export async function startQuotaCompatibleClient({ executable, archive, root, ho
         }
         sessions.add(id);
         status.phase = 'installing'; report();
-        const source = quotaBootstrap(assets, models(), key, binding);
+        const source = bootstrapSource + ';if(globalThis[' + JSON.stringify(key) + '])globalThis[' + JSON.stringify(key) + '].models=new Set(' + JSON.stringify(models()) + ')';
         // Queue the document bootstrap before releasing native script execution.
         const setup = pipe.send('Page.addScriptToEvaluateOnNewDocument', { source }, id);
         await pipe.send('Runtime.runIfWaitingForDebugger', {}, id);

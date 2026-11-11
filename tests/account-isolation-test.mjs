@@ -28,6 +28,26 @@ for (const owner of [null, 'account']) {
   assert(!fs.readdirSync(home).some(name => name.endsWith('.tmp')));
 }
 const baseline = { 'electron-persisted-atom-state': {}, 'electron-account-renderer-state-v1': { owner: null, inactive: { account: snapshot } } };
+for (const owner of [null, 'account']) {
+  const before = { 'electron-persisted-atom-state': owner ? snapshot.atoms : {},
+    'electron-account-renderer-state-v1': { owner, inactive: owner ? {} : { account: snapshot } },
+    ...(owner ? snapshot.globals : {}) };
+  fs.writeFileSync(file, JSON.stringify(before));
+  for (let cycle = 0; cycle < 3; cycle++) {
+    overlayDesktopState(ctx);
+    const during = JSON.parse(fs.readFileSync(file));
+    during['electron-persisted-atom-state']['localeOverride'] = 'zh-CN';
+    during['electron-persisted-atom-state']['appearanceTheme'] = 'dark';
+    during['electron-account-renderer-state-v1'] = { owner: null, inactive: { account: snapshot } };
+    fs.writeFileSync(file, JSON.stringify(during));
+    restoreDesktopState(ctx);
+    const after = JSON.parse(fs.readFileSync(file));
+    assert.equal(after['electron-account-renderer-state-v1'].owner, owner);
+    const atoms = owner ? after['electron-persisted-atom-state'] : after['electron-account-renderer-state-v1'].inactive.account.atoms;
+    assert.equal(atoms.localeOverride, 'zh-CN');
+    assert.equal(atoms.appearanceTheme, 'dark');
+  }
+}
 fs.writeFileSync(file, JSON.stringify(baseline)); overlayDesktopState(ctx);
 const edited = JSON.parse(fs.readFileSync(file)); edited['local-projects'].project.name = 'Updated'; edited.unrelated = 4;
 fs.writeFileSync(file, JSON.stringify(edited)); restoreDesktopState(ctx);

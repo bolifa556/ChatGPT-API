@@ -1,10 +1,31 @@
 import assert from 'node:assert/strict';
-import { scopeNativeQuota, quotaBootstrap, gatewayQuotaModels } from '../src/native-quota.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { scopeNativeQuota, quotaBootstrap, gatewayQuotaModels, nativeQuotaAssets } from '../src/native-quota.mjs';
 
 const key = '__quota_test_' + Date.now();
 const source = 'export const __rspack_esm_ids=[];export const __webpack_modules__={gate(e,t,n){const{host:w,blocked:E,model:g,limits:T}=n,tk={is:(limits)=>limits.blocked};let u;u="local"===w&&E||(0,tk.is)(T,g);e.result={rateLimitWarningThreshold:50,sendBlocked:u}}};';
 const catalog = { official: [{ slug: 'official' }], gatewayIds: ['Gateway/model', 'official'] };
+const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'native-ui-index-'));
+const archive = path.join(fixture, 'app.asar'), index = path.join(fixture, 'index.json');
+function writeArchive(text) {
+  const data = Buffer.from(text), header = Buffer.from(JSON.stringify({ files: { webview: { files: { assets: { files: { 'quota.js': { size: data.length, offset: '0' } } } } } } }));
+  const prefix = Buffer.alloc(16); prefix.writeUInt32LE(header.length + 8, 4); prefix.writeUInt32LE(header.length, 12);
+  fs.writeFileSync(archive, Buffer.concat([prefix, header, data]));
+}
+try {
+  writeArchive(source);
+  const cold = nativeQuotaAssets(archive, index), saved = fs.statSync(index).mtimeMs;
+  assert.deepEqual(nativeQuotaAssets(archive, index), cold);
+  assert.equal(fs.statSync(index).mtimeMs, saved, 'An unchanged native client rescanned or rewrote its UI index');
+  writeArchive(source + '\n// new native version');
+  assert(nativeQuotaAssets(archive, index)[0].source.endsWith('new native version'));
+  fs.writeFileSync(index, 'interrupted optional cache write');
+  assert.equal(nativeQuotaAssets(archive, index).length, 1);
+} finally { fs.unlinkSync(archive); fs.unlinkSync(index); fs.rmdirSync(fixture); }
 assert.deepEqual(gatewayQuotaModels(catalog), ['Gateway/model']);
+assert.deepEqual(gatewayQuotaModels(catalog, 'gateway'), ['Gateway/model', 'official'], 'Pure API models must retain quota/Fast compatibility when their names match an official model');
 assert.equal(scopeNativeQuota(source, key).count, 1);
 assert.equal(scopeNativeQuota('const ordinary="local"===w&&E||(0,tk.is)(T,g);', key).count, 0);
 assert.equal(scopeNativeQuota('const data="' + 'a'.repeat(1000000) + '";' + source, key).quotaCount, 1);

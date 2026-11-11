@@ -14,10 +14,12 @@ export function readEnvFile(file) {
 }
 export function normalizeBaseUrl(value) {
   if (typeof value !== 'string' || /[\r\n\0]/.test(value)) throw new Error('请输入有效的 API 基础 URL。');
-  let text = value.trim().replace(/\/+$/, '').replace(/\/(?:models|responses)$/i, '');
+  let text = value.trim().replace(/\/+$/, '').replace(/\/(?:models|responses(?:\/compact)?|chat\/completions|images\/(?:generations|edits))$/i, '');
   let url; try { url = new URL(text); } catch { throw new Error('API 基础 URL 必须以 http:// 或 https:// 开头。'); }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('API URL 不得包含账号密码、查询参数或片段。');
-  if (!/\/v1$/i.test(text)) text += '/v1';
+  // An explicit path belongs to the supplied API. Only a bare origin needs the
+  // conventional OpenAI prefix; /custom/v2 must never become /custom/v2/v1.
+  if (!url.pathname || url.pathname === '/') text += '/v1';
   return text;
 }
 export function atomicPrivate(file, value, { durable = false, temporaryPath } = {}) {
@@ -28,7 +30,16 @@ export function atomicPrivate(file, value, { durable = false, temporaryPath } = 
   try {
     fs.writeFileSync(temporary, text, { mode: 0o600 });
     if (durable) { const fd = fs.openSync(temporary, 'r+'); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); } }
-    fs.renameSync(temporary, file); if (process.platform !== 'win32') fs.chmodSync(file, 0o600);
+    for (let attempt = 0; ; attempt++) {
+      try { fs.renameSync(temporary, file); break; }
+      catch (error) {
+        if (process.platform !== 'win32' || !['EPERM', 'EBUSY', 'EACCES'].includes(error.code) || attempt >= 2) throw error;
+        // A short-lived Windows reader or antivirus handle can deny replacement.
+        // Preserve atomicity instead of truncating the live JSON file.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 8 * (attempt + 1));
+      }
+    }
+    if (process.platform !== 'win32') fs.chmodSync(file, 0o600);
     if (durable && process.platform !== 'win32') {
       const directory = fs.openSync(path.dirname(file), 'r');
       try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }

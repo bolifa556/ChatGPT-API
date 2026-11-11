@@ -40,7 +40,7 @@ function Test-LegacyRouter([string]$packageDir, $health) {
 
 function Initialize-PackageLayout([string]$packageDir) {
     $resolvedRoot = [IO.Path]::GetFullPath($packageDir).TrimEnd('\')
-    foreach ($dir in @('data','data\cache','data\state','data\logs','data\backup','data\diagnostics','runtime','assets')) {
+    foreach ($dir in @('data','data\cache','data\state','data\logs')) {
         [void][IO.Directory]::CreateDirectory((Join-Path $resolvedRoot $dir))
     }
     $state = Get-LegacyLayoutState $resolvedRoot
@@ -85,7 +85,10 @@ function Initialize-PackageLayout([string]$packageDir) {
             $source = Join-Path $resolvedRoot $name
             $target = [IO.Path]::GetFullPath((Join-Path $resolvedRoot $mapping[$name]))
             if (-not $target.StartsWith($resolvedRoot + '\',[StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid migration target.' }
-            if (Test-Path -LiteralPath $source -PathType Leaf) { Move-Item -LiteralPath $source -Destination $target -Force }
+            if (Test-Path -LiteralPath $source -PathType Leaf) {
+                [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target))
+                Move-Item -LiteralPath $source -Destination $target -Force
+            }
         }
         foreach ($name in @('launcher.lock','router-start.lock')) {
             $old = Join-Path $resolvedRoot $name

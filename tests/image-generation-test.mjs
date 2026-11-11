@@ -27,6 +27,7 @@ let officialAction = '', gatewayAction = '', downloadPort, downloadType = 'image
 let unavailableFirst = false;
 function peer(which) {
   return http.createServer(async (req, res) => {
+    if (which === 'gateway') res.setHeader('x-bifrost-request-id', 'fixture-image-request');
     if (req.url.includes('/models')) { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(which === 'official' ? { models: [officialModel] } : { data: gatewayModels })); return; }
     if (req.url.startsWith('/backend-api/files/download/')) { records.push({ which,path: req.url,headers: req.headers }); res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ download_url: 'http://127.0.0.1:' + downloadPort + '/image.png' })); return; }
     const chunks = []; for await (const chunk of req) chunks.push(chunk);

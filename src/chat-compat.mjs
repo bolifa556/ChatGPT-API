@@ -7,7 +7,13 @@ function unsupported(message) { return Object.assign(new Error(message), { statu
 
 // Keep Responses as the default. These routes need fields their Responses
 // endpoints do not carry, but their standard Chat endpoints do support.
-export function usesChat(payload) {
+export function usesChat(payload, metadata) {
+  const endpoints = metadata?.supported_endpoints;
+  if (Array.isArray(endpoints)) {
+    const chat = endpoints.some(value => typeof value === 'string' && /(?:chat[\/_-]completions)(?:$|[/?])/i.test(value));
+    const responses = endpoints.some(value => typeof value === 'string' && /(?:^|\/)responses(?:$|[/?])/i.test(value));
+    if (chat !== responses) return chat;
+  }
   return payload.model?.startsWith('词元计划/') ||
     (payload.model?.startsWith('阿里云订阅/') && ['json_schema','json_object'].includes(payload.text?.format?.type));
 }
@@ -38,7 +44,7 @@ function parts(value) { return value == null ? [] : typeof value === 'string' ? 
 
 export function chatRequest(payload) {
   if (payload.previous_response_id) throw unsupported('Chat continuation requires the complete input history.');
-  const messages = [], system = [];
+  const messages = [], system = [], calls = new Map();
   const aliyun = payload.model?.startsWith('阿里云订阅/');
   function append(role, value) {
     const converted = content(value);
@@ -63,8 +69,22 @@ export function chatRequest(payload) {
     } else if (item.type === 'function_call') {
       const message = assistant();
       (message.tool_calls ||= []).push({ id: item.call_id, type: 'function', function: { name: item.name, arguments: item.arguments } });
+      if (item.call_id) calls.set(item.call_id, item.name);
     } else if (item.type === 'function_call_output') {
-      messages.push({ role: 'tool', tool_call_id: item.call_id, content: content(item.output) });
+      let callId = item.call_id;
+      if (!callId && item.name) {
+        const matching = [...calls].filter(([, name]) => name === item.name);
+        if (matching.length === 1) callId = matching[0][0];
+      }
+      const output = content(item.output);
+      if (callId) {
+        messages.push({ role: 'tool', tool_call_id: callId, content: output }); calls.delete(callId);
+      } else if (item.name) {
+        // Chat's named function-result form needs no invented assistant call or
+        // call ID. Use an existing unambiguous call ID whenever one is present.
+        if (Array.isArray(output) && output.some(part => part.type !== 'text')) throw unsupported('A named Chat function result cannot represent non-text content without a call_id.');
+        messages.push({ role: 'function', name: item.name, content: Array.isArray(output) ? output.map(part => part.text).join('') : output });
+      } else throw unsupported('A Chat tool result requires its original call_id or function name.');
     } else if (item.type === 'message' || (!item.type && item.role)) {
       if (item.role === 'assistant') {
         const message = assistant(), next = content(item.content);
@@ -121,15 +141,24 @@ function usage(value) {
   return result;
 }
 
+function nativeAnnotation(value) {
+  if (value?.type === 'url_citation' && value.url_citation) {
+    const { url_citation, ...rest } = value;
+    return { ...copy(rest), ...copy(url_citation) };
+  }
+  return copy(value);
+}
+
 export class ChatEvents {
   constructor(model) { this.model = model; this.items = []; this.calls = new Map(); this.finished = false; }
   start(chunk) {
     if (this.response) {
       if (chunk.service_tier !== undefined) this.response.service_tier = copy(chunk.service_tier);
+      if (chunk.model) this.response.model = chunk.model;
       return [];
     }
     if (!chunk.id) throw Object.assign(new Error('Chat response is missing its id.'), { status: 502, code: 'invalid_upstream_response' });
-    this.response = { id: 'resp_gateway_' + id(chunk.id), object: 'response', model: this.model,
+    this.response = { id: 'resp_gateway_' + id(chunk.id), object: 'response', model: chunk.model || this.model,
       created_at: chunk.created ?? Math.floor(Date.now() / 1000), status: 'in_progress', output: [], error: null,
       ...(chunk.service_tier !== undefined ? { service_tier: copy(chunk.service_tier) } : {}) };
     return [{ type: 'response.created', response: copy(this.response) }, { type: 'response.in_progress', response: copy(this.response) }];
@@ -140,7 +169,7 @@ export class ChatEvents {
     if (!this[kind]) {
       const index = this.items.length, itemId = (kind === 'reasoning' ? 'rs_' : 'msg_') + id(this.response.id + '/' + index);
       const item = kind === 'reasoning' ? { type: 'reasoning', id: itemId, summary: [{ type: 'summary_text', text: '' }] } :
-        { type: 'message', id: itemId, role: 'assistant', status: 'in_progress', content: [{ type: 'output_text', text: '', annotations: [] }] };
+        { type: 'message', id: itemId, role: 'assistant', status: 'in_progress', content: [{ type: 'output_text', text: '', annotations: copy(this.annotations || []) }] };
       this[kind] = { index, item }; this.items.push(item);
       events.push({ type: 'response.output_item.added', output_index: index, item: copy(item) });
       events.push(kind === 'reasoning' ? { type: 'response.reasoning_summary_part.added', output_index: index, item_id: itemId, summary_index: 0, part: copy(item.summary[0]) } :
@@ -162,6 +191,18 @@ export class ChatEvents {
       const delta = choice.delta || {};
       events.push(...this.text('reasoning', delta.reasoning_content ?? delta.reasoning));
       events.push(...this.text('message', delta.content));
+      for (const original of delta.annotations || []) {
+        const annotation = nativeAnnotation(original), key = JSON.stringify(annotation);
+        this.annotationKeys ||= new Set();
+        if (this.annotationKeys.has(key)) continue;
+        this.annotationKeys.add(key); (this.annotations ||= []).push(annotation);
+        if (this.message) {
+          const { index, item } = this.message;
+          item.content[0].annotations.push(copy(annotation));
+          events.push({ type: 'response.output_text.annotation.added', output_index: index, item_id: item.id,
+            content_index: 0, annotation_index: this.annotations.length - 1, annotation: copy(annotation) });
+        }
+      }
       if (delta.refusal) {
         this.refusal = (this.refusal || '') + delta.refusal;
       }

@@ -6,9 +6,22 @@ import { DatabaseSync } from 'node:sqlite';
 import { zstdCompressSync, zstdDecompressSync } from 'node:zlib';
 import { repairThreadProviders, restoreThreadProviders } from '../src/repair-thread-providers.mjs';
 
+// Native cold histories support concatenated Zstandard frames. Node's decoder
+// returns one frame, so read every native frame when comparing opaque content.
+function nativeDecompress(input) {
+  const chunks = [];
+  for (let offset = 0; offset < input.length;) {
+    const result = zstdDecompressSync(input.subarray(offset), { info: true });
+    assert(result.engine.bytesWritten > 0);
+    chunks.push(result.buffer); offset += result.engine.bytesWritten;
+  }
+  return Buffer.concat(chunks);
+}
+
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'chatgpt-provider-compat-'));
 const home = path.join(root, 'native'), sessions = path.join(home, 'sessions'), archive = path.join(home, 'archived_sessions');
 for (const dir of [sessions, archive]) fs.mkdirSync(dir, { recursive: true });
+const placeholder = path.join(home, 'state_99.sqlite'); fs.writeFileSync(placeholder, '');
 const ctx = { root, home }, target = 'chatgpt_api_launcher';
 const journal = path.join(root, 'data/state/thread-provider-compatibility.json');
 const source = new Map(), checks = [];
@@ -116,15 +129,15 @@ try {
     }
     const result = await repairThreadProviders(ctx);
     assert(result.repaired.some(row => row.threadId === id), 'Compressed history was omitted from provider compatibility');
-    assert.deepEqual(zstdDecompressSync(fs.readFileSync(compressed)), Buffer.from(header(id, target) + message + setting(target) + tool));
+    assert.deepEqual(nativeDecompress(fs.readFileSync(compressed)), Buffer.from(header(id, target) + message + setting(target) + tool));
     assert(dbFiles.every(file => rows(file).find(row => row.id === id).model_provider === target));
     if (materialize) {
-      fs.writeFileSync(plain, zstdDecompressSync(fs.readFileSync(compressed)));
+      fs.writeFileSync(plain, nativeDecompress(fs.readFileSync(compressed)));
       fs.unlinkSync(compressed);
       fs.appendFileSync(plain, setting(target, 12) + message);
     }
     await restoreThreadProviders(ctx);
-    const restored = materialize ? fs.readFileSync(plain) : zstdDecompressSync(fs.readFileSync(compressed));
+    const restored = materialize ? fs.readFileSync(plain) : nativeDecompress(fs.readFileSync(compressed));
     assert.deepEqual(restored, materialize ? Buffer.concat([bytes, Buffer.from(setting('chatgpt_api_mixed', 12) + message)]) : bytes);
     assert(dbFiles.every(file => rows(file).find(row => row.id === id).model_provider === 'chatgpt_api_mixed'));
     assert(!fs.existsSync(journal)); noScratch();
@@ -144,7 +157,7 @@ try {
   fs.renameSync(shadowCompressed, coldArchive);
   fs.writeFileSync(coldArchive + '.chatgpt-api-compat.tmp', 'interrupted compressed rewrite');
   await restoreThreadProviders(ctx);
-  assert.deepEqual(zstdDecompressSync(fs.readFileSync(coldArchive)), shadowBytes);
+  assert.deepEqual(nativeDecompress(fs.readFileSync(coldArchive)), shadowBytes);
   assert(!fs.existsSync(journal)); noScratch();
   checks.push('Native plain-file precedence, compression after startup, archive moves and interrupted compressed scratch files recover without losing messages');
 
@@ -169,7 +182,7 @@ try {
     assert(!result.repaired.some(row => row.threadId === 'retained-parent-header'));
     assert(dbFiles.every(database => rows(database).find(row => row.id === id).model_provider === target));
     await restoreThreadProviders(ctx);
-    assert.deepEqual(compressed ? zstdDecompressSync(fs.readFileSync(file)) : fs.readFileSync(file), bytes);
+    assert.deepEqual(compressed ? nativeDecompress(fs.readFileSync(file)) : fs.readFileSync(file), bytes);
     assert(dbFiles.every(database => rows(database).find(row => row.id === id).model_provider === 'openai'));
     noScratch();
   }
@@ -201,6 +214,31 @@ try {
     assert(fs.readFileSync(projected.config, 'utf8').includes('localeOverride = "en-US"'), platform + ' discarded a preference edited before reconfiguration');
   }
   checks.push('macOS/Linux runtime configuration restores exact bytes or original absence, with no leftover provider definitions');
+  const undoFile = path.join(sessions, 'interrupted-slot.jsonl.zst');
+  const undoBytes = Buffer.from(header('interrupted-slot', 'openai') + message + setting('openai') + tool);
+  fs.writeFileSync(undoFile, zstdCompressSync(undoBytes));
+  await repairThreadProviders(ctx); await restoreThreadProviders(ctx);
+  const originalCompressed = fs.readFileSync(undoFile), originalInode = fs.statSync(undoFile, { bigint: true }).ino;
+  const repeatedLock = new DatabaseSync(dbFiles[1]); repeatedLock.exec('BEGIN IMMEDIATE');
+  await assert.rejects(repairThreadProviders(ctx), /locked/);
+  for (let interruption = 0; interruption < 2; interruption++) await assert.rejects(restoreThreadProviders(ctx), /locked/);
+  repeatedLock.exec('ROLLBACK'); repeatedLock.close();
+  await restoreThreadProviders(ctx);
+  assert.deepEqual(fs.readFileSync(undoFile), originalCompressed, 'Repeated interrupted recovery trusted a stale metadata cache');
+  assert(!fs.existsSync(journal));
+  checks.push('Repeated recovery interruptions retain durable original metadata and restore correctly despite unchanged file stamps');
+  await repairThreadProviders(ctx);
+  assert.equal(fs.statSync(undoFile, { bigint: true }).ino, originalInode, 'A cached compressed history was needlessly copied');
+  const pending = JSON.parse(fs.readFileSync(journal));
+  const snapshot = pending.undo.find(row => row.relative === path.relative(home, undoFile));
+  assert(snapshot?.ranges.length, 'Compressed metadata was changed without durable recovery bytes');
+  const fd = fs.openSync(undoFile, 'r+');
+  fs.writeSync(fd, Buffer.alloc(20, 255), 0, 20, snapshot.ranges[0].offset); fs.closeSync(fd);
+  fs.unlinkSync(path.join(root, 'data/cache/rollout-index.json'));
+  await restoreThreadProviders(ctx);
+  assert.deepEqual(fs.readFileSync(undoFile), originalCompressed, 'Interrupted metadata writes did not restore exact compressed bytes');
+  assert.deepEqual(nativeDecompress(fs.readFileSync(undoFile)), undoBytes);
+  checks.push('Cached compressed histories update only routing slots; interrupted writes recover exact original bytes even without the optional cache');
   console.log(JSON.stringify({ passed: true, checks }));
 } finally {
   await restoreThreadProviders(ctx);

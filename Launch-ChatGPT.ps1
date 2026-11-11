@@ -1,5 +1,6 @@
 ﻿param([Parameter(Mandatory=$true)][ValidateSet('official','api','apionly')][string]$Mode)
 $ErrorActionPreference = 'Stop'
+$env:CHATGPT_API_LAUNCH_STARTED_AT = [DateTime]::UtcNow.ToString('o')
 $packageDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $packageDir 'src\Common.ps1')
 . (Join-Path $packageDir 'src\Package-Paths.ps1')
@@ -20,6 +21,15 @@ function Show-Message([string]$message) {
     [void][System.Windows.Forms.MessageBox]::Show($message,'ChatGPT 启动器')
 }
 function Get-MainApp {
+    $recoveryFile = Get-RecoveryPath $packageDir
+    if (Test-Path -LiteralPath $recoveryFile) {
+        $recorded = (Read-LauncherText $recoveryFile) | ConvertFrom-Json
+        if ($recorded.client) {
+            if (Test-RecordedProcess $recorded.client) {
+                return @(Get-CimInstance Win32_Process -Filter ('ProcessId=' + [int]$recorded.client.pid))
+            }
+        }
+    }
     return @(Get-CimInstance Win32_Process -Filter "name='ChatGPT.exe'" -ErrorAction SilentlyContinue | Where-Object {
         $_.CommandLine -and $_.CommandLine -notmatch '--type=' -and
         (-not $env:CODEX_ELECTRON_USER_DATA_PATH -or ($_.CommandLine.Contains('--user-data-dir=') -and $_.CommandLine.Contains($env:CODEX_ELECTRON_USER_DATA_PATH)))
@@ -28,9 +38,9 @@ function Get-MainApp {
 function Stop-Helpers {
     Stop-LauncherRecordedHelpers $packageDir
 }
-function Recover-OldOverrides { Repair-LegacyLauncherConfig $packageDir $configPath }
 
 try {
+    Wait-ClosingLauncherSession $packageDir
     $legacyLayout = Get-LegacyLayoutState $packageDir
     if ($legacyLayout -and $legacyLayout.pending -and @(Get-MainApp).Count -eq 0) {
         # Let the old watcher restore its journal before selecting the new paths.
@@ -56,7 +66,13 @@ try {
     $state = Read-LauncherState $packageDir
     $activeEntry = if ($state -and $state.active) { if ($state.entryMode) { $state.entryMode } else { 'api' } } else { 'official' }
     if ($running.Count -gt 0) {
-        if ($Mode -ne $activeEntry) { throw '请先从托盘完全退出 ChatGPT，再点击另一个入口切换。' }
+        if ($Mode -ne $activeEntry) {
+            # A hidden window can still own native background work or an update.
+            # Wait for the real process exit; never infer it from a window handle.
+            throw '请先完全退出当前 ChatGPT，再点击另一个入口切换。'
+        }
+    }
+    if ($running.Count -gt 0) {
         if ($env:CODEX_ELECTRON_USER_DATA_PATH) {
             Start-Process -FilePath (Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\chatgpt-desktop.exe') -ArgumentList ('--user-data-dir="' + $env:CODEX_ELECTRON_USER_DATA_PATH + '"') -WindowStyle Hidden
         } else { & (Join-Path $env:WINDIR 'explorer.exe') "shell:AppsFolder\$appId" }
@@ -64,7 +80,6 @@ try {
     }
     Initialize-DeferredLauncherSettings $packageDir
     Restore-LauncherConfig $packageDir $configPath
-    Recover-OldOverrides
     Stop-Helpers
     if ($Mode -ne 'official') { Assert-LauncherApiConfigured $packageDir }
     $nodePath = Join-Path $packageDir 'runtime\node.exe'
@@ -106,25 +121,15 @@ try {
     Write-LauncherFile $sessionState ($starting | ConvertTo-Json)
     $starting.phase = if ($Mode -eq 'official') { 'disabled' } else { 'waiting' }
     Write-LauncherFile (Join-Path $packageDir 'data\state\native-quota.json') ($starting | ConvertTo-Json)
-    $arguments = @($sessionScript,$packageDir,(Get-CodexHome),$nativeAlias,(Join-Path $package.InstallLocation 'app\resources\app.asar'),$Mode,$recoverySession) | ForEach-Object { '"' + $_ + '"' }
-    $controller = Start-Process -FilePath $nodePath -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardError $sessionLog
-    Add-RouterHelper $packageDir $controller $sessionScript
-    Set-LauncherRecoveryController $packageDir $recoverySession $controller.Id
+    $arguments = @((Join-Path $packageDir 'src\Recover-ChatGPT.vbs'),(Get-CodexHome),$nativeAlias,(Join-Path $package.InstallLocation 'app\resources\app.asar'),$Mode,$recoverySession) | ForEach-Object { '"' + $_ + '"' }
+    $controller = Start-Process -FilePath (Join-Path $env:WINDIR 'System32\wscript.exe') -ArgumentList $arguments -WindowStyle Hidden -PassThru
+    Set-LauncherRecoveryOwner $packageDir $recoverySession $controller.Id
     $null = Wait-LauncherNativeClient $packageDir $recoverySession $controller
     $apiLaunched=$true
     $lock.Dispose();$lock=$null
-    Wait-LauncherSession $packageDir $recoverySession $controller.Id
-    for($n=0;$n -lt 50 -and -not $lock;$n++){
-        try{$lock=[IO.File]::Open($lockPath,'OpenOrCreate','ReadWrite','None')}catch{Start-Sleep -Milliseconds 100}
-    }
-    if($lock){
-        $currentState = Read-LauncherState $packageDir
-        if($currentState.active -and $currentState.startedAt -eq $sessionStartedAt){
-            Restore-LauncherConfig $packageDir $configPath
-            Stop-Helpers
-            Unregister-LauncherRecovery $packageDir $recoverySession
-        }
-    }
+    # The script host waits on the controller's exit handle and owns crash
+    # recovery. Release startup PowerShell and its loaded modules.
+    exit 0
 } catch {
     $message=$_.Exception.Message
     if($apiKey){$message=$message.Replace($apiKey,'[redacted]')}
@@ -134,17 +139,17 @@ try {
     }
     if (-not $apiLaunched -and $lock -and $recoverySession) {
         try {
-            $recovery = [IO.File]::ReadAllText((Get-RecoveryPath $packageDir)) | ConvertFrom-Json
+            $recovery = (Read-LauncherText (Get-RecoveryPath $packageDir)) | ConvertFrom-Json
             if ($recovery.sessionId -eq $recoverySession) {
                 # Recover an early PID even if the controller exited before
                 # the readiness loop recorded its process identity.
-                if (-not $recovery.client -and (Test-Path -LiteralPath $sessionState)) {
-                    $native = [IO.File]::ReadAllText($sessionState) | ConvertFrom-Json
+                if (-not $recovery.client -and $sessionState -and (Test-Path -LiteralPath $sessionState)) {
+                    $native = (Read-LauncherText $sessionState) | ConvertFrom-Json
                     if ($native.session -eq $recoverySession -and $native.pid) {
                         $candidate = Get-CimInstance Win32_Process -Filter ('ProcessId=' + [int]$native.pid) -ErrorAction SilentlyContinue
-                        if ($candidate -and $candidate.ParentProcessId -eq $controller.Id) {
+                        if ($candidate -and $candidate.ParentProcessId -eq $native.controllerPid) {
                             Set-LauncherRecoveryClient $packageDir $recoverySession $candidate
-                            $recovery = [IO.File]::ReadAllText((Get-RecoveryPath $packageDir)) | ConvertFrom-Json
+                            $recovery = (Read-LauncherText (Get-RecoveryPath $packageDir)) | ConvertFrom-Json
                         }
                     }
                 }

@@ -55,7 +55,7 @@ try {
   const auth = path.join(process.env.CODEX_HOME, 'auth.json');
   fs.writeFileSync(auth, '{"inert_native_login":"must-stay-unchanged"}');
   const originalAuth = fs.readFileSync(auth, 'utf8');
-  const sources = ['macos/provider.mjs','macos/platform.mjs','macos/native.mjs','macos/install.mjs','macos/chatgpt-apionly','src/shim.mjs','src/transport.mjs','src/response-state.mjs','src/settings.mjs','src/gateway-sources.mjs','src/console.mjs','assets/console/index.html','assets/console/console.css','assets/console/console.js','assets/console/icon.svg','src/repair-thread-providers.mjs','src/model-context.mjs','src/model-strength.mjs','src/history-compat.mjs','src/gateway-recovery.mjs','src/desktop-state.mjs','src/recovery.mjs','src/native-quota.mjs','assets/model-template.json','assets/model-contexts.json','package-lock.json'];
+  const sources = ['macos/provider.mjs','macos/platform.mjs','macos/native.mjs','macos/install.mjs','macos/chatgpt-apionly','src/shim.mjs','src/transport.mjs','src/response-state.mjs','src/settings.mjs','src/gateway-sources.mjs','src/console.mjs','assets/console/index.html','assets/console/console.css','assets/console/console.js','assets/console/icon.svg','src/repair-thread-providers.mjs','src/rollout-index.mjs','src/model-context.mjs','src/model-strength.mjs','src/history-compat.mjs','src/gateway-recovery.mjs','src/toml-edit.mjs','src/desktop-state.mjs','src/recovery.mjs','src/native-quota.mjs','assets/model-template.json','assets/model-contexts.json','package-lock.json'];
   const entries = [];
   for (const relative of [...sources, 'runtime/node']) {
     const bytes = relative === 'runtime/node' ? Buffer.from('fixture runtime\n') : fs.readFileSync(path.join(root, relative));

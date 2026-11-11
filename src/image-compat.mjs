@@ -182,7 +182,7 @@ export async function forwardImages({ req,res,url,body,operation,env,hasLogin,al
     let headers = headersFor(req.headers, which, gateway?.profile); headers['content-type'] = outgoing.contentType;
     if (which === 'gateway') {
       delete headers['x-openai-internal-codex-responses-lite'];
-      headers = gatewayResponseHeaders(headers, nativeImage && /^gpt-image(?:-|$)/i.test(leaf(model)));
+      headers = gatewayResponseHeaders(headers, nativeImage && /^gpt-image(?:-|$)/i.test(leaf(model)), gateway?.metadata?._nativeHeaderPrefix);
     }
     const upstream = await request(targetUrl(which, url, gateway), { method: 'POST', body: outgoing.body, headers, dispatcher: which === 'official' ? officialDispatcher : gateway?.dispatcher || gatewayDispatcher, signal, ...RESPONSE_TIMEOUTS });
     try {

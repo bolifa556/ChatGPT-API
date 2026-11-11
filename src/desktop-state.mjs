@@ -34,7 +34,7 @@ export function recoverMissingDesktopState({ root, home }) {
   // Explicit empty project settings can be intentional. Recover only the
   // missing-key state left by a cleared native account scope.
   if (states.some(value => Object.hasOwn(value, 'local-projects') || Object.hasOwn(value, 'thread-project-assignments'))) return { recovered: false };
-  const database = fs.readdirSync(home).filter(name => /^state_\d+\.sqlite$/.test(name))
+  const database = fs.readdirSync(home).filter(name => /^state_\d+\.sqlite$/.test(name) && fs.statSync(path.join(home, name)).size > 0)
     .sort((a, b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0])).at(-1);
   if (!database) return { recovered: false };
   const db = new DatabaseSync(path.join(home, database), { readOnly: true });
@@ -102,7 +102,9 @@ export function restoreDesktopState({ root, home }) {
         }
         // API preferences belong to the same desktop workspace. Preserve edits
         // in that original account's snapshot when the account is inactive.
-        if (!scope.owner && saved.sourceId) scope.inactive[saved.sourceId] = updated;
+        const inactive = { ...scope.inactive, ...native?.inactive };
+        if (scope.owner) delete inactive[scope.owner];
+        else if (saved.sourceId) inactive[saved.sourceId] = updated;
         if (!scope.owner) {
           const original = JSON.parse(saved.originalText);
           for (const key of globalKeys) assign(current, key, original[key]);
@@ -110,7 +112,10 @@ export function restoreDesktopState({ root, home }) {
         }
         // An explicit sign-in during this run can create a new native scope.
         // Retain it, including its saved account state and selected owner.
-        current[scopeKey] = native ? { ...scope, ...native, inactive: { ...scope.inactive, ...native.inactive } } : scope;
+        // A null native owner is the API provider's unscoped session, not a
+        // sign-out from the original subscription. Restore its original scope
+        // and keep this run's preferences ahead of an older inactive snapshot.
+        current[scopeKey] = { ...scope, inactive };
       }
       writeState(file, current);
       writeState(file + '.bak', current);

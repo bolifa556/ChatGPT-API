@@ -23,7 +23,18 @@ function Register-LauncherRecovery([string]$packageDir, [string]$configPath, [st
     $runCommand = '"' + $wscript + '" ' + $arguments
     # Record both possible triggers before creating either one. A later launch
     # can clean up an interrupted registration even if it selects another path.
-    Write-LauncherFile (Get-RecoveryPath $packageDir) (@{version=3;sessionId=$session;configPath=$configPath;shortcut=$shortcut;runKey=$runKey;runName=$runName;runCommand=$runCommand;owner=(Get-RecoveryProcess $PID);boot=(Get-RecoveryBoot)}|ConvertTo-Json -Depth 5)
+    Write-LauncherFile (Get-RecoveryPath $packageDir) (@{version=3;sessionId=$session;configPath=$configPath;shortcut=$shortcut;runKey=$runKey;runName=$runName;runCommand=$runCommand;owner=(Get-RecoveryProcess $PID)}|ConvertTo-Json -Depth 5)
+    if (-not $PSBoundParameters.ContainsKey('startup')) {
+        # A native registry write avoids compiling the shortcut COM bridge on
+        # every launch. It is removed by the same successful recovery path.
+        $key = $null
+        try {
+            $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($runKey)
+            $key.SetValue($runName,$runCommand,[Microsoft.Win32.RegistryValueKind]::String)
+            $key.Flush()
+            return $session
+        } catch {} finally { if ($key) { $key.Dispose() } }
+    }
     try {
         if (-not $shortcut) { throw 'Windows 启动目录不可用。' }
         [void][IO.Directory]::CreateDirectory($startup)
@@ -56,14 +67,15 @@ function Register-LauncherRecovery([string]$packageDir, [string]$configPath, [st
 }
 function Repair-LegacyLauncherConfig([string]$packageDir, [string]$configPath) {
     if (-not (Test-Path -LiteralPath $configPath)) { return }
-    $text = [IO.File]::ReadAllText($configPath)
+    $text = (Read-LauncherText $configPath)
     $catalog = Get-RootString $text 'model_catalog_json'
     $base = Get-RootString $text 'openai_base_url'
     $knownCatalog = $catalog -and ($catalog -eq (Join-Path $packageDir 'models-smr.json') -or $catalog -eq (Join-Path $packageDir 'data\cache\models-smr.json'))
     $reader = Quote-TomlString (Join-Path $packageDir 'Read-ApiKey.ps1')
     $ownedProviders = @(@('chatgpt_api_launcher','chatgpt_api_mixed','smr') | Where-Object {
         $authTable = Get-TableText $text ('model_providers.' + $_ + '.auth')
-        $authTable -and $authTable.Contains($reader)
+        $body = Get-TableText $text ('model_providers.' + $_)
+        ($authTable -and $authTable.Contains($reader)) -or ($body -and $body.Contains('# chatgpt-api-root = ' + (Quote-TomlString $packageDir)))
     })
     $selectedProvider = Get-RootString $text 'model_provider'
     $ownedBase = $base -and @($ownedProviders | Where-Object {
@@ -75,13 +87,13 @@ function Repair-LegacyLauncherConfig([string]$packageDir, [string]$configPath) {
     if (-not $knownCatalog -and $selectedProvider -notin $ownedProviders -and -not $ownedBase) { return }
     $record = Get-LauncherDataPath $packageDir 'official-settings.json'
     if (-not (Test-Path -LiteralPath $record)) { throw '旧版 API 配置缺少原设置记录，已保留现场。' }
-    $saved = [IO.File]::ReadAllText($record) | ConvertFrom-Json
+    $saved = (Read-LauncherText $record) | ConvertFrom-Json
     foreach ($key in @('openai_base_url','model_provider','model_catalog_json')) { $text = Set-RootLine $text $key $null }
     foreach ($key in @('model','model_reasoning_effort')) {
         if ($saved.$key) { $value = [string]$saved.$key; if ($value.StartsWith('"')) { $value = $value | ConvertFrom-Json }; $text = Set-RootString $text $key $value }
     }
     $baselinePath = Get-LauncherDataPath $packageDir 'config-before-launchers.toml'
-    $baseline = if (Test-Path -LiteralPath $baselinePath) { [IO.File]::ReadAllText($baselinePath) } else { '' }
+    $baseline = if (Test-Path -LiteralPath $baselinePath) { (Read-LauncherText $baselinePath) } else { '' }
     foreach ($id in @('chatgpt_api_launcher','chatgpt_api_mixed','smr')) {
         $table = 'model_providers.' + $id
         $body = Get-TableText $text $table
@@ -94,7 +106,8 @@ function Repair-LegacyLauncherConfig([string]$packageDir, [string]$configPath) {
 function Stop-LauncherRecordedHelpers([string]$packageDir, [int]$exceptProcessId = 0) {
     $file = Get-LauncherDataPath $packageDir 'runtime-state.json'
     if (-not (Test-Path -LiteralPath $file)) { return }
-    $state = [IO.File]::ReadAllText($file) | ConvertFrom-Json
+    $state = (Read-LauncherText $file) | ConvertFrom-Json
+    if (-not @($state.helpers).Count) { return }
     foreach ($entry in @($state.helpers)) {
         if ([int]$entry.pid -eq $exceptProcessId) { continue }
         if (-not $entry.marker -or -not (Test-RecordedProcess $entry)) { continue }
@@ -105,10 +118,40 @@ function Stop-LauncherRecordedHelpers([string]$packageDir, [int]$exceptProcessId
 }
 function Set-LauncherRecoveryController([string]$packageDir, [string]$session, [int]$processId) {
     $file = Get-RecoveryPath $packageDir
-    $state = [IO.File]::ReadAllText($file) | ConvertFrom-Json
+    $state = (Read-LauncherText $file) | ConvertFrom-Json
     if ($state.sessionId -ne $session) { throw 'Recovery session changed during startup.' }
     $state | Add-Member -NotePropertyName controller -NotePropertyValue (Get-RecoveryProcess $processId) -Force
     Write-LauncherFile $file ($state | ConvertTo-Json -Depth 5)
+}
+function Set-LauncherRecoveryOwner([string]$packageDir, [string]$session, [int]$processId) {
+    $file = Get-RecoveryPath $packageDir
+    $state = (Read-LauncherText $file) | ConvertFrom-Json
+    if ($state.sessionId -ne $session) { throw 'Recovery session changed during startup.' }
+    $state.owner = Get-RecoveryProcess $processId
+    Write-LauncherFile $file ($state | ConvertTo-Json -Depth 5)
+}
+function Wait-ClosingLauncherSession([string]$packageDir) {
+    $file = Get-RecoveryPath $packageDir
+    if (-not (Test-Path -LiteralPath $file)) { return }
+    $state = (Read-LauncherText $file) | ConvertFrom-Json
+    if (-not $state.client -or (Test-RecordedProcess $state.client)) { return }
+    foreach ($record in @($state.controller,$state.owner)) {
+        if (-not (Test-RecordedProcess $record)) { continue }
+        $process = Get-Process -Id $record.pid -ErrorAction SilentlyContinue
+        if (-not $process) { continue }
+        try {
+            if ($process.WaitForExit(5000)) { continue }
+            if ($record.pid -eq $state.controller.pid) {
+                $recovering = @(Get-CimInstance Win32_Process -Filter ('ParentProcessId=' + $record.pid) | Where-Object {
+                    $_.CommandLine -and $_.CommandLine.Contains((Join-Path $packageDir 'src\Recover-ChatGPT.ps1'))
+                })
+                # A controller with no client and no recovery worker has no
+                # remaining work. End only this installation's recorded helper.
+                if (-not $recovering.Count) { Stop-LauncherRecordedHelpers $packageDir }
+            }
+            $null = $process.WaitForExit(30000)
+        } finally { $process.Dispose() }
+    }
 }
 function Stop-LauncherRecoveryClient($entry) {
     if (-not $entry -or -not $entry.pid) { return }
@@ -122,22 +165,9 @@ function Stop-LauncherRecoveryClient($entry) {
         }
     } finally { $client.Dispose() }
 }
-function Wait-LauncherSession([string]$packageDir, [string]$session, [int]$controllerId) {
-    Wait-Process -Id $controllerId -ErrorAction SilentlyContinue
-    $file = Get-RecoveryPath $packageDir
-    if (-not (Test-Path -LiteralPath $file)) { return }
-    $recovery = [IO.File]::ReadAllText($file) | ConvertFrom-Json
-    if ($recovery.sessionId -ne $session) { return }
-    if (Test-RecordedProcess $recovery.client) {
-        # The controller exited first. End only its recorded native client
-        # before removing the temporary provider from the shared configuration.
-        Stop-LauncherRecoveryClient $recovery.client
-    }
-    & (Join-Path $packageDir 'src\Recover-ChatGPT.ps1') -Immediate -Session $session
-}
 function Set-LauncherRecoveryClient([string]$packageDir, [string]$session, $process) {
     $file = Get-RecoveryPath $packageDir
-    $state = [IO.File]::ReadAllText($file) | ConvertFrom-Json
+    $state = (Read-LauncherText $file) | ConvertFrom-Json
     if ($state.sessionId -ne $session) { throw 'Recovery session changed during startup.' }
     $state | Add-Member -NotePropertyName client -NotePropertyValue (Get-RecoveryProcess $process.ProcessId) -Force
     Write-LauncherFile $file ($state | ConvertTo-Json -Depth 5)
@@ -147,11 +177,11 @@ function Wait-LauncherNativeClient([string]$packageDir, [string]$session, $contr
     $logPath = Join-Path $packageDir 'data\logs\native-session-stderr.log'
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $idleDeadline = $idleTimeoutMs
-    $progress = ''; $phase = 'controller'; $clientPid = 0
+    $progress = ''; $phase = 'controller'; $clientPid = 0; $recordedController = 0
     while ($clock.ElapsedMilliseconds -lt $startupTimeoutMs) {
         $native = $null
         if (Test-Path -LiteralPath $statusPath) {
-            try { $native = [IO.File]::ReadAllText($statusPath) | ConvertFrom-Json } catch {}
+            try { $native = (Read-LauncherText $statusPath) | ConvertFrom-Json } catch {}
         }
         if ($native -and $native.session -eq $session) {
             $phase = [string]$native.phase
@@ -164,10 +194,18 @@ function Wait-LauncherNativeClient([string]$packageDir, [string]$session, $contr
         }
         $controller.Refresh()
         if ($controller.HasExited) {
-            $detail = if (Test-Path -LiteralPath $logPath) { [IO.File]::ReadAllText($logPath).Trim() } else { '' }
+            $detail = if (Test-Path -LiteralPath $logPath) { (Read-LauncherText $logPath).Trim() } else { '' }
             throw ('客户端启动进程已退出（退出码 ' + $controller.ExitCode + '）。' + [Environment]::NewLine + $detail)
         }
         if ($native -and $native.session -eq $session) {
+            if ($native.controllerPid -and [int]$native.controllerPid -ne $recordedController) {
+                $actual = Get-Process -Id ([int]$native.controllerPid) -ErrorAction SilentlyContinue
+                if ($actual) {
+                    Set-LauncherRecoveryController $packageDir $session $actual.Id
+                    Add-RouterHelper $packageDir $actual (Join-Path $packageDir 'src\native-session.mjs')
+                    $recordedController = $actual.Id
+                }
+            }
             if ($native.pid -and [int]$native.pid -ne $clientPid) {
                 $client = Get-CimInstance Win32_Process -Filter ('ProcessId=' + [int]$native.pid) -ErrorAction SilentlyContinue
                 if ($client) {
@@ -188,7 +226,7 @@ function Wait-LauncherNativeClient([string]$packageDir, [string]$session, $contr
 function Unregister-LauncherRecovery([string]$packageDir, [string]$session) {
     $file = Get-RecoveryPath $packageDir
     if (-not (Test-Path -LiteralPath $file)) { return }
-    $state = [IO.File]::ReadAllText($file) | ConvertFrom-Json
+    $state = (Read-LauncherText $file) | ConvertFrom-Json
     if ($state.sessionId -ne $session) { return }
     if ($state.shortcut -and (Test-Path -LiteralPath $state.shortcut)) { Remove-Item -LiteralPath $state.shortcut -Force }
     if ($state.runKey -and $state.runName -and $state.runCommand) {

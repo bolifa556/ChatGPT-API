@@ -34,16 +34,16 @@ export function gatewayDispatcherFor(base, transport, tunnelPort = 18003) {
   return new Agent({ connect: (options, callback) => connect({ ...options, hostname: '127.0.0.1', port: tunnelPort }, callback) });
 }
 
-export function gatewayResponseHeaders(headers, native) {
+export function gatewayResponseHeaders(headers, native, forwardPrefix = 'x-bf-eh-') {
   const result = { ...headers };
   for (const name of FORWARDED_NATIVE_HEADERS) delete result[name];
   if (!native) delete result[NATIVE_RESPONSES_HEADER];
   // Bifrost only forwards explicit x-bf-eh-* metadata. Preserve the client's
   // protocol/version/turn fields and its real user agent on native requests.
   // An ordinary API request must not acquire a native client identity.
-  else if ([NATIVE_RESPONSES_HEADER, 'x-codex-turn-metadata', 'x-codex-image-turn-id'].some(name => result[name] !== undefined)) {
+  else if (forwardPrefix && /^[a-z0-9-]{1,40}$/.test(forwardPrefix) && [NATIVE_RESPONSES_HEADER, 'x-codex-turn-metadata', 'x-codex-image-turn-id'].some(name => result[name] !== undefined)) {
     for (const name of NATIVE_PROTOCOL_HEADERS) {
-      if (result[name] !== undefined) result['x-bf-eh-' + name] = result[name];
+      if (result[name] !== undefined) result[forwardPrefix + name] = result[name];
     }
   }
   return result;

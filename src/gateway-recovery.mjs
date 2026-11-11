@@ -1,3 +1,5 @@
+import { rootHead, tomlMask, getRoot } from './toml-edit.mjs';
+
 export function gatewayUnavailable(error) {
   return error?.code === 'gateway_unavailable' || /\[gateway_unavailable\]|Enter a valid http:\/\/ or https:\/\/ API base URL|API URL must not contain|API Key is missing or invalid/.test(error?.stderr || error?.message || '');
 }
@@ -22,15 +24,15 @@ export function updateEnv(text, settings) {
   return text.replace(/^\n/, '').trimEnd() + '\n';
 }
 export function restoreRootLine(text, key, line, original) {
-  const head = value => value.slice(0, value.search(/^[ \t]*\[/m) < 0 ? value.length : value.search(/^[ \t]*\[/m));
-  const pattern = name => new RegExp('^[ \\t]*' + name + '[ \\t]*=[^\\r\\n]*(?:\\r?\\n|$)', 'm');
-  const currentHead = head(text);
-  if (!line || pattern(key).test(currentHead)) return null;
-  const originalHead = head(original || ''), match = pattern(key).exec(originalHead);
-  if (!match) return null;
-  const following = originalHead.slice(match.index + match[0].length);
-  for (const next of following.matchAll(/^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*=/gm)) {
-    const at = currentHead.search(pattern(next[1]));
+  const currentHead = rootHead(text);
+  if (!line || getRoot(text, key)) return null;
+  const originalHead = rootHead(original || ''), previous = getRoot(originalHead, key);
+  if (!previous) return null;
+  const matchAt = tomlMask(originalHead).indexOf(tomlMask(previous));
+  const following = tomlMask(originalHead).slice(matchAt + previous.length);
+  for (const next of following.matchAll(/^[ \t]*["']?([A-Za-z_][A-Za-z0-9_]*)["']?[ \t]*=/gm)) {
+    const nextLine = getRoot(currentHead, next[1]);
+    const at = nextLine ? tomlMask(currentHead).indexOf(tomlMask(nextLine)) : -1;
     if (at >= 0) return currentHead.slice(0, at) + line + text.slice(at);
   }
   return currentHead + line + text.slice(currentHead.length);

@@ -14,6 +14,8 @@ import { overlayDesktopState, restoreDesktopState } from '../src/desktop-state.m
 import { registerRecovery, recordRecoveryClient, unregisterRecovery, recoverPending } from '../src/recovery.mjs';
 import { prepareWithRecovery, updateEnv, restoreRootLine } from '../src/gateway-recovery.mjs';
 import { syncLegacySettings, userApiSettings, initializeDeferredSettings, requireApiConfiguration, atomicPrivate } from '../src/settings.mjs';
+import { getRoot, setRoot, getTable, setTable } from '../src/toml-edit.mjs';
+export { getRoot, setRoot, getTable, setTable } from '../src/toml-edit.mjs';
 export { requireClosedClient } from './platform.mjs';
 export { processIdentity, alive, runningClients } from './platform.mjs';
 export { restoreThreadProviders } from '../src/repair-thread-providers.mjs';
@@ -166,21 +168,11 @@ export async function ensureRouter(ctx, refresh = false, selection) {
     await stopRouter(ctx); throw new Error('Router did not become ready. See data/logs/provider-start.log.');
   });
 }
-const rootHead = text => text.slice(0, text.search(/^[ \t]*\[/m) < 0 ? text.length : text.search(/^[ \t]*\[/m));
-const keyPattern = key => new RegExp('^[ \\t]*' + key + '[ \\t]*=[^\\r\\n]*(?:\\r?\\n|$)', 'm');
-const tablePattern = name => new RegExp('^[ \\t]*\\[' + name.replaceAll('.', '\\.') + '\\][^\\r\\n]*(?:\\r?\\n|$).*?(?=^[ \\t]*\\[|(?![\\s\\S]))', 'ms');
-export function getRoot(text, key) { return rootHead(text).match(keyPattern(key))?.[0] || ''; }
 function rootString(text, key) {
   const value = getRoot(text, key).split('=').slice(1).join('=').trim().match(/^("(?:[^"\\]|\\.)*"|'[^']*')/)?.[0];
   if (!value) return '';
   try { return value.startsWith('"') ? JSON.parse(value) : value.slice(1, -1); } catch { return ''; }
 }
-export function setRoot(text, key, line) {
-  const head = rootHead(text), tail = text.slice(head.length), pattern = keyPattern(key);
-  return (pattern.test(head) ? head.replace(pattern, () => line) : line + head) + tail;
-}
-export function getTable(text, name) { return text.match(tablePattern(name))?.[0] || ''; }
-export function setTable(text, name, value) { const pattern = tablePattern(name); return pattern.test(text) ? text.replace(pattern, () => value) : value ? text.trimEnd() + '\n\n' + value : text; }
 export function applyConfig(ctx, selection = { entryMode: 'apionly', mode: 'gateway' }) {
   const settings = routerSettings(ctx, selection), signedIn = selection.entryMode !== 'apionly' && selection.mode === 'mixed';
   const officialOnly = selection.entryMode === 'official';
@@ -199,13 +191,12 @@ export function applyConfig(ctx, selection = { entryMode: 'apionly', mode: 'gate
   const base = 'http://127.0.0.1:' + settings.SHIM_PORT + '/v1';
   const tables = ['chatgpt_api_launcher', 'chatgpt_api_mixed', ...(getTable(original, 'model_providers.smr') || selectedProvider === 'smr' ? ['smr'] : [])];
   const tableNames = tables.flatMap(id => ['model_providers.' + id, 'model_providers.' + id + '.auth']);
-  const imageHeader = signedIn ? '' : 'http_headers = { "x-openai-actor-authorization" = "chatgpt-api-local" }\n';
+  const imageHeader = signedIn ? '' : 'experimental_bearer_token = "chatgpt-api-local"\nhttp_headers = { "x-openai-actor-authorization" = "chatgpt-api-local" }\n';
   for (const id of tables) {
     const table = 'model_providers.' + id;
     const name = officialOnly && id === selectedProvider ? 'OpenAI' : 'ChatGPT API compatibility';
     const body = `[${table}]\nname = ${JSON.stringify(name)}\nbase_url = ${JSON.stringify(base)}\nwire_api = "responses"\nrequires_openai_auth = ${signedIn}\n${imageHeader}supports_websockets = ${signedIn}\n\n`;
-    const auth = signedIn ? '' : `[${table}.auth]\ncommand = ${JSON.stringify(ctx.node)}\nargs = ${JSON.stringify([path.join(ctx.root, 'macos/provider.mjs'), 'auth'])}\ntimeout_ms = 45000\nrefresh_interval_ms = 0\n\n`;
-    text = setTable(setTable(text, table + '.auth', auth), table, body);
+    text = setTable(setTable(text, table + '.auth', ''), table, body);
   }
   // All entries share a runtime binding; routing still follows the entry/model.
   const values = { openai_base_url: base, model_provider: selectedProvider,

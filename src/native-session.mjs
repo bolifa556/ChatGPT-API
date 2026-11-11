@@ -1,5 +1,6 @@
 // The router and native UI compatibility share one process and one client
 // lifetime. Recovery runs after that exact client exits, including crashes.
+import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -16,7 +17,7 @@ export async function runNativeSession({ router, start, recover, onStatus = () =
     child = nativeClient;
     child.stderr?.setEncoding('utf8');
     child.stderr?.on('data', chunk => { clientStderr = (clientStderr + chunk.toString()).slice(-32768); });
-    report({ phase: 'client', pid: child.pid });
+    report({ phase: 'client', pid: child.pid, nativeSpawnedAt: new Date().toISOString() });
     if (stopping) stop();
   };
   process.once('SIGTERM', stop); process.once('SIGINT', stop);
@@ -29,6 +30,7 @@ export async function runNativeSession({ router, start, recover, onStatus = () =
     else {
       if (child.exitCode !== null || child.signalCode !== null) throw new Error('Native client exited before startup confirmation (' + (child.signalCode || child.exitCode) + ').');
       report({ ready: true, phase: 'running', pid: child.pid });
+      if (typeof globalThis.gc === 'function') setImmediate(() => globalThis.gc());
     }
     if (child.exitCode === null && child.signalCode === null) await once(child, 'exit');
     if (!stopping && (child.exitCode !== 0 || child.signalCode)) {
@@ -67,7 +69,8 @@ async function main() {
   process.env.CHATGPT_API_ROOT = root;
   const status = path.join(root, 'data/state/native-session.json');
   const startedAt = new Date().toISOString();
-  const state = { session, entryMode, startedAt, ready: false, stopped: false, phase: 'initializing' };
+  const state = { session, entryMode, controllerPid: process.pid, startedAt,
+    launcherStartedAt: process.env.CHATGPT_API_LAUNCH_STARTED_AT, ready: false, stopped: false, phase: 'initializing' };
   const report = value => {
     Object.assign(state, value, { updatedAt: new Date().toISOString() });
     atomicPrivate(status, state);
@@ -105,5 +108,9 @@ async function main() {
   }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  main().catch(error => { process.stderr.write((error.stack || error.message) + '\n'); process.exitCode = 1; });
+  main().catch(error => {
+    const detail = (error.stack || error.message) + '\n';
+    try { fs.writeFileSync(path.join(process.argv[2], 'data/logs/native-session-stderr.log'), detail); } catch {}
+    process.stderr.write(detail); process.exitCode = 1;
+  });
 }

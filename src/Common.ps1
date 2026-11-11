@@ -1,5 +1,12 @@
 ﻿$ErrorActionPreference = 'Stop'
 
+function Read-LauncherText([string]$path) {
+    # Status and preferences are atomically replaced by Node/native writers.
+    # Share deletion as well as reads, so a status read cannot block a rename.
+    $stream = [IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    $reader = [IO.StreamReader]::new($stream,[Text.Encoding]::UTF8,$true)
+    try { return $reader.ReadToEnd() } finally { $reader.Dispose() }
+}
 function Get-EnvValues([string]$path) {
     if (-not (Test-Path -LiteralPath $path)) { throw "Missing settings file: $path" }
     $values = @{}
@@ -33,7 +40,7 @@ function Get-UserApiSettings([string]$packageDir) {
     $values = if (Test-Path -LiteralPath $envFile) { Get-EnvValues $envFile } else { @{} }
     $file = Join-Path $packageDir 'data\providers.json'
     if (Test-Path -LiteralPath $file) {
-        $saved = [IO.File]::ReadAllText($file) | ConvertFrom-Json
+        $saved = (Read-LauncherText $file) | ConvertFrom-Json
         $provider = @($saved.providers | Where-Object { $_.id -eq $saved.preferredProviderId -and $_.enabled -ne $false }) | Select-Object -First 1
         if ($provider) { $values['BASE_URL'] = [string]$provider.baseUrl; $values['API_KEY'] = [string]$provider.apiKey }
     }
@@ -48,18 +55,18 @@ function Assert-LauncherApiConfigured([string]$packageDir) {
 
 function Normalize-BaseUrl([string]$value) {
     $url = $value.Trim().TrimEnd('/')
-    $url = [regex]::Replace($url, '(?i)/(?:models|responses)$', '')
+    $url = [regex]::Replace($url, '(?i)/(?:models|responses(?:/compact)?|chat/completions|images/(?:generations|edits))$', '')
     $uri = $null
     if (-not [System.Uri]::TryCreate($url, [System.UriKind]::Absolute, [ref]$uri) -or
         $uri.Scheme -notin @('http', 'https') -or $uri.UserInfo -or $uri.Query -or $uri.Fragment) {
         throw 'Enter an http:// or https:// API base URL without a query string.'
     }
-    if ($url -notmatch '(?i)/v1$') { $url += '/v1' }
+    if (-not $uri.AbsolutePath -or $uri.AbsolutePath -eq '/') { $url += '/v1' }
     return $url
 }
 
 function Write-Utf8File([string]$path, [string]$content) {
-    if ((Test-Path -LiteralPath $path) -and [System.IO.File]::ReadAllText($path) -ceq $content) { return }
+    if ((Test-Path -LiteralPath $path) -and (Read-LauncherText $path) -ceq $content) { return }
     $directory = Split-Path -Parent $path
     if (-not (Test-Path -LiteralPath $directory)) {
         [void](New-Item -ItemType Directory -Path $directory -Force)

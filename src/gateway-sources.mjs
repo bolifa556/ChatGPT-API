@@ -38,7 +38,7 @@ export class GatewaySources {
     const metadata = catalog.find(candidate => candidate.id === model);
     const profile = this.profile(metadata?._providerId || 'default');
     if (!profile || !metadata) throw Object.assign(new Error('The selected API model or source is no longer enabled.'), { status: 400, code: 'unknown_model' });
-    return { profile, base: this.base(profile), dispatcher: this.dispatcher(profile), model: metadata._upstreamId || metadata.id };
+    return { profile, metadata, base: this.base(profile), dispatcher: this.dispatcher(profile), model: metadata._upstreamId || metadata.id };
   }
   adoptLegacy(catalog) {
     const profile = this.profile('default');
@@ -55,7 +55,11 @@ export class GatewaySources {
       for (const original of record.models || []) {
         const id = publicModelId(profile.id, original.id);
         if (seen.has(id)) throw new Error('Duplicate public model identity: ' + id);
-        seen.add(id); models.push({ ...original, id, _providerId: profile.id, _upstreamId: original.id });
+        seen.add(id); models.push({ ...original, id, _providerId: profile.id, _upstreamId: original.id,
+          // Older caches used this extension for every native request. Keep
+          // that behavior until the existing one-shot discovery identifies the
+          // endpoint; newly discovered ordinary APIs get no proprietary headers.
+          _nativeHeaderPrefix: record.nativeHeaderPrefix ?? 'x-bf-eh-' });
       }
     }
     this.models = models; this.sources = sources;
@@ -80,7 +84,8 @@ export class GatewaySources {
         const models = (data.data || []).filter(item => typeof item?.id === 'string' && item.id && item.id.length <= 500 && !ids.has(item.id) && ids.add(item.id))
           .map(item => Object.fromEntries(fields.filter(key => item[key] !== undefined).map(key => [key, item[key]])));
         if (!models.length) throw new Error('Gateway returned no models.');
-        const record = { id: profile.id, fingerprint: this.identity(profile), checkedAt: new Date().toISOString(), models };
+        const nativeHeaderPrefix = Object.keys(up.headers).some(name => /^x-bifrost-/i.test(name)) ? 'x-bf-eh-' : '';
+        const record = { id: profile.id, fingerprint: this.identity(profile), checkedAt: new Date().toISOString(), models, nativeHeaderPrefix };
         records.push(record); Object.assign(status, { ready: true, checkedAt: record.checkedAt, models: models.length });
       } catch (error) {
         status.error = redact(error.message, this.settings);

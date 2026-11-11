@@ -51,7 +51,7 @@ fs.writeFileSync(path.join(fixture, 'data/state/route-state.json'), JSON.stringi
 const initial = readSettings(fixture), key = overrideKey('p_bbbbbbbb', models[0]);
 assert.deepEqual(initial.defaultImageModel, { providerId: 'default', modelId: 'legacy-image-alias' });
 saveSettings(fixture, { ...publicSettings(initial), defaultImageModel: null, contextLimit: 100000, contextOverrides: { [key]: 64000 }, providers: [
-  { ...initial.providers[0], apiKey: '', imageModel: '' }, { id: 'p_bbbbbbbb', name: 'Source B', baseUrl: upstream + '/b', apiKey: keys.b, enabled: true },
+  { ...initial.providers[0], apiKey: '', imageModel: '' }, { id: 'p_bbbbbbbb', name: 'Source B', baseUrl: upstream + '/b/v1', apiKey: keys.b, enabled: true },
 ] });
 assert.equal(readSettings(fixture).providers[0].apiKey, keys.a);
 const env = { ...process.env, CHATGPT_API_ROOT: fixture, CODEX_HOME: path.join(fixture, 'home') };
@@ -219,6 +219,14 @@ try {
   assert.equal((await request('settings', legacyState.settings)).status, 409, 'A legacy settings update must invalidate an older console draft');
   fs.writeFileSync(settingsFile, configuredSources);
   checks.push('A reused console rereads changed legacy settings and rejects drafts from before that change');
+  await consoleServer.close(); consoleServer = null;
+  const automatic = await startConsole({ root: fixture, open: true, opener: () => {} });
+  const closeEvent = once(automatic.server, 'close'), controller = new AbortController();
+  const connection = await fetch(new URL('/api/lifetime', automatic.url), { signal: controller.signal,
+    headers: { authorization: 'Bearer ' + new URL(automatic.url).hash.slice(1) } });
+  await connection.body.getReader().read(); controller.abort();
+  await closeEvent;
+  checks.push('The console exits after its last page closes, using the connection close event without heartbeat polling');
   const report = { passed: true, checks }; console.log(JSON.stringify(report, null, 2));
   fs.mkdirSync(path.join(root, 'data/diagnostics/console315'), { recursive: true });
   fs.writeFileSync(path.join(root, 'data/diagnostics/console315/console-sources-results.json'), JSON.stringify(report, null, 2));

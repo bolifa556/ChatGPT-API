@@ -4,16 +4,46 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { pipeline } from 'node:stream/promises';
-import { createZstdCompress, createZstdDecompress } from 'node:zlib';
+import { createZstdDecompress } from 'node:zlib';
 import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { atomicPrivate } from './settings.mjs';
+import { RolloutIndex } from './rollout-index.mjs';
 
 const journalPath = root => path.join(root, 'data/state/thread-provider-compatibility.json');
 const canonicalHome = home => fs.realpathSync(home);
 const plainRollout = file => file.endsWith('.jsonl.zst') ? file.slice(0, -4) : file;
 const fingerprint = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+async function rewriteJobs(index, jobs) {
+  const fast = jobs.filter(job => index.fast(job.file));
+  let next = 0;
+  const finished = await Promise.allSettled(Array.from({ length: Math.min(4, fast.length) }, async () => {
+    while (next < fast.length) {
+      const job = fast[next++];
+      if (job.span) index.apply(job.span);
+      else await index.rewrite(job.file, job.temporary, job.transform);
+    }
+  }));
+  const failed = finished.find(result => result.status === 'rejected');
+  if (failed) throw failed.reason;
+  // Initial decompression stays serial to bound memory for image-heavy histories.
+  for (const job of jobs.filter(job => !index.fast(job.file))) await index.rewrite(job.file, job.temporary, job.transform);
+}
+function prepareSpans(index, jobs, state) {
+  const undo = [];
+  const recorded = new Set((state.undo || []).map(saved => saved.identity));
+  for (const job of jobs) {
+    job.span = index.plan(job.file, job.goal, replaceProvider);
+    if (job.span?.changes.length) {
+      const { relative, identity, mtime, original, changes } = job.span;
+      if (!recorded.has(identity)) {
+        undo.push({ relative, identity, mtime, original, ranges: changes.map(({ offset, length, before }) => ({ offset, length, before })) });
+        recorded.add(identity);
+      }
+    }
+  }
+  if (undo.length) state.undo = [...(state.undo || []), ...undo];
+}
 function inside(home, file) {
   const relative = path.relative(home, file);
   return relative !== '' && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative);
@@ -47,6 +77,9 @@ function databases(home) {
     .filter(file => fs.lstatSync(file).isFile() && !fs.lstatSync(file).isSymbolicLink());
 }
 function openDatabase(file, readOnly) {
+  // Native startup can leave an empty placeholder before schema creation.
+  // It has no routing rows, and opening it read-only can ask SQLite to recover.
+  if (fs.statSync(file).size === 0) return null;
   const db = new DatabaseSync(file, { readOnly });
   db.exec('PRAGMA busy_timeout = 0');
   const columns = new Set(db.prepare('PRAGMA table_info(threads)').all().map(row => row.name));
@@ -127,32 +160,12 @@ function replaceProvider(bytes, meta, provider) {
   if (!meta?.range || provider === meta.provider) return bytes;
   return Buffer.from(meta.text.slice(0, meta.range[0]) + JSON.stringify(provider) + meta.text.slice(meta.range[1]));
 }
-async function rewrite(file, temporary, transform) {
-  const before = fs.statSync(file), output = fs.createWriteStream(temporary, { flags: 'wx', mode: before.mode & 0o777 });
-  let changed = false;
-  try {
-    await pipeline(lines(file), async function* (source) {
-      for await (const bytes of source) { const next = transform(bytes); changed ||= next !== bytes; yield next; }
-    }, ...(file.endsWith('.jsonl.zst') ? [createZstdCompress()] : []), output);
-    const current = fs.statSync(file);
-    if (current.size !== before.size || current.mtimeMs !== before.mtimeMs) throw new Error('A conversation changed while preparing compatibility; close its other client first.');
-    if (changed) {
-      fs.utimesSync(temporary, before.atime, before.mtime);
-      const fd = fs.openSync(temporary, 'r+');
-      try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-      fs.renameSync(temporary, file);
-      if (process.platform !== 'win32') {
-        const directory = fs.openSync(path.dirname(file), 'r');
-        try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
-      }
-    }
-  } finally { output.destroy(); if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
-}
 function validateJournal(state, home) {
   if (state.version !== 1 || state.home !== home || !Array.isArray(state.threads) || !Array.isArray(state.databases)) throw new Error('Conversation compatibility recovery belongs to another client home.');
   for (const thread of state.threads) {
     if (typeof thread.id !== 'string' || !inside(home, path.resolve(home, thread.relative))) throw new Error('Invalid conversation compatibility path.');
   }
+  for (const saved of state.undo || []) if (typeof saved.relative !== 'string' || !inside(home, path.resolve(home, saved.relative)) || !Array.isArray(saved.ranges)) throw new Error('Invalid routing metadata recovery path.');
 }
 function recordedProvider(state, id) {
   const indexed = new Set(state.databases.flatMap(db => db.rows || [])
@@ -193,29 +206,42 @@ export async function restoreThreadProviders({ home, root }) {
   if (!fs.existsSync(journal)) return { restored: 0 };
   home = canonicalHome(home);
   const state = JSON.parse(fs.readFileSync(journal, 'utf8')); validateJournal(state, home);
+  const index = new RolloutIndex(home, root, metadata, lines);
+  const jobs = [];
+  const files = rolloutFiles(home);
+  index.undo(state.undo, files);
+  // Keep the durable undo until the entire restore commits. In-place metadata
+  // writes deliberately retain mtime, so a restart must not trust an older cache
+  // without first replaying these bytes, including after another failed restore.
   // Paths can move when a conversation is archived. Match the native session ID.
-  for (const file of rolloutFiles(home)) {
-    let thread;
-    for await (const bytes of lines(file)) {
-      const meta = metadata(bytes);
-      if (!meta?.id) continue;
-      thread = originalThread(state, file, meta);
-      break;
-    }
+  for (const file of files) {
+    const entry = await index.get(file);
+    const thread = entry.id ? originalThread(state, file, { id: entry.id, key: entry.records[0]?.key }) : null;
     if (!thread) continue;
     const saved = new Map();
     for (const record of thread.records) { const values = saved.get(record.key) || []; values.push(record.provider); saved.set(record.key, values); }
+    const counts = new Map();
+    const goals = entry.records.map(record => {
+      const ordinal = counts.get(record.key) || 0; counts.set(record.key, ordinal + 1);
+      const previous = saved.get(record.key)?.[ordinal] ?? thread.originalProvider;
+      return record.provider === state.provider ? previous : record.provider;
+    });
     const temporary = file + '.chatgpt-api-compat.tmp';
     // Remove a scratch file from an interrupted preparation before retrying.
     if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
-    await rewrite(file, temporary, bytes => {
-      const meta = metadata(bytes); if (!meta?.provider) return bytes;
+    if (entry.records.every((record, position) => record.provider === goals[position])) continue;
+    jobs.push({ file, temporary, goal: (_record, position) => goals[position], transform: (bytes, meta) => {
+      if (!meta?.provider) return bytes;
       const previous = saved.get(meta.key)?.shift() ?? thread.originalProvider;
       return meta.provider === state.provider ? replaceProvider(bytes, meta, previous) : bytes;
-    });
+    } });
   }
-  const files = new Set([...state.databases.map(item => item.file), ...databases(home)]);
-  for (const file of files) {
+  prepareSpans(index, jobs, state);
+  // Recovery bytes become durable before touching an existing compressed slot.
+  atomicPrivate(journal, state, { durable: true });
+  await rewriteJobs(index, jobs);
+  const databaseFiles = new Set([...state.databases.map(item => item.file), ...databases(home)]);
+  for (const file of databaseFiles) {
     if (!fs.existsSync(file)) continue;
     const db = openDatabase(file, false); if (!db) continue;
     try {
@@ -237,6 +263,7 @@ export async function restoreThreadProviders({ home, root }) {
       if (fs.existsSync(scratch)) fs.unlinkSync(scratch);
     }
   }
+  index.save();
   fs.unlinkSync(journal);
   return { restored: state.threads.length };
 }
@@ -245,16 +272,11 @@ export async function repairThreadProviders({ home, root, provider = 'chatgpt_ap
   if (!root) throw new Error('The adapter root is required for temporary conversation compatibility.');
   const journal = journalPath(root);
   if (fs.existsSync(journal)) throw new Error('Restore the previous conversation compatibility session before starting another.');
+  const index = new RolloutIndex(home, root, metadata, lines);
   let threads = [];
   for (const file of rolloutFiles(home)) {
-    let id, originalProvider = 'openai'; const records = [];
-    for await (const bytes of lines(file)) {
-      const meta = metadata(bytes); if (!meta) continue;
-      // Forked native histories can retain a parent's session header after
-      // their own first header. The first header owns the conversation ID.
-      if (!id && meta.id) id = meta.id;
-      if (meta.provider) { originalProvider = meta.provider; records.push({ key: meta.key, provider: meta.provider }); }
-    }
+    const { id, originalProvider, records: indexed } = await index.get(file);
+    const records = indexed.map(({ key, provider }) => ({ key, provider }));
     if (id) threads.push({ id, relative: path.relative(home, file), originalProvider, records, differs: records.some(record => record.provider !== provider) });
   }
   const known = new Map(threads.map(thread => [thread.id, thread]));
@@ -275,14 +297,16 @@ export async function repairThreadProviders({ home, root, provider = 'chatgpt_ap
   const selected = new Set(threads.map(thread => thread.id));
   for (const db of dbs) db.rows = db.rows.filter(row => selected.has(row.id));
   const result = { dryRun, provider, candidates: threads.map(({ id, originalProvider }) => ({ threadId: id, previousProvider: originalProvider })), repaired: [], failed: [] };
-  if (dryRun || !threads.length) return result;
+  if (dryRun || !threads.length) { if (!dryRun) index.save(); return result; }
   const state = { version: 1, home, provider, threads, databases: dbs };
-  atomicPrivate(journal, state, { durable: true });
   try {
-    for (const thread of threads) {
+    const jobs = threads.filter(thread => thread.records.some(record => record.provider !== provider)).map(thread => {
       const file = path.resolve(home, thread.relative);
-      await rewrite(file, file + '.chatgpt-api-compat.tmp', bytes => { const meta = metadata(bytes); return meta?.provider ? replaceProvider(bytes, meta, provider) : bytes; });
-    }
+      return { file, temporary: file + '.chatgpt-api-compat.tmp', goal: () => provider, transform: (bytes, meta) => meta?.provider ? replaceProvider(bytes, meta, provider) : bytes };
+    });
+    prepareSpans(index, jobs, state);
+    atomicPrivate(journal, state, { durable: true });
+    await rewriteJobs(index, jobs);
     for (const { file, rows } of dbs) {
       const db = openDatabase(file, false);
       try {
@@ -293,6 +317,7 @@ export async function repairThreadProviders({ home, root, provider = 'chatgpt_ap
       } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
       finally { db.close(); }
     }
+    index.save();
     result.repaired = result.candidates;
     return result;
   } catch (error) {
@@ -306,6 +331,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   try {
     const result = command === 'restore' ? await restoreThreadProviders({ home, root })
       : command === 'begin' ? await repairThreadProviders({ home, root }) : (() => { throw new Error('Expected begin/restore, CODEX_HOME and adapter root.'); })();
-    console.log(JSON.stringify(command === 'restore' ? result : { repaired: result.repaired.length }));
-  } catch (error) { console.error(error.message); process.exitCode = 1; }
+    console.log(JSON.stringify(command === 'begin' ? { repaired: result.repaired.length } : result));
+  } catch (error) { console.error(error.stack || error.message); process.exitCode = 1; }
 }

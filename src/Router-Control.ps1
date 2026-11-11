@@ -21,7 +21,7 @@ function Add-RouterHelper([string]$packageDir, $process, [string]$marker) {
     $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $process.Id)
     if(-not $p){throw 'Router helper exited during startup.'}
     $file=Get-LauncherDataPath $packageDir 'runtime-state.json'
-    $state=if(Test-Path -LiteralPath $file){[IO.File]::ReadAllText($file)|ConvertFrom-Json}else{$null}
+    $state=if(Test-Path -LiteralPath $file){(Read-LauncherText $file)|ConvertFrom-Json}else{$null}
     $items=@()
     if($state -and $state.version -eq 2){
         foreach($entry in @($state.helpers)){
@@ -39,7 +39,7 @@ function Get-LauncherRouterSelection([string]$packageDir, [string]$routeMode = '
         if (-not $state -or -not $state.active) {
             $routeFile = Get-LauncherDataPath $packageDir 'route-state.json'
             if (Test-Path -LiteralPath $routeFile) {
-                $route = [IO.File]::ReadAllText($routeFile) | ConvertFrom-Json
+                $route = (Read-LauncherText $routeFile) | ConvertFrom-Json
                 if ($route.entryMode -eq 'apionly') { $entryMode = 'apionly' }
             }
         }
@@ -65,7 +65,7 @@ function Ensure-LocalRouter([string]$packageDir, [string]$routeMode = '', [strin
     $url='http://127.0.0.1:'+ $port +'/healthz'
     $sha=[Security.Cryptography.SHA256]::Create()
     try{$sourceId=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($baseUrl+"`n"+$key)))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
-    $buildId=Get-RouterBuildId $packageDir
+    $buildId=if ($PrepareOnly) { '' } else { Get-RouterBuildId $packageDir }
     $lock=$null
     try{
         for($n=0;$n -lt 100 -and -not $lock;$n++){
@@ -73,7 +73,7 @@ function Ensure-LocalRouter([string]$packageDir, [string]$routeMode = '', [strin
         }
         if(-not $lock){throw 'Another local router startup is still running.'}
         $health=$null
-        try{$health=Invoke-RestMethod -Uri $url -TimeoutSec 1}catch{}
+        if (-not $PrepareOnly) { try{$health=Invoke-RestMethod -Uri $url -TimeoutSec 1}catch{} }
         if($health){
             $healthEntry = if ($health.entryMode) { $health.entryMode } else { 'api' }
             if($health.service -eq 'chatgpt-api-router' -and $health.sourceId -eq $sourceId -and ($health.buildId -eq $buildId -or (Test-LegacyRouter $packageDir $health)) -and $health.mode -eq $mode -and $healthEntry -eq $entryMode){return $health}
@@ -102,11 +102,16 @@ function Ensure-LocalRouter([string]$packageDir, [string]$routeMode = '', [strin
             }
             if(-not $connected){throw 'SSH tunnel was not ready.'}
         }
-        Write-Utf8File (Get-LauncherDataPath $packageDir 'route-state.json') (@{version=2;mode=$mode;entryMode=$entryMode;nativeAccount=$nativeAccount;gatewayTransport=$transport;officialProxy=(Get-ExistingOfficialProxy);clientVersion=$clientVersion}|ConvertTo-Json -Compress)
+        $routeState = @{version=2;mode=$mode;entryMode=$entryMode;nativeAccount=$nativeAccount;gatewayTransport=$transport;officialProxy=(Get-ExistingOfficialProxy);clientVersion=$clientVersion}
+        Write-Utf8File (Get-LauncherDataPath $packageDir 'route-state.json') ($routeState|ConvertTo-Json -Compress)
         $node=Join-Path $packageDir 'runtime\node.exe';$script=Join-Path $packageDir 'src\shim.mjs'
-        $text=& $node $script --prepare 2> (Join-Path $logDir 'prepare-stderr.log')
-        if($LASTEXITCODE -ne 0){throw ('Model refresh failed: '+[IO.File]::ReadAllText((Join-Path $logDir 'prepare-stderr.log')))}
+        $text=& $node $script --prepare --cached 2> (Join-Path $logDir 'prepare-stderr.log')
+        if($LASTEXITCODE -ne 0){throw ('Model refresh failed: '+(Read-LauncherText (Join-Path $logDir 'prepare-stderr.log')))}
         $prepared=($text -join '')|ConvertFrom-Json
+        if ($prepared.refreshOnStart) {
+            $routeState.refreshOnStart = $true
+            Write-Utf8File (Get-LauncherDataPath $packageDir 'route-state.json') ($routeState|ConvertTo-Json -Compress)
+        }
         if ($PrepareOnly) { return $prepared }
         $p=Start-Process -FilePath $node -ArgumentList @('"'+$script+'"') -WorkingDirectory (Split-Path -Parent $script) -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $logDir 'shim-stdout.log') -RedirectStandardError (Join-Path $logDir 'shim-stderr.log')
         Add-RouterHelper $packageDir $p $script

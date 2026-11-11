@@ -54,6 +54,7 @@ async function turn(ws, body) { const result = events(ws); ws.send(JSON.stringif
 try {
   const makeHttp = kind => http.createServer(async (req, res) => {
     try {
+      if (kind === 'gateway') res.setHeader('x-bifrost-request-id', 'fixture-request');
       if (req.url.includes('/models')) { res.end(JSON.stringify(kind === 'official' ? { models: [model] } : { data: [{ id: 'GPT/gpt-6-sol' }, { id: 'Other/test-model' }, { id: '阿里云订阅/config-fixture' }] })); return; }
       const chunks = []; for await (const chunk of req) chunks.push(chunk);
       const raw = Buffer.concat(chunks), encoding = req.headers['content-encoding'];
@@ -138,6 +139,10 @@ try {
   assert.equal(records.at(-1).headers[nativeProtocol], undefined);
   assert.equal(records.at(-1).headers[forwardedProtocol], undefined);
   checks.push('Native Responses protocol identity survives a Bifrost header boundary over HTTP/SSE/WS without changing tools or messages; ordinary, official and non-GPT requests do not acquire that identity');
+  await (await fetch(base + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer chatgpt-api-local' },
+    body: JSON.stringify({ model: 'gpt-6-sol', input: [] }) })).arrayBuffer();
+  assert.equal(records.at(-1).headers.authorization, 'Bearer mock-official');
+  checks.push('A local bridge credential never becomes official OAuth; legacy requests use the saved native identity');
   {
     const updated = { model: '阿里云订阅/config-fixture', reasoning: { effort: 'low' }, text: { format: { type: 'text' } }, input: [
       { role: 'user', content: 'Original task' },

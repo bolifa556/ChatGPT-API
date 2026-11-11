@@ -1,4 +1,4 @@
-﻿param([switch]$Immediate, [string]$Session = '', [int]$ControllerPid = 0)
+﻿param([switch]$Immediate, [string]$Session = '', [int]$ControllerPid = 0, [switch]$StopOrphanedClient)
 $ErrorActionPreference = 'Stop'
 $packageDir = Split-Path -Parent $PSScriptRoot
 . (Join-Path $packageDir 'src\Common.ps1')
@@ -9,13 +9,13 @@ $file = Get-RecoveryPath $packageDir
 $lock = $null
 try {
     if (-not (Test-Path -LiteralPath $file)) { exit 0 }
-    $state = [IO.File]::ReadAllText($file) | ConvertFrom-Json
+    $state = (Read-LauncherText $file) | ConvertFrom-Json
     if ($Session -and $state.sessionId -ne $Session) { exit 0 }
     $sameBoot = -not $state.boot -or ([string]$state.boot -eq (Get-RecoveryBoot))
     # Login recovery runs once and only recorded process identities can defer it.
     if ($sameBoot -and (Test-RecordedProcess $state.client)) {
-        if ($Immediate) { throw '本次启动的 ChatGPT 仍在运行，尚不能恢复配置。' }
-        exit 0
+        if ($StopOrphanedClient -and -not (Test-RecordedProcess $state.controller)) { Stop-LauncherRecoveryClient $state.client }
+        else { if ($Immediate) { throw '本次启动的 ChatGPT 仍在运行，尚不能恢复配置。' }; exit 0 }
     }
     if (-not $Immediate -and $sameBoot -and ((Test-RecordedProcess $state.owner) -or (Test-RecordedProcess $state.controller))) { exit 0 }
     for ($n=0; $n -lt 100 -and -not $lock; $n++) {
@@ -29,7 +29,7 @@ try {
     }
     if (-not $lock) { throw '配置恢复正等待启动准备完成，将在下次启动时继续。' }
     if (-not (Test-Path -LiteralPath $file)) { exit 0 }
-    $latest = [IO.File]::ReadAllText($file) | ConvertFrom-Json
+    $latest = (Read-LauncherText $file) | ConvertFrom-Json
     if ($latest.sessionId -ne $state.sessionId) { exit 0 }
     # Native CLI children can finish their final SQLite/preference writes just
     # after the desktop main exits. Retry this bounded cleanup only on failure.

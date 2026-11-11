@@ -96,7 +96,7 @@ try {
             Restore-LauncherConfig $fixture $config
             Unregister-LauncherRecovery $fixture $session
         } else {
-            $state.boot = 'previous-system-boot'
+            $state | Add-Member -NotePropertyName boot -NotePropertyValue 'previous-system-boot' -Force
             Write-LauncherFile (Get-RecoveryPath $fixture) ($state | ConvertTo-Json -Depth 5)
             $wscript = Join-Path $env:WINDIR 'System32\wscript.exe'
             $arguments = '//B //Nologo "' + (Join-Path $fixture 'src\Recover-ChatGPT.vbs') + '"'
@@ -165,7 +165,7 @@ foreach ($scenario in @('normal','crash','corrupt-config','new-boot')) {
         Restore-LauncherConfig $fixture $config; Unregister-LauncherRecovery $fixture $session
     } else {
         $state = [IO.File]::ReadAllText((Get-RecoveryPath $fixture)) | ConvertFrom-Json
-        if ($scenario -eq 'new-boot') { $state.boot = 'previous-system-boot' }
+        if ($scenario -eq 'new-boot') { $state | Add-Member -NotePropertyName boot -NotePropertyValue 'previous-system-boot' -Force }
         else { $state.owner = $null }
         Write-LauncherFile (Get-RecoveryPath $fixture) ($state | ConvertTo-Json -Depth 5)
         if ($scenario -eq 'corrupt-config') { Write-Utf8File $config 'partially written'; Write-Utf8File ($config + '.chatgpt-api.tmp') 'interrupted temporary file' }
