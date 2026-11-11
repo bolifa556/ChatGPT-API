@@ -9,6 +9,6 @@
 | Linux ARM64 | [tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.3/ChatGPT-API-Provider-3.2.3-linux-arm64.tar.gz) |
 | macOS Apple Silicon | [DMG](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.3/ChatGPT-API-Provider-3.2.3-macos-arm64.dmg) |
 
-3.2.3 补充推荐客户端版本，完善启动、界面兼容、请求转发和配置恢复的异常记录。日常默认静默，错误日志限容并清理旧记录，不增加后台扫描或清理进程。Windows 已验证客户端版本为 26.1103.7773.0，建议更新到这个版本或更新的官方稳定版。macOS DMG 含三个聊天入口和控制台 App。
+3.2.3 改进启动失败时的提示，减少后台记录占用，补充推荐客户端版本。Windows 已验证客户端版本为 26.1103.7773.0，建议更新到这个版本或更新的官方稳定版。macOS DMG 含三个聊天入口和控制台 App。
 
 需要先安装官方客户端。发布包附带运行时和依赖，不含个人配置、Key、登录、聊天、缓存或日志，不附带独立 `.sha256` 文件。模型和上游未提供的能力不由适配层补造，依赖官方身份的功能沿用原生要求，详见主 [README](../README.md)。
