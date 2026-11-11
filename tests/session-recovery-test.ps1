@@ -64,6 +64,7 @@ await runNativeSession({
     [IO.File]::WriteAllText($ownerScript,($lines -join "`r`n"),(New-Object Text.UTF8Encoding($true)))
     $owner = Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$ownerScript+'"')) -WindowStyle Hidden -PassThru -RedirectStandardError (Join-Path $fixture 'owner-stderr.log')
     $records = @((Get-RecoveryProcess $owner.Id))
+    $nativeClient = $null
     try {
         $prepared = Join-Path $fixture 'prepared.json'
         for($n=0;$n -lt 300 -and -not (Test-Path -LiteralPath $prepared);$n++) { $owner.Refresh(); if ($owner.HasExited -and -not (Test-Path -LiteralPath $prepared)) { throw ('Fixture owner failed. ' + [IO.File]::ReadAllText((Join-Path $fixture 'owner-stderr.log'))) }; Start-Sleep -Milliseconds 100 }
@@ -72,13 +73,15 @@ await runNativeSession({
         $null = $owner.WaitForExit(5000)
         Assert ($owner.HasExited) 'Startup PowerShell remained resident.'
         $records = @((Get-RecoveryProcess $session.guardian),(Get-RecoveryProcess $session.controller),(Get-RecoveryProcess $session.client))
+        $nativeClient = Get-Process -Id $session.client -ErrorAction Stop
+        $null = $nativeClient.Handle
         Assert (-not (Test-Path -LiteralPath (Join-Path $fixture 'data\state\recovery-watcher.json'))) 'An extra recovery watcher was started.'
         if ($scenario -in @('launcher-crash','power-loss')) { Stop-Process -Id $session.guardian -Force }
         if ($scenario -in @('adapter-crash','power-loss')) { Stop-Process -Id $session.controller -Force }
         if ($scenario -in @('native-crash','power-loss')) { Stop-Process -Id $session.client -Force -ErrorAction SilentlyContinue }
         if ($scenario -in @('normal','launcher-crash','stalled-close')) { Write-Utf8File (Join-Path $fixture 'finish-client') 'exit' }
         if ($scenario -in @('normal','native-crash','stalled-close')) {
-            Wait-Process -Id $session.client -Timeout 5 -ErrorAction SilentlyContinue
+            Assert ($nativeClient.WaitForExit(5000)) ('Fixture client did not exit after ' + $scenario)
             Wait-ClosingLauncherSession $fixture
         }
         if ($scenario -eq 'power-loss') {
@@ -93,6 +96,7 @@ await runNativeSession({
         Assert (@(Get-ChildItem -LiteralPath (Join-Path $fixture 'home') -File).Count -eq 1) 'Native scratch files remained.'
         $checks += $scenario
     } finally {
+        if ($nativeClient) { $nativeClient.Dispose() }
         if (Test-Path -LiteralPath (Get-RecoveryPath $fixture)) {
             $pending = [IO.File]::ReadAllText((Get-RecoveryPath $fixture)) | ConvertFrom-Json
             $records += @($pending.controller,$pending.client)
