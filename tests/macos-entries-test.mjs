@@ -144,7 +144,7 @@ native.once('exit',(code)=>process.exit(code||0));
         assert.equal(state.clientVersion, nativeIdentity ? '0.162.0' : null);
         assert.equal(state.officialModels, scenario.expectedMode === 'mixed' ? 1 : 0);
         assert(config.includes('model_provider = "chatgpt_api_launcher"'));
-        assert.equal(JSON.parse(fs.readFileSync(history, 'utf8').split('\n')[0]).payload.model_provider, 'chatgpt_api_launcher');
+        assert.equal(fs.readFileSync(history, 'utf8'), originalHistory, 'Active entry preserves native archive bytes');
         const activeDb = new DatabaseSync(indexFile, { readOnly: true });
         assert.equal(activeDb.prepare('SELECT model_provider FROM threads').get().model_provider, 'chatgpt_api_launcher'); activeDb.close();
         if (scenario.entry === 'official') assert.match(config, /\[model_providers\.chatgpt_api_launcher\]\nname = "OpenAI"/);
