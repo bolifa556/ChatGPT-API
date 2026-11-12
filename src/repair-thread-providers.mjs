@@ -1,6 +1,6 @@
-// Temporary provider compatibility, owned by the launcher lifetime. Only native
-// routing metadata is overlaid; messages, tools, IDs and project data are opaque.
-// The recovery journal lives in the adapter, never in the native client's home.
+// The desktop lists threads from SQLite and checks the indexed provider when
+// resuming a thread. Normal launch and exit only overlay those routing rows.
+// Rollout recovery below is for sessions interrupted under the older launcher.
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { atomicPrivate } from './settings.mjs';
 import { createDiagnosticLog } from './diagnostics.mjs';
-import { RolloutIndex, rolloutBytes } from './rollout-index.mjs';
+import { RolloutIndex, removeRolloutScratch, rolloutBytes } from './rollout-index.mjs';
 
 const journalPath = root => path.join(root, 'data/state/thread-provider-compatibility.json');
 const canonicalHome = home => fs.realpathSync(home);
@@ -93,7 +93,7 @@ function openDatabase(file, readOnly) {
   return null;
 }
 function skipDatabase(failed, home, file, error) {
-  if (!['ERR_SQLITE_ERROR', 'ENOENT', 'EACCES', 'EPERM'].includes(error.code)) throw error;
+  if (!['ERR_SQLITE_ERROR', 'ENOENT', 'EACCES', 'EPERM', 'EBUSY'].includes(error.code)) throw error;
   failed.push({ file: path.relative(home, file), code: error.code, message: error.message });
 }
 async function* lines(file) {
@@ -157,7 +157,11 @@ function replaceProvider(bytes, meta, provider) {
   return Buffer.from(meta.text.slice(0, meta.range[0]) + JSON.stringify(provider) + meta.text.slice(meta.range[1]));
 }
 function validateJournal(state, home) {
-  if (state.version !== 1 || state.home !== home || !Array.isArray(state.threads) || !Array.isArray(state.databases)) throw new Error('Conversation compatibility recovery belongs to another client home.');
+  if (![1, 2].includes(state.version) || state.home !== home || !Array.isArray(state.databases)
+    || (state.version === 1 ? !Array.isArray(state.threads) : !Array.isArray(state.existingDatabases))) {
+    throw new Error('Conversation compatibility recovery belongs to another client home.');
+  }
+  if (state.version === 2) return;
   for (const thread of state.threads) {
     if (typeof thread.id !== 'string' || !inside(home, path.resolve(home, thread.relative))) throw new Error('Invalid conversation compatibility path.');
   }
@@ -168,7 +172,7 @@ function recordedProvider(state, id) {
     .filter(row => row.id === id && typeof row.model_provider === 'string' && row.model_provider)
     .map(row => row.model_provider));
   if (indexed.size) return indexed.size === 1 ? [...indexed][0] : undefined;
-  const providers = new Set(state.threads.filter(thread => thread.id === id).map(thread => thread.originalProvider));
+  const providers = new Set((state.threads || []).filter(thread => thread.id === id).map(thread => thread.originalProvider));
   return providers.size === 1 ? [...providers][0] : undefined;
 }
 function originalThread(state, file, meta) {
@@ -204,13 +208,38 @@ function logSkipped(root, phase, failed) {
   }));
 }
 
-export async function restoreThreadProviders({ home, root }) {
-  const journal = journalPath(root);
-  if (!fs.existsSync(journal)) return { restored: 0 };
-  home = canonicalHome(home);
-  const state = JSON.parse(fs.readFileSync(journal, 'utf8')); validateJournal(state, home);
+function restoreDatabaseProviders(state, ids, failed) {
+  const { home, provider } = state;
+  const recorded = new Map(state.databases.map(item => [item.file, item.rows]));
+  const discovered = databases(home).filter(file => !state.existingDatabases?.includes(file));
+  for (const file of new Set([...recorded.keys(), ...discovered])) {
+    if (!fs.existsSync(file)) continue;
+    let db;
+    try { db = openDatabase(file, false); }
+    catch (error) {
+      if (recorded.has(file)) throw error;
+      skipDatabase(failed, home, file, error);
+      continue;
+    }
+    if (!db) continue;
+    try {
+      const original = new Map((recorded.get(file) || []).map(row => [row.id, row.model_provider]));
+      const changes = db.prepare('SELECT id FROM threads WHERE model_provider = ?').all(provider)
+        .filter(row => ids.has(row.id)).map(({ id }) => [id, original.has(id) ? original.get(id) : recordedProvider(state, id)])
+        .filter(([, value]) => value !== undefined && value !== provider);
+      if (!changes.length) continue;
+      db.exec('BEGIN IMMEDIATE');
+      const update = db.prepare('UPDATE threads SET model_provider = ? WHERE id = ? AND model_provider = ?');
+      for (const [id, value] of changes) update.run(value, id, provider);
+      db.exec('COMMIT');
+    } finally { db.close(); }
+  }
+}
+
+async function restoreLegacyRollouts(state, root, journal, failed) {
+  const { home } = state;
   const index = new RolloutIndex(home, root, metadata, lines);
-  const jobs = [], failed = [];
+  const jobs = [];
   const files = rolloutFiles(home);
   index.undo(state.undo, files);
   // Keep the durable undo until the entire restore commits. In-place metadata
@@ -230,10 +259,12 @@ export async function restoreThreadProviders({ home, root }) {
       const previous = saved.get(record.key)?.[ordinal] ?? thread.originalProvider;
       return record.provider === state.provider ? previous : record.provider;
     });
-    const temporary = file + '.chatgpt-api-compat.tmp';
-    // Remove a scratch file from an interrupted preparation before retrying.
-    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+    removeRolloutScratch(file + '.chatgpt-api-compat.tmp');
     if (entry.records.every((record, position) => record.provider === goals[position])) continue;
+    // An old preparation file may still be held open. Restore through a
+    // separate sibling, leaving the original archive available until rename.
+    const temporary = file + '.chatgpt-api-restore.tmp';
+    removeRolloutScratch(temporary);
     jobs.push({ file, temporary, goal: (_record, position) => goals[position], transform: (bytes, meta) => {
       if (!meta?.provider) return bytes;
       const previous = saved.get(meta.key)?.shift() ?? thread.originalProvider;
@@ -244,116 +275,80 @@ export async function restoreThreadProviders({ home, root }) {
   // Recovery bytes become durable before touching an existing compressed slot.
   atomicPrivate(journal, state, { durable: true });
   await rewriteJobs(index, jobs);
-  const recordedDatabases = new Map(state.databases.map(item => [item.file, item.rows]));
-  const databaseFiles = new Set([...recordedDatabases.keys(), ...databases(home)]);
-  for (const file of databaseFiles) {
-    if (!fs.existsSync(file)) continue;
-    let db;
-    try { db = openDatabase(file, false); }
-    catch (error) {
-      // Native upgrades may leave retired indexes next to the active one. A
-      // journaled index can contain our writes and still needs recovery.
-      if (recordedDatabases.has(file)) throw error;
-      skipDatabase(failed, home, file, error);
-      continue;
-    }
-    if (!db) continue;
-    try {
-      db.exec('BEGIN IMMEDIATE');
-      const original = new Map((recordedDatabases.get(file) || []).map(row => [row.id, row.model_provider]));
-      const update = db.prepare('UPDATE threads SET model_provider = ? WHERE id = ? AND model_provider = ?');
-      for (const id of new Set(state.threads.map(thread => thread.id))) {
-        const provider = original.has(id) ? original.get(id) : recordedProvider(state, id);
-        if (provider !== undefined) update.run(provider, id, state.provider);
-      }
-      db.exec('COMMIT');
-    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
-    finally { db.close(); }
-  }
   for (const thread of state.threads) {
     const plain = plainRollout(path.resolve(home, thread.relative));
     for (const file of [plain, plain + '.zst']) {
-      const scratch = file + '.chatgpt-api-compat.tmp';
-      if (fs.existsSync(scratch)) fs.unlinkSync(scratch);
+      removeRolloutScratch(file + '.chatgpt-api-compat.tmp');
     }
   }
   index.save();
+}
+
+export async function restoreThreadProviders({ home, root }) {
+  const journal = journalPath(root);
+  if (!fs.existsSync(journal)) return { restored: 0 };
+  home = canonicalHome(home);
+  const state = JSON.parse(fs.readFileSync(journal, 'utf8')); validateJournal(state, home);
+  const failed = [];
+  if (state.version === 1) await restoreLegacyRollouts(state, root, journal, failed);
+  const ids = new Set(state.version === 1 ? state.threads.map(thread => thread.id)
+    : state.databases.flatMap(database => database.rows.map(row => row.id)));
+  restoreDatabaseProviders(state, ids, failed);
   fs.unlinkSync(journal);
   logSkipped(root, 'restore', failed);
-  return { restored: state.threads.length, failed };
+  return { restored: ids.size, failed };
 }
 export async function repairThreadProviders({ home, root, provider = 'chatgpt_api_launcher', dryRun = false }) {
   home = canonicalHome(home);
   if (!root) throw new Error('The adapter root is required for temporary conversation compatibility.');
   const journal = journalPath(root);
   if (fs.existsSync(journal)) throw new Error('Restore the previous conversation compatibility session before starting another.');
-  const index = new RolloutIndex(home, root, metadata, lines);
-  let threads = [];
-  const failed = [];
-  for (const file of rolloutFiles(home)) {
-    const { id, originalProvider, records: indexed, compressionError } = await index.get(file);
-    if (compressionError) { failed.push({ file: path.relative(home, file), ...compressionError }); continue; }
-    const records = indexed.map(({ key, provider }) => ({ key, provider }));
-    if (typeof id === 'string' && id && records.length) {
-      threads.push({ id, relative: path.relative(home, file), originalProvider, records, differs: records.some(record => record.provider !== provider) });
-    }
-  }
-  const known = new Map(threads.map(thread => [thread.id, thread]));
-  const dbs = [];
-  for (const file of databases(home)) {
-    let db, rows;
+  const state = { version: 2, home, provider, existingDatabases: databases(home), databases: [] };
+  const failed = [], candidates = new Map();
+  for (const file of state.existingDatabases) {
+    let db, journaled = false;
     try {
-      db = openDatabase(file, true);
+      db = openDatabase(file, dryRun);
       if (!db) continue;
-      rows = db.prepare('SELECT id, model_provider FROM threads').all().filter(row => known.has(row.id));
-    } catch (error) { skipDatabase(failed, home, file, error); continue; }
-    finally { db?.close(); }
-    for (const row of rows) {
-      const thread = known.get(row.id);
-      thread.originalProvider = row.model_provider || thread.originalProvider;
-      thread.differs ||= row.model_provider !== provider;
-    }
-    if (rows.length) dbs.push({ file, rows });
-  }
-  threads = threads.filter(thread => thread.differs);
-  const selected = new Set(threads.map(thread => thread.id));
-  for (const db of dbs) db.rows = db.rows.filter(row => selected.has(row.id));
-  const result = { dryRun, provider, candidates: threads.map(({ id, originalProvider }) => ({ threadId: id, previousProvider: originalProvider })), repaired: [], failed };
-  if (dryRun) return result;
-  logSkipped(root, 'begin', failed);
-  if (!threads.length) { index.save(); return result; }
-  const state = { version: 1, home, provider, threads, databases: dbs };
-  try {
-    const jobs = threads.filter(thread => thread.records.some(record => record.provider !== provider)).map(thread => {
-      const file = path.resolve(home, thread.relative);
-      return { file, temporary: file + '.chatgpt-api-compat.tmp', goal: () => provider, transform: (bytes, meta) => meta?.provider ? replaceProvider(bytes, meta, provider) : bytes };
-    });
-    prepareSpans(index, jobs, state);
-    atomicPrivate(journal, state, { durable: true });
-    await rewriteJobs(index, jobs);
-    for (const { file, rows } of dbs) {
-      const db = openDatabase(file, false);
-      if (!db) continue;
-      try {
-        db.exec('BEGIN IMMEDIATE');
+      if (!dryRun) db.exec('BEGIN IMMEDIATE');
+      const rows = db.prepare('SELECT id, model_provider FROM threads WHERE model_provider IS NOT ?').all(provider)
+        .filter(row => typeof row.id === 'string' && row.id);
+      if (!rows.length) continue;
+      const database = { file, rows };
+      if (!dryRun) {
+        atomicPrivate(journal, { ...state, databases: [...state.databases, database] }, { durable: true });
+        journaled = true;
         const update = db.prepare('UPDATE threads SET model_provider = ? WHERE id = ? AND model_provider IS ?');
         for (const row of rows) update.run(provider, row.id, row.model_provider);
         db.exec('COMMIT');
-      } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
-      finally { db.close(); }
+        state.databases.push(database);
+      }
+      for (const row of rows) candidates.set(row.id, { threadId: row.id, previousProvider: row.model_provider });
+    } catch (error) {
+      if (journaled) {
+        // Drop this snapshot only after SQLite confirms that its writes were
+        // rolled back. A crash before then is recoverable from the journal.
+        db.exec('ROLLBACK');
+        if (state.databases.length) atomicPrivate(journal, state, { durable: true });
+        else fs.unlinkSync(journal);
+      }
+      skipDatabase(failed, home, file, error);
+    } finally {
+      db?.close();
     }
-    index.save();
-    result.repaired = result.candidates;
-    return result;
-  } catch (error) {
-    await restoreThreadProviders({ home, root });
-    throw error;
   }
+  if (!dryRun) logSkipped(root, 'begin', failed);
+  const affected = [...candidates.values()];
+  return { dryRun, provider, candidates: affected, repaired: dryRun ? [] : affected, failed };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  const [command, home, root] = process.argv.slice(2);
+  const [command, home, root, flags] = process.argv.slice(2);
   try {
+    if (command === 'begin' && flags === '--desktop') {
+      const { overlayDesktopState } = await import('./desktop-state.mjs');
+      overlayDesktopState({ home, root });
+    }
     const result = command === 'restore' ? await restoreThreadProviders({ home, root })
       : command === 'begin' ? await repairThreadProviders({ home, root }) : (() => { throw new Error('Expected begin/restore, CODEX_HOME and adapter root.'); })();
     console.log(JSON.stringify(command === 'begin' ? { repaired: result.repaired.length, skipped: result.failed.length } : result));

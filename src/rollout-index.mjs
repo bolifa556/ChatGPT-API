@@ -24,6 +24,13 @@ function invalidFrame(message) {
   return Object.assign(new Error(message), { code: 'invalid_rollout_compression' });
 }
 
+export function removeRolloutScratch(file) {
+  try { fs.unlinkSync(file); }
+  catch (error) {
+    if (!['ENOENT', 'EBUSY', 'EPERM', 'EACCES'].includes(error.code)) throw error;
+  }
+}
+
 export async function* rolloutBytes(file) {
   if (!file.endsWith('.jsonl.zst')) { yield* fs.createReadStream(file); return; }
   const fd = fs.openSync(file, 'r'), header = Buffer.alloc(8);
@@ -247,6 +254,9 @@ export class RolloutIndex {
       } finally { fs.closeSync(fd); }
     }
     const output = fs.createWriteStream(temporary, { flags: 'wx', mode: before.mode & 0o777 });
+    let opened = false;
+    output.once('open', () => { opened = true; });
+    const closed = new Promise(resolve => output.once('close', resolve));
     try {
       await pipeline(compressed && !entry.framed ? framed() : ranges(), output);
       if (stamp(file) !== entry.token) throw new Error('A conversation changed while preparing compatibility; close its other client first.');
@@ -263,7 +273,11 @@ export class RolloutIndex {
           originalProvider: records.at(-1)?.provider || entry.originalProvider };
         this.dirty = true;
       }
-    } finally { output.destroy(); if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
+    } finally {
+      output.destroy();
+      await closed;
+      if (opened) removeRolloutScratch(temporary);
+    }
   }
   save() {
     for (const key of Object.keys(this.entries)) if (!this.seen.has(key)) { delete this.entries[key]; this.dirty = true; }

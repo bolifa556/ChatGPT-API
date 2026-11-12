@@ -80,7 +80,20 @@ function Ensure-LocalRouter([string]$packageDir, [string]$routeMode = '', [strin
             throw 'The router on this port uses a different version or configuration. Fully exit ChatGPT and reopen chatgpt-api.'
         }
         $nativeAccount = $mode -eq 'mixed'
-        $clientVersion = if ($nativeAccount) { Get-NativeClientVersion $nativeCli } else { '' }
+        $clientVersion = ''
+        if ($nativeAccount) {
+            $clientVersion = Get-NativeClientVersion $nativeCli -CacheOnly:$PrepareOnly
+            if ($PrepareOnly -and -not $clientVersion) {
+                $nativeCatalog = Join-Path (Get-CodexHome) 'models_cache.json'
+                $cachedModels = $null
+                if (Test-Path -LiteralPath $nativeCatalog -PathType Leaf) {
+                    try { $cachedModels = (Read-LauncherText $nativeCatalog | ConvertFrom-Json).models } catch {}
+                }
+                # The native client supplies its current protocol version on
+                # model requests. Probe the binary only if its catalog is needed.
+                if (-not $cachedModels) { $clientVersion = Get-NativeClientVersion $nativeCli }
+            }
+        }
         $logDir=Join-Path $packageDir 'data\logs';[void](New-Item -ItemType Directory -Path $logDir -Force)
         $transport=Get-GatewayTransport $settings['GATEWAY_TRANSPORT']
         if($transport -eq 'ssh' -and $entryMode -ne 'official'){

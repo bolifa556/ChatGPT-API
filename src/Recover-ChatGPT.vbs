@@ -5,7 +5,7 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 root = fso.GetParentFolderName(fso.GetParentFolderName(WScript.ScriptFullName))
 shell.CurrentDirectory = root
 If WScript.Arguments.Count = 5 Then
-    command = Chr(34) & fso.BuildPath(root, "runtime\node.exe") & Chr(34) & " --expose-gc " & Chr(34) & fso.BuildPath(root, "src\native-session.mjs") & Chr(34) & " " & Chr(34) & root & Chr(34)
+    command = Chr(34) & fso.BuildPath(root, "runtime\node.exe") & Chr(34) & " --expose-gc --optimize-for-size --max-semi-space-size=2 " & Chr(34) & fso.BuildPath(root, "src\native-session.mjs") & Chr(34) & " " & Chr(34) & root & Chr(34)
     For index = 0 To 4
         command = command & " " & Chr(34) & WScript.Arguments(index) & Chr(34)
     Next

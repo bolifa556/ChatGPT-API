@@ -1,4 +1,4 @@
-# ChatGPT API 3.2.3 — macOS
+# ChatGPT API 3.2.4 — macOS
 
 macOS 只发布 Apple Silicon 单文件 DMG，包含：
 

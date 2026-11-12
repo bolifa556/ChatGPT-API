@@ -67,7 +67,9 @@ export async function readEncodedBody(req) {
     if (size > MAX_REQUEST_BYTES) throw tooLarge();
     chunks.push(chunk);
   }
-  const raw = Buffer.concat(chunks), encoding = encodingOf(req.headers['content-encoding']);
+  const raw = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, size);
+  chunks.length = 0;
+  const encoding = encodingOf(req.headers['content-encoding']);
   if (!encoding || encoding === 'identity' || !raw.length) return { raw, decoded: raw, encoding };
   const codec = codecs[encoding]?.[0];
   if (!codec) throw Object.assign(new Error('Unsupported request content encoding.'), { status: 415, code: 'unsupported_content_encoding' });

@@ -176,7 +176,7 @@ function Get-NativeDesktopApp {
         cli = Join-Path $resources 'codex.exe'
     }
 }
-function Get-NativeClientVersion([string]$cliPath = '', [string]$cacheFile = $script:NativeVersionCachePath) {
+function Get-NativeClientVersion([string]$cliPath = '', [string]$cacheFile = $script:NativeVersionCachePath, [switch]$CacheOnly) {
     $temporaryCli = $null
     try {
         if (-not $cliPath) { $cliPath = (Get-NativeDesktopApp).cli }
@@ -191,6 +191,7 @@ function Get-NativeClientVersion([string]$cliPath = '', [string]$cacheFile = $sc
                     $saved.modified -eq $source.LastWriteTimeUtc.Ticks.ToString() -and $saved.version -match '^\d+\.\d+\.\d+$') { return [string]$saved.version }
             } catch {}
         }
+        if ($CacheOnly) { return '' }
         $cache = Split-Path -Parent $cacheFile
         [void][IO.Directory]::CreateDirectory($cache)
         $temporaryCli = Join-Path $cache ('native-version-' + [Guid]::NewGuid().ToString('N') + '.exe')

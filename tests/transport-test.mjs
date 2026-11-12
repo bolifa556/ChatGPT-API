@@ -236,6 +236,19 @@ try {
   }
   checks.push('History storage shares prefixes, retains active lanes, remains bounded and never fabricates missing history');
   {
+    const cache = new HistoryCache();
+    const original = { type: 'message', role: 'user', content: [{ type: 'input_text', text: '代码、工具和对话。'.repeat(48000) }], optional: undefined };
+    assert(cache.set('large', { input: [original], defaults: {}, lane: 'main', complete: true }));
+    const stored = cache.entries.get('large').input[0];
+    assert(stored.packed.length < 10000, 'Compressible history retained a full-size resident item');
+    stored.current = null;
+    const restored = cache.get('large').input[0];
+    assert.deepEqual(restored, original);
+    assert(cache.set('continued', { input: [restored, { role: 'user', content: '继续' }], defaults: {}, lane: 'main', complete: true }));
+    assert.equal(cache.entries.get('continued').input[0], stored, 'Continuing a large dialogue created another copy of its prefix');
+  }
+  checks.push('Large history items are compressed in memory and materialize without losing text, shape or shared prefixes');
+  {
     const proxy = http.createServer();
     proxy.on('connect', (_req, socket) => { socket.on('error', () => {}); socket.write('HTTP/1.1 200 Connection Established\r\n\r\n'); });
     const proxyPort = await listen(proxy), agent = officialDispatcherFor('http://127.0.0.1:' + proxyPort, 100);

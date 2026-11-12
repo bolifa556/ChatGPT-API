@@ -71,11 +71,18 @@ export class NonGptAdapter {
     }
     return value;
   }
-  request() {
-    validateNonGptCompaction(this.original);
-    const data = structuredClone(this.original), carriers = [], removedIds = new Set(), renames = new Map();
+  request({ releaseOriginal = false } = {}) {
+    const original = this.original;
+    if (releaseOriginal) this.original = null;
+    validateNonGptCompaction(original);
+    const data = releaseOriginal ? { ...original } : structuredClone(original);
+    const carriers = [], removedIds = new Set(), renames = new Map();
     if (Array.isArray(data.input)) {
-      data.input = data.input.flatMap(item => {
+      data.input = data.input.flatMap(value => {
+        // These translations edit the item envelope. Keep its message text,
+        // attachment data and unchanged nested values shared until encoding.
+        let item = value;
+        if (releaseOriginal && item && typeof item === 'object') item = Array.isArray(item) ? [...item] : { ...item };
         if (item?.type === 'configuration_update') {
           // Native GPT keeps these controls in history for prompt caching.
           // Other protocols express the effective settings on the request.
@@ -92,7 +99,7 @@ export class NonGptAdapter {
         } else if (item?.type === 'additional_tools') {
           carriers.push(...(item.tools || [])); this.stats.carriersRemoved++;
         } else if (item?.type === 'reasoning') {
-          if (this.preserveReasoning && this.original.model && item.id?.startsWith(this.reasoningPrefix)) {
+          if (this.preserveReasoning && original.model && item.id?.startsWith(this.reasoningPrefix)) {
             item.summary ??= [];
             this.stats.reasoningPreserved++;
             return [item];
@@ -111,7 +118,10 @@ export class NonGptAdapter {
       data.input = data.input.filter(x => !(x?.type === 'item_reference' && removedIds.has(x.id)));
     }
     if (carriers.length || data.tools) data.tools = this.tools(mergeTools([...carriers, ...(data.tools || [])]));
-    if (data.reasoning) delete data.reasoning.context;
+    if (data.reasoning && Object.hasOwn(data.reasoning, 'context')) {
+      data.reasoning = { ...data.reasoning };
+      delete data.reasoning.context;
+    }
     const references = new Set((Array.isArray(data.input) ? data.input : []).filter(item => item?.type === 'item_reference').map(item => item.id));
     for (const item of Array.isArray(data.input) ? data.input : []) {
       if (!item || typeof item !== 'object') continue;

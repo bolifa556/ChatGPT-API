@@ -74,8 +74,11 @@ try {
     function Get-FileHash { throw 'Version discovery must not depend on Get-FileHash.' }
     Assert (-not (Get-NativeClientVersion $fixtureCli $versionCache)) 'Missing native CLI must not invent a fixed version.'
     Add-Type -TypeDefinition 'public static class FixtureNativeVersion { public static void Main() { System.Console.WriteLine("codex-cli 0.999.0-alpha.1"); } }' -OutputAssembly $fixtureCli -OutputType ConsoleApplication
+    Assert (-not (Get-NativeClientVersion $fixtureCli $versionCache -CacheOnly)) 'A cold cache-only launch probed the native executable.'
+    Assert (-not (Test-Path -LiteralPath $versionCache)) 'A cache-only launch performed version discovery.'
     Assert ((Get-NativeClientVersion $fixtureCli $versionCache) -eq '0.999.0') 'A new client without a relocated CLI cache could not supply its actual version.'
     $savedAt = (Get-Item -LiteralPath $versionCache).LastWriteTimeUtc
+    Assert ((Get-NativeClientVersion $fixtureCli $versionCache -CacheOnly) -eq '0.999.0') 'A cache-only launch ignored a matching binary version.'
     Assert ((Get-NativeClientVersion $fixtureCli $versionCache) -eq '0.999.0') 'The installed binary version was not cached.'
     Assert ((Get-Item -LiteralPath $versionCache).LastWriteTimeUtc -eq $savedAt) 'An unchanged client needlessly rewrote its version cache.'
     Write-Utf8File $fixtureCli 'changed-client-without-version'

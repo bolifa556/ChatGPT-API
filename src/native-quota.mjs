@@ -14,9 +14,10 @@ import { atomicPrivate } from './settings.mjs';
 import { errorDetails, describeError } from './diagnostics.mjs';
 
 const quotaGuard = /(?<![\w$])([A-Za-z_$][\w$]*)="local"===([A-Za-z_$][\w$]*)&&([A-Za-z_$][\w$]*)\|\|\(0,([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)/g;
-const quotaAssetRevision = 3;
+const quotaAssetRevision = 4;
 const escaped = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function scopeComposerSubmission(source, key) {
+  if (!source.includes('activeCollaborationMode:') && !source.includes('n("eLmE")')) return { text: source, count: 0, legacyCount: 0 };
   const identifier = '[A-Za-z_$][\\w$]*';
   const variable = '(?<![\\w$])';
   const hardReads = new RegExp(variable + '(' + identifier + ')=\\(0,' + identifier + '\\.(' + identifier + ')\\)\\((' + identifier + ')\\.(' + identifier + '),(' + identifier + ')\\)', 'g');
@@ -95,23 +96,26 @@ export function scopeNativeQuota(source, key) {
   const submission = scopeComposerSubmission(text, key);
   return { text: submission.text, count: quotaCount + fastCount + submission.count, quotaCount, fastCount, submitCount: submission.count, legacySubmitCount: submission.legacyCount };
 }
-export function nativeQuotaAssets(archive, cacheFile = '') {
+function readAsset(fd, entry, buffer = Buffer.allocUnsafe(entry.size)) {
+  const bytes = buffer.subarray(0, entry.size);
+  if (fs.readSync(fd, bytes, 0, bytes.length, entry.offset) !== bytes.length) throw new Error('Incomplete native asset.');
+  return bytes;
+}
+
+function readAssetSources(fd, entries) {
+  return entries.map(entry => ({ ...entry, source: readAsset(fd, entry).toString() }));
+}
+
+export function nativeQuotaAssets(archive, cacheFile = '', includeSource = true) {
   const fd = fs.openSync(archive, 'r');
   try {
     const stat = fs.fstatSync(fd), identity = [path.resolve(archive), stat.size, stat.mtimeMs].join('|');
-    const read = entry => {
-      const buffer = Buffer.alloc(entry.size); fs.readSync(fd, buffer, 0, buffer.length, entry.offset);
-      const source = buffer.toString(), adapted = scopeNativeQuota(source, 'quota_probe');
-      if (!adapted.count && !adapted.legacySubmitCount) return null;
-      return { url: entry.url, source, count: adapted.count, submitCount: adapted.submitCount,
-        legacySubmitCount: adapted.legacySubmitCount, supportedFormat: source.includes('export const __webpack_modules__=') };
-    };
+    const result = entries => includeSource ? readAssetSources(fd, entries) : entries;
     if (cacheFile) {
       try {
         const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
         if (cached.revision === quotaAssetRevision && cached.identity === identity && cached.entries?.length) {
-          const assets = cached.entries.map(read);
-          if (assets.every(Boolean)) return assets;
+          return result(cached.entries);
         }
       } catch {}
     }
@@ -119,21 +123,32 @@ export function nativeQuotaAssets(archive, cacheFile = '') {
     const length = prefix.readUInt32LE(12);
     if (length > 32 * 1024 * 1024) throw new Error('Native asset index is too large.');
     const bytes = Buffer.alloc(length); fs.readSync(fd, bytes, 0, length, 16);
-    const tree = JSON.parse(bytes), base = 8 + prefix.readUInt32LE(4), assets = [], entries = [];
+    const tree = JSON.parse(bytes), base = 8 + prefix.readUInt32LE(4), entries = [];
+    let scratch = Buffer.alloc(0);
     function scan(directory, parent = '') {
       for (const [name, entry] of Object.entries(directory.files || {})) {
         const file = parent + name;
         if (entry.files) { if ('webview'.startsWith(file) || file.startsWith('webview/')) scan(entry, file + '/'); continue; }
         if (entry.unpacked || !file.startsWith('webview/assets/') || !file.endsWith('.js')) continue;
         const location = { url: 'app://-/' + file.slice('webview/'.length), offset: base + Number(entry.offset), size: Number(entry.size) };
-        const asset = read(location);
-        if (asset) { assets.push(asset); entries.push(location); }
+        if (location.size > scratch.length) scratch = Buffer.allocUnsafe(location.size);
+        const contents = readAsset(fd, location, scratch);
+        const quota = contents.includes('sendBlocked:') && contents.includes('rateLimitWarningThreshold:');
+        const fast = contents.includes('serviceTierAccess:') && contents.includes('authMethod==="amazonBedrock"');
+        const composer = (contents.includes('submitDisabledReasons:') || contents.includes('submitDisabled:'))
+          && (contents.includes('"reserve-limit"') || contents.includes('n("eLmE")'));
+        if (!quota && !fast && !composer) continue;
+        const source = contents.toString(), adapted = scopeNativeQuota(source, 'quota_probe');
+        if (adapted.count || adapted.legacySubmitCount) {
+          entries.push({ ...location, count: adapted.count, submitCount: adapted.submitCount,
+            legacySubmitCount: adapted.legacySubmitCount, supportedFormat: source.includes('export const __webpack_modules__=') });
+        }
       }
     }
     scan(tree);
-    if (!assets.length) throw Object.assign(new Error('当前客户端的 API 界面兼容检查未通过，请更新官方客户端和适配层。'), { code: 'native_ui_unsupported' });
+    if (!entries.length) throw Object.assign(new Error('当前客户端的 API 界面兼容检查未通过，请更新官方客户端和适配层。'), { code: 'native_ui_unsupported' });
     if (cacheFile) atomicPrivate(cacheFile, { revision: quotaAssetRevision, identity, entries });
-    return assets;
+    return result(entries);
   } finally { fs.closeSync(fd); }
 }
 export function gatewayQuotaModels(catalog, mode = 'mixed') {
@@ -254,7 +269,7 @@ function showQuotaWarning() {
   next();
 }
 
-async function installQuota({ child, port, models, cache, assets, timeoutMs, status, report }) {
+async function installQuota({ child, port, models, cache, archive, assets, timeoutMs, status, report }) {
   const disconnected = new AbortController(), { signal } = disconnected;
   const clientExited = () => disconnected.abort(new Error('Native application exited.'));
   child.once('exit', clientExited);
@@ -327,12 +342,21 @@ async function installQuota({ child, port, models, cache, assets, timeoutMs, sta
       // Register in the renderer's document context. A debugger evaluation
       // made during startup can leave the app:// module imports pending.
       pipe.send('Runtime.addBinding', { name: binding }, id)
-        .then(() => pipe.send('Page.addScriptToEvaluateOnNewDocument', { source: quotaBootstrap(assets, ids, key, binding), runImmediately: true }, id))
+        .then(() => {
+          // The running adapter keeps only asset offsets. Read the sources for
+          // this document, then let the CDP write release its temporary script.
+          const fd = fs.openSync(archive, 'r');
+          let source;
+          try { source = quotaBootstrap(readAssetSources(fd, assets), ids, key, binding); }
+          finally { fs.closeSync(fd); }
+          return pipe.send('Page.addScriptToEvaluateOnNewDocument', { source, runImmediately: true }, id);
+        })
         .catch(error => failed(error, id));
     });
     const attached = pipe.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
     await Promise.race([Promise.all([attached, ready]), ended]);
     clearTimeout(deadline);
+    if (typeof globalThis.gc === 'function') setImmediate(() => globalThis.gc());
     if (!status.ready) return;
     watcher = fs.watch(path.dirname(cache), (_type, name) => {
       if (name && String(name) !== path.basename(cache)) return;
@@ -385,7 +409,7 @@ export async function startQuotaCompatibleClient({ executable, archive, root, ho
   let assets, port, setupError;
   report();
   try {
-    const candidates = nativeQuotaAssets(archive, path.join(root, 'data/cache/native-ui-index.json'));
+    const candidates = nativeQuotaAssets(archive, path.join(root, 'data/cache/native-ui-index.json'), false);
     const hasGateway = models().length > 0;
     for (const asset of candidates) {
       if (!asset.supportedFormat) {
@@ -423,7 +447,7 @@ export async function startQuotaCompatibleClient({ executable, archive, root, ho
     report();
   } else {
     status.phase = 'connecting'; report();
-    void installQuota({ child, port, models, cache, assets, timeoutMs: startupTimeoutMs, status, report });
+    void installQuota({ child, port, models, cache, archive, assets, timeoutMs: startupTimeoutMs, status, report });
   }
   return child;
 }

@@ -1,6 +1,7 @@
 // Current native app-server + real router, isolated configuration and loopback
 // upstreams. No production chats, account credentials, or model calls are used.
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import http from 'node:http';
 import assert from 'node:assert/strict';
@@ -144,6 +145,7 @@ async function entry(entryMode, mode, seedProvider = null) {
     config = setRoot(config, 'model_provider', 'model_provider = ' + JSON.stringify(seedProvider) + '\n');
     fs.writeFileSync(ctx.config, config);
   } else {
+    const cold = new Map();
     if (process.env.NATIVE_BINDING_COMPRESSED === '1') {
       for (const directory of ['sessions', 'archived_sessions']) {
         const base = path.join(home, directory);
@@ -151,12 +153,16 @@ async function entry(entryMode, mode, seedProvider = null) {
         for (const relative of fs.readdirSync(base, { recursive: true })) {
           const file = path.join(base, relative);
           if (!file.endsWith('.jsonl') || !fs.lstatSync(file).isFile()) continue;
-          fs.writeFileSync(file + '.zst', zstdCompressSync(fs.readFileSync(file)));
+          const compressed = zstdCompressSync(fs.readFileSync(file));
+          fs.writeFileSync(file + '.zst', compressed);
+          cold.set(file + '.zst', crypto.createHash('sha256').update(compressed).digest('hex'));
           fs.unlinkSync(file);
         }
       }
     }
     await repairThreadProviders(ctx);
+    for (const [file, hash] of cold) assert.equal(crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'), hash,
+      'Preparing the provider modified a compressed archive before native startup');
   }
   await startClient();
 }
@@ -265,6 +271,8 @@ try {
   assert.equal(menus.at(-1).identity.authMethod, null);
   assert(menus.at(-1).models.every(model => gatewayModels.includes(model.model)));
   assert.equal(requests.length, beforeAuto, 'Automatic compatibility sent an inference request');
+  const sidebar = await rpc('thread/list', { limit: 100, modelProviders: null, useStateDbOnly: true });
+  assert(legacyThreads.every(old => sidebar.data.some(thread => thread.id === old.id)), 'The native sidebar omitted an indexed legacy thread');
   for (const old of legacyThreads) {
     const same = await rpc('thread/resume', { threadId: old.id, excludeTurns: true });
     assert.equal(same.thread.id, old.id); assert.equal(same.modelProvider, 'chatgpt_api_launcher');

@@ -105,23 +105,17 @@ try {
     $shimBase = 'http://127.0.0.1:' + $shimPort + '/v1'
     $launchPhase = '准备临时配置'
     $recoverySession = Register-LauncherRecovery $packageDir $configPath
-    if ($Mode -eq 'apionly' -or $authMode -eq 'gateway') {
-        & $nodePath (Join-Path $packageDir 'src\desktop-state.mjs') 'begin' (Get-CodexHome) $packageDir
-        if ($LASTEXITCODE -ne 0) { throw '桌面项目配置兼容准备失败。' }
-    }
     Apply-LauncherConfig $packageDir $configPath $authMode $shimBase $baseUrl $Mode
     $launchPhase = '兼容历史对话'
-    $repair = & $nodePath (Join-Path $packageDir 'src\repair-thread-providers.mjs') 'begin' (Get-CodexHome) $packageDir 2> (Join-Path $packageDir 'data\logs\provider-repair-stderr.log')
+    $compatOptions = if ($authMode -eq 'gateway') { @('--desktop') } else { @() }
+    $null = & $nodePath (Join-Path $packageDir 'src\repair-thread-providers.mjs') 'begin' (Get-CodexHome) $packageDir @compatOptions 2> (Join-Path $packageDir 'data\logs\provider-repair-stderr.log')
     if ($LASTEXITCODE -ne 0) { throw '对话兼容准备未完成，请查看 data\logs\provider-repair-stderr.log。' }
-    $sessionStartedAt = (Read-LauncherState $packageDir).startedAt
     if($Mode -ne 'official' -and -not $prepared.gateway.ready){
         $notice = if ($authMode -eq 'mixed') { '网关目前不可用。有效缓存中的网关模型请求可能失败；已登录的官方模型仍使用官方通道。' } else { '网关目前不可用。此入口只使用网关模型，请检查网关连接。' }
         Show-Message $notice
     }
     $launchPhase = '启动客户端'
     $sessionState = Join-Path $packageDir 'data\state\native-session.json'
-    $sessionLog = Join-Path $packageDir 'data\logs\native-session-stderr.log'
-    $sessionScript = Join-Path $packageDir 'src\native-session.mjs'
     $starting = @{session=$recoverySession;entryMode=$Mode;ready=$false;stopped=$false;phase='controller';startedAt=[DateTime]::UtcNow.ToString('o')}
     Write-LauncherFile $sessionState ($starting | ConvertTo-Json)
     $starting.phase = if ($Mode -eq 'official') { 'disabled' } else { 'waiting' }

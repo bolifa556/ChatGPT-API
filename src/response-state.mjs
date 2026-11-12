@@ -1,4 +1,6 @@
 import { MAX_REQUEST_BYTES } from './transport.mjs';
+import { serialize, deserialize } from 'node:v8';
+import { constants, zstdCompressSync, zstdDecompressSync } from 'node:zlib';
 
 export const DEFAULT_LANE = Symbol('implicit response lane');
 export const laneOf = event => event.stream_id ?? DEFAULT_LANE;
@@ -23,26 +25,66 @@ export class PendingResponses {
   }
 }
 
-// Connection-local references only. Shared history items count once; neither
-// serialized chat copies nor synthetic summaries are kept on disk.
+const PACK_HISTORY_BYTES = 256 * 1024;
+const fastZstd = { params: { [constants.ZSTD_c_compressionLevel]: 1 } };
+
+class PackedHistoryItem {
+  constructor(value, bytes, packed) {
+    this.current = new WeakRef(value);
+    this.bytes = bytes;
+    this.packed = packed;
+  }
+}
+
+// Connection-local references only. Shared items count once toward the logical
+// history limit. Large, compressible items occupy their packed size in memory.
 export class HistoryCache {
   constructor({ maxBytes = MAX_REQUEST_BYTES, maxEntries = 64, onDelete = () => {} } = {}) {
     this.maxBytes = maxBytes; this.maxEntries = maxEntries;
     this.entries = new Map(); this.refs = new Map(); this.sizes = new WeakMap();
+    this.packed = new WeakMap();
     this.latest = new Map(); this.bytes = 0;
     this.onDelete = onDelete;
   }
   get(id) {
     const entry = this.entries.get(id);
-    if (entry) { this.entries.delete(id); this.entries.set(id, entry); }
-    return entry;
+    if (!entry) return undefined;
+    this.entries.delete(id); this.entries.set(id, entry);
+    if (!entry.hasPackedInput) return entry;
+    return { ...entry, input: entry.input.map(item => {
+      if (!(item instanceof PackedHistoryItem)) return item;
+      let value = item.current?.deref();
+      if (!value) {
+        value = deserialize(zstdDecompressSync(item.packed));
+        item.current = new WeakRef(value);
+        this.packed.set(value, item);
+        this.sizes.set(value, item.bytes);
+      }
+      return value;
+    }) };
   }
   itemBytes(item) {
+    if (item instanceof PackedHistoryItem) return item.bytes;
     if (item && typeof item === 'object') {
       if (!this.sizes.has(item)) this.sizes.set(item, Buffer.byteLength(JSON.stringify(item)));
       return this.sizes.get(item);
     }
     return Buffer.byteLength(JSON.stringify(item) ?? 'null');
+  }
+  pack(item) {
+    if (!item || typeof item !== 'object') return item;
+    if (this.packed.has(item)) return this.packed.get(item);
+    const bytes = this.itemBytes(item);
+    if (bytes < PACK_HISTORY_BYTES) return item;
+    let reference = item;
+    try {
+      const raw = serialize(item), packed = zstdCompressSync(raw, fastZstd);
+      if (packed.length < raw.length * 0.8) reference = new PackedHistoryItem(item, bytes, packed);
+    } catch {
+      // The unchanged object remains usable if packing is unavailable.
+    }
+    this.packed.set(item, reference);
+    return reference;
   }
   delete(id) {
     const entry = this.entries.get(id);
@@ -61,13 +103,14 @@ export class HistoryCache {
     const unique = new Set(entry.input);
     const windowBytes = overhead + [...unique].reduce((sum, item) => sum + this.itemBytes(item), 0);
     if (windowBytes > this.maxBytes) return false;
-    for (const item of entry.input) {
+    const input = entry.input.map(item => this.pack(item));
+    for (const item of input) {
       let ref = this.refs.get(item);
       if (!ref) { ref = { count: 0, bytes: this.itemBytes(item) }; this.refs.set(item, ref); this.bytes += ref.bytes; }
       ref.count++;
     }
     this.bytes += overhead;
-    this.entries.set(id, { ...entry, bytes: windowBytes, overhead });
+    this.entries.set(id, { ...entry, input, hasPackedInput: input.some(item => item instanceof PackedHistoryItem), bytes: windowBytes, overhead });
     this.latest.set(entry.lane, id);
     while (this.entries.size > this.maxEntries || this.bytes > this.maxBytes) {
       const victim = [...this.entries].find(([key, value]) => this.latest.get(value.lane) !== key)?.[0]

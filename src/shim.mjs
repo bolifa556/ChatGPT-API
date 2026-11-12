@@ -107,6 +107,7 @@ function loadCatalog() {
   if (!catalog.official.length && saved.accountIdentity === accountIdentity() && saved.official?.length) {
     catalog.official = saved.official; catalog.officialAt = saved.officialAt;
   }
+  return { sourceId: saved.sourceId, configurationId: saved.configurationId, status: saved.status };
 }
 function saveCatalog() {
   atomic(cachePath, { ...catalog, sourceId, configurationId: sources.revision, accountIdentity: accountIdentity(), checkedAt: new Date().toISOString(), status });
@@ -171,15 +172,17 @@ function writeDesktopCatalog() {
   const template = catalog.official.find(m => m.slug === 'gpt-6-sol') || catalog.official[0] || fallback[0];
   if (!template || !levels?.supported_reasoning_levels?.length) throw new Error('Model template is missing');
   const officialIds = new Set(catalog.official.map(m => m.slug));
+  const gatewayById = new Map(catalog.gatewayModels.map(model => [model.id, model]));
+  const profiles = gatewayEnabled ? sources.profiles() : [];
   const compareNames = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' }).compare;
   const gatewayPriority = mode === 'mixed' ? Math.max(0, ...catalog.official.map(m => Number(m.priority) || 0)) + 1 : 1;
   const imageOnlyIds = new Set(catalog.gatewayModels.filter(imageOnlyModel).map(m => m.id));
   const contexts = new Map();
-  if (gatewayEnabled) for (const profile of sources.profiles()) contexts.set(profile.id, rememberContexts({ file: path.join(cacheDir, 'model-contexts.json'), base: profile.baseUrl,
+  for (const profile of profiles) contexts.set(profile.id, rememberContexts({ file: path.join(cacheDir, 'model-contexts.json'), base: profile.baseUrl,
     models: catalog.gatewayModels.filter(model => (model._providerId || 'default') === profile.id && !imageOnlyIds.has(model.id)).map(model => ({ ...model, id: model._upstreamId || model.id })),
     official: catalog.official, known: readJson(path.join(root, 'assets/model-contexts.json'), {}), write: atomic }));
   const gateway = (gatewayEnabled ? catalog.gatewayIds : []).filter(id => !imageOnlyIds.has(id) && (mode === 'gateway' || !officialIds.has(id))).sort(compareNames).map((id, index) => {
-    const upstream = catalog.gatewayModels.find(m => m.id === id);
+    const upstream = gatewayById.get(id);
     const originalId = upstream?._upstreamId || id, profile = sources.profile(upstream?._providerId || 'default');
     const leaf = originalId.split('/').at(-1);
     const gpt = isGptModel(originalId);
@@ -187,7 +190,7 @@ function writeDesktopCatalog() {
     const model = structuredClone(native || template);
     applyContext(model, contexts.get(profile.id)?.entries[contextKey(profile.baseUrl, originalId)], { limit: sources.settings.contextLimit,
       override: sources.settings.contextOverrides[overrideKey(profile.id, originalId)] });
-    Object.assign(model, { slug: id, display_name: sources.profiles().length > 1 || profile.id !== 'default' ? originalId + ' · ' + profile.name : id,
+    Object.assign(model, { slug: id, display_name: profiles.length > 1 || profile.id !== 'default' ? originalId + ' · ' + profile.name : id,
       description: 'API · ' + profile.name, priority: gatewayPriority + index,
       visibility: 'list', supported_in_api: true, supported_reasoning_levels: levels.supported_reasoning_levels,
       default_reasoning_level: levels.default_reasoning_level, comp_hash: null });
@@ -228,7 +231,7 @@ function prepareRequest(payload, which, pathname = '/v1/responses', metadata, fo
     // The public model ID includes the source for aliased models. The wire
     // model name can be identical at two APIs with different reasoning state.
     const adapter = new NonGptAdapter(payload, { preserveReasoning: true, reasoningModel: metadata?.id });
-    const converted = adapter.request();
+    const converted = adapter.request({ releaseOriginal: true });
     const chat = forceChat || usesChat(converted, metadata);
     return { payload: chat ? chatRequest(converted) : restoreHostedImageHistory(converted, codexHome).payload, changed: true, adapter, chat };
   }
@@ -248,7 +251,7 @@ async function chatFallback(upstream, payload, gateway, url, incomingHeaders, si
   const next = await request(gateway.base + '/chat/completions' + url.search, {
     method: 'POST', body, headers, dispatcher: gateway.dispatcher, signal, ...RESPONSE_TIMEOUTS });
   if (next.statusCode >= 200 && next.statusCode < 300) sources.rememberChat(gateway);
-  return { upstream: next, adapted, body };
+  return { upstream: next, adapted, bytes: body.length };
 }
 async function gatewayImageReferences(payload, incoming, signal) {
   if (!isGptModel(payload.model)) validateNonGptCompaction(payload);
@@ -344,9 +347,9 @@ function parseRequest(text) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw Object.assign(new Error('The request body must be a JSON object.'), { status: 400, code: 'invalid_json_request' });
   return value;
 }
-async function* convertedEvents(stream, adapted, images) {
-  const events = adapted.adapter ? new NonGptEvents(adapted.adapter) : null;
-  const chat = adapted.chat ? new ChatEvents(adapted.payload.model) : null;
+async function* convertedEvents(stream, conversion, images) {
+  const events = conversion.adapter ? new NonGptEvents(conversion.adapter) : null;
+  const chat = conversion.chat ? new ChatEvents(conversion.model) : null;
   let terminal = false;
   // Responses events can contain base64 images. Match the buffered Responses
   // body limit; Chat events and accumulated tool arguments keep their own limit.
@@ -369,8 +372,11 @@ async function* convertedEvents(stream, adapted, images) {
   if (events) events.finish();
   else if (!terminal) throw Object.assign(new Error('Upstream stream ended before a terminal response event.'), { status: 502, code: 'incomplete_upstream_response' });
 }
-function health() { return { status: (gatewayEnabled ? status.gateway.ready : status.official.ready) ? 'ok' : 'degraded', service: 'chatgpt-api-router', version: 2, compatibilityVersion: 2, buildId, mode, entryMode, sourceId, gatewayBase, configurationId: sources.revision, clientVersion: currentClientVersion(), ...status, officialModels: mode === 'mixed' ? catalog.official.length : 0, gatewayModels: gatewayEnabled ? catalog.gatewayIds.length : 0,
-  gatewayImageModels: gatewayEnabled ? catalog.gatewayModels.filter(m => imageCapabilities(m).known || [imageSettings().IMAGE_MODEL,imageSettings().IMAGE_EDIT_MODEL].includes(m.id)).map(m => m.id) : [] }; }
+function health() {
+  const { IMAGE_MODEL, IMAGE_EDIT_MODEL } = gatewayEnabled ? imageSettings() : {};
+  return { status: (gatewayEnabled ? status.gateway.ready : status.official.ready) ? 'ok' : 'degraded', service: 'chatgpt-api-router', version: 2, compatibilityVersion: 2, buildId, mode, entryMode, sourceId, gatewayBase, configurationId: sources.revision, clientVersion: currentClientVersion(), ...status, officialModels: mode === 'mixed' ? catalog.official.length : 0, gatewayModels: gatewayEnabled ? catalog.gatewayIds.length : 0,
+    gatewayImageModels: gatewayEnabled ? catalog.gatewayModels.filter(m => imageCapabilities(m).known || m.id === IMAGE_MODEL || m.id === IMAGE_EDIT_MODEL).map(m => m.id) : [] };
+}
 async function forwardOfficialCatalog(req, res, url) {
   // A native model-list request carries its own version, account, and query.
   // Forward its response, including metadata/ETag/304, rather than substituting
@@ -419,11 +425,12 @@ async function handleHttp(req, res) {
     // The native official provider requests its rich catalog at this same URL.
     // Preserve that schema without exposing API models in the official entry.
     ...(mode === 'mixed' ? { models: catalog.official } : {}),
-    object: 'list', data: [...(mode === 'mixed' ? catalog.official.map(m => m.slug) : []), ...(gatewayEnabled ? catalog.gatewayIds : [])].filter((m,i,a) => a.indexOf(m) === i).map(id => ({ id, object: 'model' })) });
-  const incoming = await readEncodedBody(req);
-  let body = incoming.decoded;
+    object: 'list', data: [...new Set([...(mode === 'mixed' ? catalog.official.map(m => m.slug) : []), ...(gatewayEnabled ? catalog.gatewayIds : [])])].map(id => ({ id, object: 'model' })) });
+  let incoming = await readEncodedBody(req);
   const imageRoute = /^\/(?:v1\/)?images\/(generations|edits)$/.exec(url.pathname);
   if (imageRoute) {
+    const body = incoming.decoded;
+    incoming = null;
     if (req.method !== 'POST') throw Object.assign(new Error('Images endpoints require POST.'), { status: 405, code: 'invalid_image_request' });
     const controller = new AbortController(); controllers.add(controller);
     const nativeImageUrls = new Set();
@@ -456,43 +463,47 @@ async function handleHttp(req, res) {
         } });
     } finally { controllers.delete(controller); }
   }
-  const parsed = parseRequest(body.toString('utf8'));
-  const which = route(parsed.model);
-  const gateway = which === 'gateway' ? sources.target(parsed.model, catalog.gatewayModels) : null;
+  let parsed = parseRequest(incoming.decoded.toString('utf8'));
+  const model = parsed.model, which = route(model);
+  const gateway = which === 'gateway' ? sources.target(model, catalog.gatewayModels) : null;
   const controller = new AbortController(); controllers.add(controller);
   res.on('close', () => { if (!res.writableEnded) controller.abort(); });
   const started = Date.now();
   const requestId = crypto.randomUUID();
   let phase = 'conversion', firstByteMs = null, upstreamBytes = null, upstreamStatus = null, upstreamBody;
-  if (debug) log('request start ' + JSON.stringify({ requestId, route: which, model: parsed.model,
+  if (debug) log('request start ' + JSON.stringify({ requestId, route: which, model,
     wireBytes: incoming.raw.length, decodedBytes: incoming.decoded.length, encoding: incoming.encoding || 'identity',
     readDecodeMs: started - receivedAt }));
   try {
-    const resolved = which === 'gateway' ? await gatewayImageReferences(gatewayRequest(parsed, gateway), req.headers, controller.signal) : parsed;
+    let resolved = which === 'gateway' ? await gatewayImageReferences(gatewayRequest(parsed, gateway), req.headers, controller.signal) : parsed;
     let adapted = prepareRequest(resolved, which, url.pathname, gateway?.metadata);
-    let outgoingBodyData = await outgoingBody(incoming, adapted.payload, adapted.changed || resolved !== parsed, which === 'official');
-    body = outgoingBodyData.body; upstreamBytes = body.length;
+    let { body, encoding } = await outgoingBody(incoming, adapted.payload, adapted.changed || resolved !== parsed, which === 'official');
+    incoming = parsed = null;
+    upstreamBytes = body.length;
     const originalHeaders = headersFor(req.headers, which, gateway?.profile);
     const headers = which === 'gateway' ? gatewayResponseHeaders(originalHeaders, !adapted.adapter, gateway.metadata?._nativeHeaderPrefix) : originalHeaders;
-    if (outgoingBodyData.encoding) headers['content-encoding'] = outgoingBodyData.encoding;
+    if (encoding) headers['content-encoding'] = encoding;
     phase = 'upstream_headers';
     let upstream = await request(adapted.chat ? gateway.base + '/chat/completions' + url.search : targetUrl(which, url, gateway), { method: req.method, body, headers, dispatcher: which === 'official' ? officialDispatcher : gateway.dispatcher,
       signal: controller.signal, ...RESPONSE_TIMEOUTS });
+    body = null;
     upstreamBody = upstream.body;
     let rejectedBody;
     if (gateway && !adapted.chat && req.method === 'POST') {
       const fallback = await chatFallback(upstream, resolved, gateway, url, req.headers, controller.signal);
       if (fallback?.upstream) {
         upstream = fallback.upstream; upstreamBody = upstream.body; adapted = fallback.adapted;
-        body = fallback.body; upstreamBytes = body.length; outgoingBodyData = { body, encoding: '' };
+        upstreamBytes = fallback.bytes; encoding = '';
       } else rejectedBody = fallback?.rejectedBody;
     }
+    const conversion = { adapter: adapted.adapter, chat: adapted.chat, model: adapted.payload.model };
+    adapted = resolved = null;
     upstreamStatus = upstream.statusCode; phase = 'stream';
     if (debug) log('request headers ' + JSON.stringify({ requestId, status: upstreamStatus, upstreamBytes,
-      encoding: outgoingBodyData.encoding || 'identity', ms: Date.now() - started }));
+      encoding: encoding || 'identity', ms: Date.now() - started }));
     const outgoing = { ...upstream.headers }; for (const name of ['connection','transfer-encoding','keep-alive']) delete outgoing[name];
     const images = gateway && /^\/(?:v1\/)?responses$/.test(url.pathname) ? new ResponseImages(codexHome) : null;
-    if ((images || adapted.adapter || gateway && parsed.model !== gateway.model) && upstream.statusCode >= 200 && upstream.statusCode < 300) {
+    if ((images || conversion.adapter || gateway && model !== gateway.model) && upstream.statusCode >= 200 && upstream.statusCode < 300) {
       const stream = decodedStream(upstream.body, upstream.headers['content-encoding']);
       delete outgoing['content-length']; delete outgoing['content-encoding'];
       outgoing['x-chatgpt-api-adapted'] = 'true';
@@ -500,10 +511,10 @@ async function handleHttp(req, res) {
         res.writeHead(upstream.statusCode, outgoing);
         res.flushHeaders();
         try {
-          for await (const event of convertedEvents(stream, adapted, images)) {
+          for await (const event of convertedEvents(stream, conversion, images)) {
             if (res.destroyed) break;
             firstByteMs ??= Date.now() - started;
-            await writeChunk(res, encodeSse(clientEvent(event, parsed.model, gateway)));
+            await writeChunk(res, encodeSse(clientEvent(event, model, gateway)));
           }
         } catch (e) {
           if (!res.destroyed) await writeChunk(res, encodeSse(protocolError(e)));
@@ -512,16 +523,17 @@ async function handleHttp(req, res) {
       } else {
         const chunks = []; let size = 0;
         for await (const chunk of stream) { size += chunk.length; if (size > 64 * 1024 * 1024) throw new Error('Upstream response exceeds limit'); chunks.push(chunk); }
-        const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-        const converted = adapted.chat ? chatResponse(data, gateway.model) : data;
-        const native = adapted.adapter ? adapted.adapter.response(converted) : converted;
+        const data = JSON.parse((chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, size)).toString('utf8'));
+        chunks.length = 0;
+        const converted = conversion.chat ? chatResponse(data, gateway.model) : data;
+        const native = conversion.adapter ? conversion.adapter.response(converted) : converted;
         const response = images ? images.response(native) : native;
-        if (gateway && gateway.model !== parsed.model && response.model === gateway.model) response.model = parsed.model;
+        if (gateway && gateway.model !== model && response.model === gateway.model) response.model = model;
         res.writeHead(upstream.statusCode, outgoing);
         firstByteMs ??= Date.now() - started;
         await writeChunk(res, JSON.stringify(response));
       }
-      if (debug && adapted.adapter) log('non-GPT compatibility model=' + parsed.model + ' ' + JSON.stringify(adapted.adapter.stats));
+      if (debug && conversion.adapter) log('non-GPT compatibility model=' + model + ' ' + JSON.stringify(conversion.adapter.stats));
     } else {
       res.writeHead(upstream.statusCode, outgoing);
       res.flushHeaders();
@@ -531,25 +543,24 @@ async function handleHttp(req, res) {
         await writeChunk(res, chunk);
       }
     }
-    res.end(); if (debug || upstreamStatus >= 400) log(which + ' HTTP model=' + parsed.model + ' status=' + upstream.statusCode + ' ms=' + (Date.now() - started));
+    res.end(); if (debug || upstreamStatus >= 400) log(which + ' HTTP model=' + model + ' status=' + upstream.statusCode + ' ms=' + (Date.now() - started));
     if (debug) log('request end ' + JSON.stringify({ requestId, status: upstreamStatus, firstByteMs, ms: Date.now() - started }));
   } catch (error) {
-    if (!controller.signal.aborted) log('request error ' + JSON.stringify({ requestId, route: which, model: parsed.model, phase,
+    if (!controller.signal.aborted) log('request error ' + JSON.stringify({ requestId, route: which, model, phase,
       upstreamBytes, status: upstreamStatus, firstByteMs, cancelled: controller.signal.aborted,
       failure: errorDetails(error), ms: Date.now() - started }));
     throw error;
   } finally { releaseResponseBody(upstreamBody); controllers.delete(controller); }
 }
-loadCatalog();
+const savedCatalog = loadCatalog();
 if (process.argv.includes('--prepare')) {
   try {
-    const saved = readJson(cachePath, {});
     const deferred = process.argv.includes('--cached') &&
-      (!gatewayEnabled || saved.configurationId === sources.revision && catalog.gatewayIds.length && Date.now() - Date.parse(catalog.gatewayAt) < CACHE_MAX_AGE) &&
+      (!gatewayEnabled || savedCatalog.configurationId === sources.revision && catalog.gatewayIds.length && Date.now() - Date.parse(catalog.gatewayAt) < CACHE_MAX_AGE) &&
       (mode !== 'mixed' || catalog.official.length);
     if (deferred) {
-      status = { gateway: { ...saved.status?.gateway, ready: gatewayEnabled && catalog.gatewayIds.length > 0, cached: true },
-        official: { ...saved.status?.official, ready: mode === 'mixed' && catalog.official.length > 0, cached: true } };
+      status = { gateway: { ...savedCatalog.status?.gateway, ready: gatewayEnabled && catalog.gatewayIds.length > 0, cached: true },
+        official: { ...savedCatalog.status?.official, ready: mode === 'mixed' && catalog.official.length > 0, cached: true } };
     } else await refreshCatalog();
     const gatewayAvailable = catalog.gatewayIds.length && Date.now() - Date.parse(catalog.gatewayAt) < CACHE_MAX_AGE;
     if (gatewayEnabled && !gatewayAvailable) {
@@ -558,14 +569,13 @@ if (process.argv.includes('--prepare')) {
       if (mode !== 'mixed' || !catalog.official.length) throw Object.assign(new Error('Gateway unavailable and no current cache for this URL/key. ' + (status.gateway.error || '')), { code: 'gateway_unavailable' });
       saveCatalog();
     }
-    writeDesktopCatalog();
+    if (deferred || gatewayEnabled && !gatewayAvailable) writeDesktopCatalog();
     process.stdout.write(JSON.stringify({ ...health(), refreshOnStart: Boolean(deferred) }) + '\n');
   } catch (e) { process.stderr.write((e.code === 'gateway_unavailable' ? '[gateway_unavailable] ' : '') + redact(e.message, sources.settings, [env.API_KEY, ...sources.secrets]) + '\n'); process.exitCode = 1; }
   await sources.close(); await gatewayDispatcher.close(); await officialDispatcher.close();
   if (mediaDispatcher !== gatewayDispatcher) await mediaDispatcher.close();
 } else {
-  const saved = readJson(cachePath, {});
-  if (saved.sourceId === sourceId && saved.status) status = saved.status;
+  if (savedCatalog.sourceId === sourceId && savedCatalog.status) status = savedCatalog.status;
   const server = http.createServer((req, res) => handleHttp(req, res).catch(e => {
     const failure = protocolError(e);
     if (failure.status !== 499) log('HTTP error ' + JSON.stringify(errorDetails(e)));
@@ -603,8 +613,7 @@ if (process.argv.includes('--prepare')) {
           log('history cache miss reason=capacity route=' + which);
         } else responseRoutes.set(id, which);
       }
-      function officialSend(text) {
-        let event = JSON.parse(text);
+      function officialSend(text, event = JSON.parse(text)) {
         let changed = false;
         if (event.type === 'response.create') {
           const prior = event.previous_response_id ? gatewayHistory.get(event.previous_response_id) : null;
@@ -737,13 +746,13 @@ if (process.argv.includes('--prepare')) {
         let upstreamBody;
         const requestId = crypto.randomUUID(), started = Date.now();
         try {
-          const resolved = await gatewayImageReferences(gatewayRequest(body, gateway), req.headers, controller.signal);
+          let resolved = await gatewayImageReferences(gatewayRequest(body, gateway), req.headers, controller.signal);
           let adapted = prepareRequest(resolved, 'gateway', '/v1/responses', gateway.metadata);
-          const wireBody = adapted.payload;
           const headers = gatewayResponseHeaders({ ...headersFor(req.headers, 'gateway', gateway.profile), 'content-type': 'application/json' }, !adapted.adapter, gateway.metadata?._nativeHeaderPrefix);
-          const wireText = JSON.stringify(wireBody);
+          let wireText = JSON.stringify(adapted.payload);
           if (debug) log('WS request ' + JSON.stringify({ connectionId, requestId, route: 'gateway', model: event.model, bytes: Buffer.byteLength(wireText) }));
           let up = await request(gateway.base + (adapted.chat ? '/chat/completions' : '/responses'), { method: 'POST', headers, body: wireText, dispatcher: gateway.dispatcher, signal: controller.signal, ...RESPONSE_TIMEOUTS });
+          wireText = null;
           upstreamBody = up.body;
           let rejectedBody;
           if (!adapted.chat) {
@@ -759,7 +768,9 @@ if (process.argv.includes('--prepare')) {
             throw Object.assign(new Error(message), { status: up.statusCode, upstreamError });
           }
           if (!String(up.headers['content-type']).includes('text/event-stream')) throw Object.assign(new Error('Gateway did not return an SSE response'), { status: 502, code: 'invalid_upstream_content_type' });
-          for await (const original of convertedEvents(decodedStream(up.body, up.headers['content-encoding']), adapted, new ResponseImages(codexHome))) {
+          const conversion = { adapter: adapted.adapter, chat: adapted.chat, model: adapted.payload.model };
+          adapted = resolved = null;
+          for await (const original of convertedEvents(decodedStream(up.body, up.headers['content-encoding']), conversion, new ResponseImages(codexHome))) {
               if (isSseControl(original)) continue;
               const response = clientEvent(original, body.model, gateway);
               if (pending.interrupted) break;
@@ -777,7 +788,7 @@ if (process.argv.includes('--prepare')) {
               if (event.stream_id) response.stream_id = event.stream_id;
               await send(response, true);
           }
-          if (debug && adapted.adapter) log('non-GPT compatibility model=' + event.model + ' ' + JSON.stringify(adapted.adapter.stats));
+          if (debug && conversion.adapter) log('non-GPT compatibility model=' + event.model + ' ' + JSON.stringify(conversion.adapter.stats));
           if (debug) log('gateway WS-to-HTTP model=' + event.model + ' status=' + up.statusCode);
         } catch (error) {
           // A successful native interrupt owns the terminal acknowledgement;
@@ -833,7 +844,7 @@ if (process.argv.includes('--prepare')) {
           if (event.type === 'response.interrupt' && which !== 'official') { gatewayInterrupt(event); return; }
           if (!which) throw Object.assign(new Error('A model is required before continuing this stream.'), { status: 400 });
           laneRoutes.set(lane, which);
-          if (which === 'official') officialSend(text);
+          if (which === 'official') officialSend(text, event);
           else if (event.type === 'response.create') gatewayCreate(event).catch(e => failure(e, event.stream_id));
           else if (event.type === 'response.cancel') active.get(lane)?.controller.abort();
           else throw Object.assign(new Error('This gateway does not support WebSocket event ' + event.type), { status: 400, code: 'unsupported_event' });
