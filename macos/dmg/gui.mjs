@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -207,8 +208,12 @@ export async function main(args = process.argv.slice(2)) {
   const { ctx, provider } = installed;
   process.env.CHATGPT_API_ROOT = ctx.root;
   if (selected.entryMode === 'console') {
-    const { startConsole } = await import(pathToFileURL(path.join(ctx.root, 'src/console.mjs')).href);
-    await startConsole({ root: ctx.root }); return;
+    // Finder's app process finishes after dispatching the installed helper.
+    // The browser page owns the helper's lifetime outside the .app bundle.
+    const console = spawn(ctx.node, [path.join(ctx.root, 'src/console.mjs')], { detached: true, stdio: 'ignore' });
+    await once(console, 'spawn');
+    console.unref();
+    return;
   }
   const current = provider.userSettings(ctx);
   if (selected.entryMode !== 'official' && (!current.BASE_URL || !current.API_KEY || args.includes('--configure'))) {

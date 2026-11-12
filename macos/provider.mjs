@@ -301,7 +301,8 @@ export async function launchEntry(ctx, entryMode, args = [], options = {}) {
       await recordRecoveryClient(ctx, recoverySession, child.pid);
     } catch (error) {
       if (!clients().length) {
-        restoreConfig(ctx); await restoreThreadProviders(ctx); await stopRouter(ctx);
+        try { await stopRouter(ctx); }
+        finally { restoreConfig(ctx); await restoreThreadProviders(ctx); }
         if (recoverySession) unregisterRecovery(ctx, recoverySession);
       }
       throw error;
@@ -322,7 +323,8 @@ export async function launchEntry(ctx, entryMode, args = [], options = {}) {
     await locked(ctx, async () => {
       const current = readJson(statePath(ctx, 'config'));
       if (current?.sessionId === sessionId) {
-        restoreConfig(ctx); await restoreThreadProviders(ctx); await locked(ctx, () => stopRouter(ctx));
+        try { await locked(ctx, () => stopRouter(ctx)); }
+        finally { restoreConfig(ctx); await restoreThreadProviders(ctx); }
         unregisterRecovery(ctx, recoverySession);
       }
     }, 'launch-lock');

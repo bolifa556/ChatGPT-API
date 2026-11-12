@@ -21,10 +21,10 @@ function safeId(id, type, prefix = prefixes[type]) {
   return prefix + (/^[a-zA-Z0-9_-]{1,80}$/.test(suffix) ? suffix : hash(id).slice(0, 48));
 }
 export class NonGptAdapter {
-  constructor(original, { preserveReasoning = false } = {}) {
+  constructor(original, { preserveReasoning = false, reasoningModel = original.model } = {}) {
     this.original = original;
     this.preserveReasoning = preserveReasoning;
-    this.reasoningPrefix = original.model ? 'rs_gateway_' + hash(original.model).slice(0, 12) + '_' : 'rs_gateway_';
+    this.reasoningPrefix = reasoningModel ? 'rs_gateway_' + hash(reasoningModel).slice(0, 12) + '_' : 'rs_gateway_';
     this.mapping = new Map();
     this.ids = new Map();
     this.stats = { customTools: 0, namespaceTools: 0, carriersRemoved: 0, configurationsApplied: 0, reasoningSkipped: 0, reasoningConverted: 0, reasoningPreserved: 0, callsRestored: 0, argumentErrors: 0, idsCorrected: 0 };

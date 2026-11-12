@@ -285,17 +285,13 @@ export async function main(args = process.argv.slice(2)) {
       applyConfig(ctx); sessionId = readJson(statePath(ctx, 'config')).sessionId;
       await repairThreadProviders(ctx);
       const archive = path.join(path.dirname(fs.realpathSync(client)), 'resources/app.asar');
-      if (fs.existsSync(archive)) {
-        const { startQuotaCompatibleClient } = await import('../src/native-quota.mjs');
-        child = await startQuotaCompatibleClient({ executable: client, archive, root: ctx.root, home: ctx.home, args: args.slice(1) });
-      } else {
-        child = spawn(client, args.slice(1), { detached: true, stdio: 'ignore', env: { ...process.env, CODEX_HOME: ctx.home } });
-        await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
-      }
+      const { startQuotaCompatibleClient } = await import('../src/native-quota.mjs');
+      child = await startQuotaCompatibleClient({ executable: client, archive, root: ctx.root, home: ctx.home, args: args.slice(1) });
       await recordRecoveryClient(ctx, recoverySession, child.pid);
     } catch (error) {
       if (!runningClients().length) {
-        restoreConfig(ctx); await restoreThreadProviders(ctx); await locked(ctx, () => stopRouter(ctx));
+        try { await locked(ctx, () => stopRouter(ctx)); }
+        finally { restoreConfig(ctx); await restoreThreadProviders(ctx); }
         if (recoverySession) unregisterRecovery(ctx, recoverySession);
       }
       throw error;
@@ -310,7 +306,8 @@ export async function main(args = process.argv.slice(2)) {
   } finally {
     await withLaunchLock(ctx, async () => {
       if (readJson(statePath(ctx, 'config'))?.sessionId === sessionId) {
-        restoreConfig(ctx); await restoreThreadProviders(ctx); await locked(ctx, () => stopRouter(ctx));
+        try { await locked(ctx, () => stopRouter(ctx)); }
+        finally { restoreConfig(ctx); await restoreThreadProviders(ctx); }
         unregisterRecovery(ctx, recoverySession);
       }
     });

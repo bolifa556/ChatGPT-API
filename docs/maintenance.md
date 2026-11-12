@@ -56,7 +56,11 @@ Windows 构建在 Windows 执行；macOS DMG 在 Mac 上使用系统工具，或
 
 Windows 推荐已验证的官方客户端 26.1103.7773.0 或更新稳定版。26.1029.9216.0 曾出现界面兼容初始化超时，更新后恢复；不能据此断定所有旧版的失败原因相同，也不把这个版本号当成官方最低要求。
 
-启动失败先保留同次 `data/state/native-session.json`、`native-quota.json` 和 `data/logs/native-session-stderr.log`。状态包含失败阶段、客户端版本（可从安装路径取得时）、模块总数/未完成数、挂接页面数、未响应命令和已捕获的底层异常。`native_script_exception` 表示执行异常，`native_module_failed` 表示模块准备或导入失败，`native_page_not_attached` 表示没有接到主页面，`native_command_timeout` 表示本地兼容命令无响应。不能把未观察到的环节写成已确认根因。
+启动状态记录在 `data/state/native-session.json`。`data/state/native-quota.json` 记录 API 入口的发送额度和 Fast 界面兼容状态。`degraded` 表示部分或全部界面兼容未能加载。启动阶段只提示一次，客户端继续运行，可识别的模块照常加载。
+
+Windows 启动时从当前安装注册读取桌面入口、可执行文件和启动别名。客户端升级后无法读取的旧会话索引记录在 `data/logs/history-compat.log`，可识别的历史仍会加载。桌面偏好切换到未知格式时，原生文件和已有恢复记录都会保留。
+
+旧对话兼容按文件处理。无法解码的 Zstandard 归档保留原字节，其他对话继续准备和恢复。跳过的文件记录在 `data/logs/history-compat.log`，文件修复后下次打开入口时会重新读取。
 
 聊天失败查看 `data/logs/shim.log`；目录失败同时查看 `data/cache/gateway-sources.json` 中对应来源的状态；早期启动失败查看 `launcher-error.log`，恢复失败查看 `recovery.log`。错误保留有限的 cause/code 链和请求阶段，不记录完整请求、图片或凭据；上游返回值与正常消息转换不因此改变。临时诊断可设置进程环境变量 `CHATGPT_API_DEBUG=1` 保留成功请求的耗时摘要，同样受大小限制，日常不要开启。
 

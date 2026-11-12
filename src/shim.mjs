@@ -225,7 +225,9 @@ function historyForTarget(payload, which) {
 function prepareRequest(payload, which, pathname = '/v1/responses', metadata, forceChat = false) {
   if (which === 'gateway' && (!isGptModel(payload.model) || usesChat(payload, metadata) || forceChat)) {
     if (pathname.endsWith('/responses/compact')) throw Object.assign(new Error('GPT opaque compaction is unavailable for non-GPT models.'), { status: 400, code: 'incompatible_compacted_history' });
-    const adapter = new NonGptAdapter(payload, { preserveReasoning: true });
+    // The public model ID includes the source for aliased models. The wire
+    // model name can be identical at two APIs with different reasoning state.
+    const adapter = new NonGptAdapter(payload, { preserveReasoning: true, reasoningModel: metadata?.id });
     const converted = adapter.request();
     const chat = forceChat || usesChat(converted, metadata);
     return { payload: chat ? chatRequest(converted) : restoreHostedImageHistory(converted, codexHome).payload, changed: true, adapter, chat };
@@ -384,7 +386,7 @@ async function forwardOfficialCatalog(req, res, url) {
     const clientVersion = url.searchParams.get('client_version');
     if (upstream.statusCode === 200) {
       try {
-        // An in-flight periodic refresh must finish before this newer native
+        // An in-flight startup or manual refresh must finish before this newer native
         // result becomes the canonical routing/menu catalog.
         if (refreshInFlight) await refreshInFlight.catch(e => log('catalog refresh ' + e.message));
         const data = JSON.parse(decodeBody(body, upstream.headers['content-encoding'] || '').toString('utf8'));

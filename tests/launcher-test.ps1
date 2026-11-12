@@ -18,20 +18,68 @@ foreach ($file in $files) {
 $fixture=Join-Path $root 'data\testing\launcher'
 $null=Initialize-PackageLayout $fixture
 $fakePackage=Join-Path $fixture 'native-package'
-[void][IO.Directory]::CreateDirectory((Join-Path $fakePackage 'app\resources'))
+[void][IO.Directory]::CreateDirectory((Join-Path $fakePackage 'desktop\current\resources'))
+$originalLocalAppData = $env:LOCALAPPDATA
+try {
+    $env:LOCALAPPDATA = Join-Path $fixture 'native-local'
+    $aliasDirectory = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps'
+    [void][IO.Directory]::CreateDirectory($aliasDirectory)
+    $alias = Join-Path $aliasDirectory 'chatgpt-renamed.exe'
+    Write-Utf8File $alias 'alias fixture'
+    function Get-AppxPackage([string]$Name) {
+        [pscustomobject]@{InstallLocation=$fakePackage; PackageFamilyName='OpenAI.Codex_fixture'; Version=[version]'99.0.0.0'}
+        [pscustomobject]@{InstallLocation=(Join-Path $fixture 'retired-native-package'); Version=[version]'98.0.0.0'}
+    }
+    function Get-AppxPackageManifest($Package) {
+        Assert ($Package.InstallLocation -eq $fakePackage) 'Native registration selected a retired version.'
+        [xml]@'
+<Package xmlns="urn:foundation" xmlns:uap="urn:desktop">
+  <Applications>
+    <Application Id="App" Executable="desktop/Helper.exe">
+      <uap:VisualElements AppListEntry="none"/>
+    </Application>
+    <Application Id="MainDesktop" Executable="desktop/current/CodexDesktop.exe">
+      <uap:VisualElements/>
+      <Extensions>
+        <uap:Extension Category="windows.appExecutionAlias">
+          <uap:AppExecutionAlias><uap:ExecutionAlias Alias="chatgpt-renamed.exe"/></uap:AppExecutionAlias>
+        </uap:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+</Package>
+'@
+    }
+    $native = Get-NativeDesktopApp
+    Assert ($native.appId -eq 'OpenAI.Codex_fixture!MainDesktop') 'A renamed desktop entry was confused with a background app.'
+    Assert ($native.processName -eq 'CodexDesktop.exe' -and $native.launch -eq $alias) 'The executable name or alias was pinned to the previous version.'
+    Assert ($native.archive -eq (Join-Path $fakePackage 'desktop\current\resources\app.asar')) 'Renderer assets were not resolved beside the registered executable.'
+    $packageAlias = Join-Path $aliasDirectory 'OpenAI.Codex_fixture\chatgpt-renamed.exe'
+    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $packageAlias))
+    Write-Utf8File $packageAlias 'package alias fixture'
+    Assert ((Get-NativeDesktopApp).launch -eq $packageAlias) 'The launcher ignored the package-specific activation alias.'
+    Remove-Item -LiteralPath $alias
+    Assert ((Get-NativeDesktopApp).launch -eq $packageAlias) 'A disabled global alias hid the package-specific alias.'
+    Remove-Item -LiteralPath $packageAlias
+    $native = Get-NativeDesktopApp
+    Assert ($native.launch -eq (Join-Path $fakePackage 'desktop\current\CodexDesktop.exe')) 'A missing app alias could not use the registered executable.'
+} finally {
+    $env:LOCALAPPDATA = $originalLocalAppData
+    Remove-Item Function:Get-AppxPackage,Function:Get-AppxPackageManifest -ErrorAction SilentlyContinue
+}
 $versionCache = Join-Path $fixture 'native-version.json'
-$fixtureCli = Join-Path $fakePackage 'app\resources\codex.exe'
+$fixtureCli = $native.cli
 foreach ($path in @($fixtureCli,$versionCache)) { if(Test-Path -LiteralPath $path){Remove-Item -LiteralPath $path} }
 try {
     function Get-FileHash { throw 'Version discovery must not depend on Get-FileHash.' }
-    Assert (-not (Get-NativeClientVersion $fakePackage $versionCache)) 'Missing native CLI must not invent a fixed version.'
+    Assert (-not (Get-NativeClientVersion $fixtureCli $versionCache)) 'Missing native CLI must not invent a fixed version.'
     Add-Type -TypeDefinition 'public static class FixtureNativeVersion { public static void Main() { System.Console.WriteLine("codex-cli 0.999.0-alpha.1"); } }' -OutputAssembly $fixtureCli -OutputType ConsoleApplication
-    Assert ((Get-NativeClientVersion $fakePackage $versionCache) -eq '0.999.0') 'A new client without a relocated CLI cache could not supply its actual version.'
+    Assert ((Get-NativeClientVersion $fixtureCli $versionCache) -eq '0.999.0') 'A new client without a relocated CLI cache could not supply its actual version.'
     $savedAt = (Get-Item -LiteralPath $versionCache).LastWriteTimeUtc
-    Assert ((Get-NativeClientVersion $fakePackage $versionCache) -eq '0.999.0') 'The installed binary version was not cached.'
+    Assert ((Get-NativeClientVersion $fixtureCli $versionCache) -eq '0.999.0') 'The installed binary version was not cached.'
     Assert ((Get-Item -LiteralPath $versionCache).LastWriteTimeUtc -eq $savedAt) 'An unchanged client needlessly rewrote its version cache.'
     Write-Utf8File $fixtureCli 'changed-client-without-version'
-    Assert (-not (Get-NativeClientVersion $fakePackage $versionCache)) 'An updated binary reused a stale CLI version.'
+    Assert (-not (Get-NativeClientVersion $fixtureCli $versionCache)) 'An updated binary reused a stale CLI version.'
     Assert (@(Get-ChildItem -LiteralPath $fixture -Filter 'native-version-*.exe').Count -eq 0) 'The native version probe left a temporary executable behind.'
 } finally { Remove-Item Function:Get-FileHash }
 $config=Join-Path $fixture 'config.toml'
@@ -261,7 +309,7 @@ setTimeout(()=>{},6000);
     $nativeRecovery = [IO.File]::ReadAllText((Get-RecoveryPath $nativeFixture)) | ConvertFrom-Json
     Assert ([int]$nativeRecovery.client.pid -eq $worker.Id) 'The native PID was not registered for recovery.'
 } finally {
-    if ($worker) { Stop-LauncherRecoveryClient (Get-RecoveryProcess $worker.Id); $worker.Dispose() }
+    if ($worker) { if (-not $worker.HasExited) { $worker.Kill(); $null = $worker.WaitForExit(10000) }; $worker.Dispose() }
     $self.Dispose()
     Unregister-LauncherRecovery $nativeFixture $nativeSession
 }

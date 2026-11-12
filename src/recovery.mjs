@@ -90,9 +90,11 @@ export async function recoverPending(ctx, platform) {
   if (currentBoot && (provider.alive(saved.owner) || provider.alive(saved.client))) return false;
   await provider.withLaunchLock(ctx, async () => {
     if (read(journalPath(ctx))?.session !== saved.session) return;
-    provider.restoreConfig(ctx);
-    await provider.restoreThreadProviders(ctx);
-    await provider.stopRouter(ctx);
+    try { await provider.stopRouter(ctx); }
+    finally {
+      provider.restoreConfig(ctx);
+      await provider.restoreThreadProviders(ctx);
+    }
     unregisterRecovery(ctx, saved.session);
   });
   return true;

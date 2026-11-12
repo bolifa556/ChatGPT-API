@@ -40,7 +40,7 @@ const server=http.createServer((req,res)=>res.end('fixture'));
 server.listen(0,'127.0.0.1');
 await runNativeSession({
  router:{routerReady:once(server,'listening'),closeRouter:()=>new Promise(resolve=>server.close(resolve))},
- start:async track=>{const child=spawn(process.execPath,[path.join(root,'client.mjs'),root],{windowsHide:true,stdio:'ignore'});await once(child,'spawn');track(child);return child},
+ start:async track=>{const child=spawn(process.execPath,[path.join(root,'client.mjs'),root],{windowsHide:true,detached:true,stdio:'ignore'});await once(child,'spawn');track(child);return child},
  onStatus:value=>fs.writeFileSync(path.join(root,'data/state/native-session.json'),JSON.stringify({session,controllerPid:process.pid,...value})),
  recover:async()=>{const child=spawn('powershell.exe',['-NoProfile','-ExecutionPolicy','Bypass','-File',path.join(root,'src/Recover-ChatGPT.ps1'),'-Immediate','-Session',session,'-ControllerPid',String(process.pid)],{windowsHide:true,stdio:'ignore'});const[code]=await once(child,'exit');if(code)throw Error('Fixture recovery failed')}
 });
@@ -78,8 +78,12 @@ await runNativeSession({
         Assert (-not (Test-Path -LiteralPath (Join-Path $fixture 'data\state\recovery-watcher.json'))) 'An extra recovery watcher was started.'
         if ($scenario -in @('launcher-crash','power-loss')) { Stop-Process -Id $session.guardian -Force }
         if ($scenario -in @('adapter-crash','power-loss')) { Stop-Process -Id $session.controller -Force }
+        if ($scenario -eq 'adapter-crash') {
+            Assert (-not $nativeClient.WaitForExit(1000)) 'An adapter crash forcibly stopped the client.'
+            Assert (Test-Path -LiteralPath (Get-RecoveryPath $fixture)) 'Recovery ran while the client was still open.'
+        }
         if ($scenario -in @('native-crash','power-loss')) { Stop-Process -Id $session.client -Force -ErrorAction SilentlyContinue }
-        if ($scenario -in @('normal','launcher-crash','stalled-close')) { Write-Utf8File (Join-Path $fixture 'finish-client') 'exit' }
+        if ($scenario -in @('normal','launcher-crash','adapter-crash','stalled-close')) { Write-Utf8File (Join-Path $fixture 'finish-client') 'exit' }
         if ($scenario -in @('normal','native-crash','stalled-close')) {
             Assert ($nativeClient.WaitForExit(5000)) ('Fixture client did not exit after ' + $scenario)
             Wait-ClosingLauncherSession $fixture

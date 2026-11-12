@@ -5,7 +5,7 @@ import path from 'node:path';
 export const LOG_LIMIT = 256 * 1024;
 const ENTRY_LIMIT = 8192;
 const managedLogs = ['shim.log', 'shim.log.1', 'shim-stdout.log', 'shim-stderr.log', 'provider-start.log',
-  'native-session-stderr.log', 'prepare-stderr.log', 'provider-repair-stderr.log', 'ssh-stderr.log', 'recovery.log', 'console-stderr.log', 'launcher-error.log'];
+  'native-session-stderr.log', 'prepare-stderr.log', 'provider-repair-stderr.log', 'history-compat.log', 'ssh-stderr.log', 'recovery.log', 'console-stderr.log', 'launcher-error.log'];
 const safeText = value => String(value ?? '').replace(/(Bearer\s+)[^\s"']+/gi, '$1[redacted]')
   .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[redacted]@')
   .replace(/((?:"|')?(?:api[_-]?key|access_token|refresh_token|id_token)(?:"|')?\s*[:=]\s*["'])([^"']+)(["'])/gi, '$1[redacted]$3')

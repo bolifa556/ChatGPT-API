@@ -5,6 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
 import http from 'node:http';
 import net from 'node:net';
 import { pathToFileURL } from 'node:url';
@@ -13,44 +14,61 @@ import { atomicPrivate } from './settings.mjs';
 import { errorDetails, describeError } from './diagnostics.mjs';
 
 const quotaGuard = /(?<![\w$])([A-Za-z_$][\w$]*)="local"===([A-Za-z_$][\w$]*)&&([A-Za-z_$][\w$]*)\|\|\(0,([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)/g;
-const quotaAssetRevision = 2;
+const quotaAssetRevision = 3;
 const escaped = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function scopeComposerSubmission(source, key) {
   const identifier = '[A-Za-z_$][\\w$]*';
-  const hardReads = new RegExp('\\b(' + identifier + ')=\\(0,' + identifier + '\\._U\\)\\((' + identifier + ')\\.F9,(' + identifier + ')\\)', 'g');
+  const variable = '(?<![\\w$])';
+  const hardReads = new RegExp(variable + '(' + identifier + ')=\\(0,' + identifier + '\\.(' + identifier + ')\\)\\((' + identifier + ')\\.(' + identifier + '),(' + identifier + ')\\)', 'g');
   const props = /activeCollaborationMode:([A-Za-z_$][\w$]*),[^{};]{0,1200}?\b(submitDisabled(?:Reasons)?):([A-Za-z_$][\w$]*)/g;
-  let text = source, count = 0, legacyCount = 0;
+  const components = [...source.matchAll(props)], changes = [];
+  let count = 0, legacyCount = 0;
   for (const hard of source.matchAll(hardReads)) {
-    const [, blocked, module, host] = hard;
-    if (!source.includes(module + '=n("eLmE")')) continue;
-    legacyCount++;
-    const component = [...source.matchAll(props)].find(match => match.index > hard.index);
+    const [, blocked, hook, module, flag, host] = hard;
+    const legacy = hook === '_U' && flag === 'F9' && source.includes(module + '=n("eLmE")');
+    if (legacy) legacyCount++;
+    const component = components.find(match => match.index > hard.index);
     if (!component || component.index - hard.index > 40000) continue;
     const [, mode, property, disabled] = component;
     const between = source.slice(hard.index, component.index);
-    const ordinary = between.match(new RegExp('\\b(' + identifier + ')=\\(0,' + identifier + '\\.Ul\\)\\("local"===' + escaped(host) + '&&(' + identifier + ')\\.U\\)'));
-    if (!ordinary || !source.includes(ordinary[2] + '=n("a6kU")')) continue;
     const gateway = '"local"===' + host + '&&globalThis[' + JSON.stringify(key) + ']?.models?.has(' + mode + '?.settings?.model)';
     if (property === 'submitDisabledReasons') {
-      // New clients pass named reasons to the composer. Scope the two native
-      // quota reasons before React memoizes them, preserving every other reason.
-      const reasons = [[blocked, 'reserve-limit'], [ordinary[1], 'usage-limit']].map(([flag, reason]) =>
-        between.match(new RegExp('\\b(' + identifier + ')=' + escaped(flag) + '&&"' + reason + '"')));
-      if (reasons.some(reason => !reason)) continue;
-      for (const [position, reason] of reasons.entries()) {
-        const flag = position ? ordinary[1] : blocked;
-        text = text.replace(reason[0], reason[0].replace('=' + flag, '=((' + gateway + ')?false:' + flag + ')'));
+      // Follow the named reasons back to their native flags for the same host.
+      // Webpack can rename all of the imports and local variables on rebuild.
+      const reserve = between.match(new RegExp(variable + identifier + '=' + escaped(blocked) + '&&"reserve-limit"'));
+      if (!reserve) continue;
+      if (!legacy) legacyCount++;
+      const usages = [...between.matchAll(new RegExp(variable + identifier + '=(' + identifier + ')&&"usage-limit"', 'g'))];
+      if (usages.length !== 1) continue;
+      const [usage] = usages;
+      const usageRead = new RegExp(variable + escaped(usage[1]) + '=\\(0,' + identifier + '\\.' + identifier + '\\)\\("local"===' + escaped(host) + '&&' + identifier + '\\.' + identifier + '\\)');
+      if (!usageRead.test(between.slice(0, usage.index))) continue;
+      const afterReasons = between.slice(Math.max(reserve.index + reserve[0].length, usage.index + usage[0].length));
+      if (!new RegExp(variable + escaped(disabled) + '=(?!=|>)').test(afterReasons)) continue;
+      const before = source.slice(Math.max(0, component.index - 40000), hard.index + Math.min(reserve.index, usage.index));
+      if (!new RegExp(variable + escaped(mode) + '=(?!=|>)').test(before)) continue;
+      for (const [reason, value] of [[reserve, blocked], [usage, usage[1]]]) {
+        changes.push({ offset: hard.index + reason.index, length: reason[0].length,
+          text: reason[0].replace('=' + value, '=((' + gateway + ')?false:' + value + ')') });
       }
       count++; continue;
     }
-    const declaration = between.match(new RegExp('\\b' + escaped(disabled) + '=([^;]+);'));
+    if (!legacy) continue;
+    const ordinary = between.match(new RegExp(variable + '(' + identifier + ')=\\(0,' + identifier + '\\.Ul\\)\\("local"===' + escaped(host) + '&&(' + identifier + ')\\.U\\)'));
+    if (!ordinary || !source.includes(ordinary[2] + '=n("a6kU")')) continue;
+    const declaration = between.match(new RegExp(variable + escaped(disabled) + '=([^;]+);'));
     const tail = '||' + blocked + '||' + ordinary[1];
     if (!declaration || !declaration[1].endsWith(tail)) continue;
     // Scope only the two subscription-quota operands. Permission checks,
     // loading, safety decisions and every other native submit condition stay
     // in the original expression, including when switching models mid-chat.
     const adapted = declaration[0].slice(0, -tail.length - 1) + '||((' + gateway + ')?false:(' + blocked + '||' + ordinary[1] + '));';
-    text = text.replace(declaration[0], adapted); count++;
+    changes.push({ offset: hard.index + declaration.index, length: declaration[0].length, text: adapted });
+    count++;
+  }
+  let text = source;
+  for (const change of changes.sort((a, b) => b.offset - a.offset)) {
+    text = text.slice(0, change.offset) + change.text + text.slice(change.offset + change.length);
   }
   return { text, count, legacyCount };
 }
@@ -85,8 +103,8 @@ export function nativeQuotaAssets(archive, cacheFile = '') {
       const buffer = Buffer.alloc(entry.size); fs.readSync(fd, buffer, 0, buffer.length, entry.offset);
       const source = buffer.toString(), adapted = scopeNativeQuota(source, 'quota_probe');
       if (!adapted.count && !adapted.legacySubmitCount) return null;
-      if (!source.includes('export const __webpack_modules__=')) throw Object.assign(new Error('客户端界面模块格式不兼容，请更新官方客户端和适配层。'), { code: 'native_module_format' });
-      return { url: entry.url, source, submitCount: adapted.submitCount, legacySubmitCount: adapted.legacySubmitCount };
+      return { url: entry.url, source, count: adapted.count, submitCount: adapted.submitCount,
+        legacySubmitCount: adapted.legacySubmitCount, supportedFormat: source.includes('export const __webpack_modules__=') };
     };
     if (cacheFile) {
       try {
@@ -131,33 +149,32 @@ export function quotaBootstrap(assets, models, key, binding) {
       'for(const id of Object.keys(prepared))if(!prepared[id].toString().includes(key))delete prepared[id];' +
       'import(' + JSON.stringify(asset.url) + ').then(native=>{' +
       'const ids=Object.keys(prepared);if(!ids.length)throw Error("Native quota module was not found");' +
-      'for(const id of ids){if(typeof native.__webpack_modules__[id]!=="function")throw Error("Native quota module changed");native.__webpack_modules__[id]=function(...args){if(!state.executed.has(id)){state.executed.add(id);notify()}return Reflect.apply(prepared[id],this,args)}}' +
+      'if(ids.some(id=>typeof native.__webpack_modules__?.[id]!=="function"))throw Error("Native quota module changed");' +
+      'for(const id of ids)native.__webpack_modules__[id]=prepared[id];' +
       'state.installed+=ids.length;state.pending--;notify()' +
-      '}).catch(error=>{state.error=String(error);state.failedAsset=asset;notify()})' +
-      '}catch(error){state.error=String(error);state.failedAsset=asset;notify()}}';
+      '}).catch(error=>failed(error,asset))' +
+      '}catch(error){failed(error,asset)}}';
   }).join('\n');
-  return '(()=>{if(typeof location!=="undefined"&&(location.protocol!=="app:"||location.host!=="-"))return;const key=' + JSON.stringify(key) + ';if(globalThis[key])return;' +
-    'const state=globalThis[key]={models:new Set(' + JSON.stringify(models) + '),pending:' + assets.length + ',installed:0,executed:new Set(),error:null};' +
-    'const notify=()=>{const fn=globalThis[' + JSON.stringify(binding) + '];if(typeof fn==="function")fn(JSON.stringify({pending:state.pending,installed:state.installed,executed:[...state.executed],error:state.error,failedAsset:state.failedAsset}))};' +
+  return '(()=>{if(typeof location!=="undefined"&&(location.protocol!=="app:"||location.host!=="-"||self!==top))return;const key=' + JSON.stringify(key) + ';if(globalThis[key])return;' +
+    'const state=globalThis[key]={models:new Set(' + JSON.stringify(models) + '),pending:' + assets.length + ',installed:0,error:null};' +
+    'const notify=(initial=false)=>{const fn=globalThis[' + JSON.stringify(binding) + '];if(typeof fn==="function")fn(JSON.stringify({pending:state.pending,installed:state.installed,error:state.error,failedAsset:state.failedAsset,initial}))};' +
+    'const failed=(error,asset)=>{if(!state.error){state.error=String(error);state.failedAsset=asset}state.pending--;notify()};notify(true);' +
     modules + '\n})()';
 }
-function nativePipe(child, socket, timeoutMs) {
+function nativePipe(child, socket, timeoutMs, disconnected) {
   const pending = new Map(), listeners = new Set(); let serial = 0, buffer = Buffer.alloc(0), closedError;
   function fail(error) {
-    error.code ||= child.exitCode !== null || child.signalCode !== null ? 'native_client_exited' : 'native_debugger_closed';
-    closedError ||= error;
+    if (closedError) return;
+    error.code ||= 'native_debugger_closed';
+    closedError = error;
     for (const call of pending.values()) { clearTimeout(call.timer); call.reject(closedError); }
-    pending.clear(); buffer = Buffer.alloc(0);
+    pending.clear(); buffer = Buffer.alloc(0); disconnected.abort(error);
   }
   if (socket) { socket.on('error', fail); socket.once('close', () => fail(new Error('Native compatibility connection closed.'))); }
   else {
     child.stdio[3].on('error', fail); child.stdio[4].on('error', fail);
     child.stdio[4].once('end', () => fail(new Error('Native compatibility connection closed.')));
   }
-  child.once('exit', () => {
-    fail(new Error('Native application exited.'));
-    socket?.close(); child.stdio?.[3]?.destroy(); child.stdio?.[4]?.destroy();
-  });
   (socket || child.stdio[4]).on(socket ? 'message' : 'data', chunk => {
     buffer = Buffer.concat([buffer, chunk, ...(socket ? [Buffer.from([0])] : [])]); let end;
     while ((end = buffer.indexOf(0)) >= 0) {
@@ -170,186 +187,251 @@ function nativePipe(child, socket, timeoutMs) {
   });
   return {
     onEvent(listener) { listeners.add(listener); },
+    close() { listeners.clear(); socket?.terminate(); child.stdio?.[3]?.destroy(); child.stdio?.[4]?.destroy(); },
     pendingMethods() { return [...new Set([...pending.values()].map(call => call.method))]; },
     send(method, params = {}, sessionId) {
       if (closedError) return Promise.reject(closedError);
       return new Promise((resolve, reject) => {
         const id = ++serial, timer = setTimeout(() => { pending.delete(id); reject(Object.assign(new Error('客户端兼容命令未响应：' + method), { code: 'native_command_timeout', method })); }, timeoutMs);
-        timer.unref(); pending.set(id, { resolve, reject: error => reject(Object.assign(error, { method })), timer, method });
+        timer.unref(); pending.set(id, { resolve, reject, timer, method });
         const message = JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) });
-        if (socket) socket.send(message); else child.stdio[3].write(message + '\0');
+        const sent = error => { if (error) fail(error); };
+        if (socket) socket.send(message, sent); else child.stdio[3].write(message + '\0', sent);
       });
     },
   };
 }
-async function debuggerAddress(port) {
-  return new Promise((resolve, reject) => {
-    const request = http.get({ host: '127.0.0.1', port, path: '/json/version', agent: false }, response => {
-      let text = ''; response.on('data', chunk => { text += chunk; });
-      response.once('end', () => { try { resolve(JSON.parse(text).webSocketDebuggerUrl); } catch (error) { reject(error); } });
+async function debuggerAddress(port, signal) {
+  while (!signal.aborted) {
+    const address = await new Promise(resolve => {
+      const request = http.get({ host: '127.0.0.1', port, path: '/json/version', agent: false, signal }, response => {
+        let text = '';
+        response.on('data', chunk => { text += chunk; });
+        response.once('error', () => resolve(null));
+        response.once('end', () => { try { resolve(JSON.parse(text).webSocketDebuggerUrl); } catch { resolve(null); } });
+      });
+      request.once('error', () => resolve(null));
+      request.setTimeout(500, () => request.destroy());
     });
-    request.once('error', reject); request.setTimeout(500, () => request.destroy(new Error('Native debugger is not ready.')));
-  });
+    if (address) return address;
+    await delay(50, undefined, { signal });
+  }
+  signal.throwIfAborted();
 }
-export async function startQuotaCompatibleClient({ executable, archive, root, home, args = [], env = process.env, onStatus = () => {},
-  onSpawn, launch, startupTimeoutMs = 90000 }) {
-  const started = Date.now(), status = { phase: 'scanning', ready: false, installed: 0, errors: 0, targets: 0, pages: 0 };
-  const clientVersion = archive.match(/OpenAI\.Codex_([\d.]+)_/)?.[1];
-  if (clientVersion) status.clientVersion = clientVersion;
-  let child, socket, deadline, resolveReady, rejectReady, pipe, lastReport;
-  const report = () => {
-    const signature = JSON.stringify(status);
-    if (signature !== lastReport) { onStatus({ ...status }); lastReport = signature; }
-    if (status.ready) resolveReady?.();
-    else if (status.errors) rejectReady?.(Object.assign(new Error(status.lastError), { code: status.code || 'native_setup_failed' }));
+
+function noteUiFailure(status, error, failedAsset) {
+  if (status.errors) return;
+  status.errors = 1;
+  status.failurePhase = status.phase;
+  status.code = error.code || 'native_setup_failed';
+  status.lastError = describeError(error);
+  status.failure = errorDetails(error);
+  if (failedAsset) status.failedAsset = failedAsset;
+}
+
+function showQuotaWarning() {
+  const title = 'ChatGPT API';
+  const message = '部分自定义模型的发送额度或 Fast 兼容未加载。ChatGPT 可以继续使用。';
+  let commands = [];
+  if (process.platform === 'win32') {
+    const script = '$shell=New-Object -ComObject WScript.Shell\n[void]$shell.Popup("' + message + '",15,"' + title + '",48)';
+    commands = [[path.join(process.env.WINDIR, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+      ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')]]];
+  } else if (process.platform === 'darwin') {
+    commands = [['/usr/bin/osascript', ['-e', 'display alert "' + title + '" message "' + message + '" as warning giving up after 15']]];
+  } else if (process.env.DISPLAY || process.env.WAYLAND_DISPLAY) {
+    commands = [['zenity', ['--warning', '--timeout=15', '--title=' + title, '--text=' + message]],
+      ['kdialog', ['--title', title, '--passivepopup', message, '15']]];
+  }
+  const next = () => {
+    const command = commands.shift();
+    if (!command) { process.stderr.write(title + ' ' + message + '\n'); return; }
+    const [program, args] = command;
+    const dialog = spawn(program, args, { windowsHide: true, stdio: 'ignore' });
+    dialog.once('error', next);
+    dialog.unref();
   };
+  next();
+}
+
+async function installQuota({ child, port, models, cache, assets, timeoutMs, status, report }) {
+  const disconnected = new AbortController(), { signal } = disconnected;
+  const clientExited = () => disconnected.abort(new Error('Native application exited.'));
+  child.once('exit', clientExited);
+  let socket, pipe, watcher, refresh;
+  const deadline = setTimeout(() => {
+    const commands = pipe?.pendingMethods() || [];
+    const code = port && !pipe ? 'native_endpoint_unavailable' : commands.length ? 'native_command_timeout'
+      : !status.pages ? 'native_page_not_attached' : status.pending === undefined ? 'native_bootstrap_not_started' : 'native_module_load_timeout';
+    const detail = commands.length ? commands.join(', ') : code;
+    disconnected.abort(Object.assign(new Error('客户端界面兼容未就绪（' + detail + '）。'), { code }));
+  }, timeoutMs);
+  deadline.unref();
+  const ended = once(signal, 'abort').then(() => { throw signal.reason; });
+  ended.catch(() => {});
   try {
-    report();
-    const assets = nativeQuotaAssets(archive, path.join(root, 'data/cache/native-ui-index.json')),
-      key = '__chatgpt_api_quota_' + crypto.randomBytes(8).toString('hex'), binding = key + '_notify';
-    status.modules = assets.length;
-    const cache = path.join(root, 'data/cache/catalog-state.json');
-    let routeMode = 'mixed';
-    try { routeMode = JSON.parse(fs.readFileSync(path.join(root, 'data/state/route-state.json'), 'utf8')).mode; } catch {}
-    const models = () => gatewayQuotaModels(JSON.parse(fs.readFileSync(cache, 'utf8')), routeMode);
-    // Validate every detected quota gate, including modules with no other
-    // patches. Installing a Fast/banner module cannot certify the send button.
-    if (models().length && assets.some(asset => asset.legacySubmitCount > asset.submitCount)) throw Object.assign(new Error('当前客户端的 API 发送兼容检查未通过，请更新官方客户端和适配层。'), { code: 'native_send_unsupported' });
-    const bootstrapSource = quotaBootstrap(assets, [], key, binding);
-    status.phase = 'launching'; report();
-    if (launch) {
-      // LaunchServices preserves macOS permission attribution. Its application
-      // cannot inherit pipe descriptors, so use an ephemeral loopback endpoint.
-      const reserve = net.createServer(); reserve.listen(0, '127.0.0.1'); await once(reserve, 'listening');
-      const port = reserve.address().port; await new Promise(resolve => reserve.close(resolve));
-      child = await launch(['--remote-debugging-address=127.0.0.1', '--remote-debugging-port=' + port, ...args]);
-      onSpawn?.(child); status.pid = child.pid; status.phase = 'connecting'; report();
-      const until = Date.now() + startupTimeoutMs;
-      let address, endpointError;
-      while (!address && Date.now() < until && child.exitCode === null) {
-        try { address = await debuggerAddress(port); } catch (error) { endpointError = error; }
-        if (!address) await new Promise(resolve => setTimeout(resolve, 50));
+    if (child.exitCode !== null || child.signalCode !== null) clientExited();
+    signal.throwIfAborted();
+    if (port) {
+      const address = await debuggerAddress(port, signal), parsed = new URL(address);
+      if (parsed.protocol !== 'ws:' || !['127.0.0.1', 'localhost'].includes(parsed.hostname) || Number(parsed.port) !== port) {
+        throw new Error('Invalid native compatibility endpoint.');
       }
-      if (!address) throw Object.assign(new Error('客户端兼容连接未建立，请先更新官方客户端。'), { code: 'native_endpoint_unavailable', cause: endpointError });
-      const parsed = new URL(address);
-      if (parsed.protocol !== 'ws:' || !['127.0.0.1', 'localhost'].includes(parsed.hostname) || Number(parsed.port) !== port) throw new Error('Invalid native compatibility endpoint.');
-      socket = new WebSocket(address, { handshakeTimeout: startupTimeoutMs }); await once(socket, 'open');
-    } else {
-      child = spawn(executable, ['--remote-debugging-pipe', ...args], { env: { ...env, CODEX_HOME: home }, windowsHide: true,
-        detached: true, stdio: ['ignore', 'ignore', onSpawn ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
-      await once(child, 'spawn');
-      onSpawn?.(child); status.pid = child.pid; status.phase = 'connecting'; report();
+      socket = new WebSocket(address, { handshakeTimeout: timeoutMs });
+      socket.on('error', () => {});
+      await Promise.race([once(socket, 'open'), ended]);
     }
-    pipe = nativePipe(child, socket, startupTimeoutMs);
-    const sessions = new Set();
-    const evaluate = async (expression, id) => {
-      const value = await pipe.send('Runtime.evaluate', { expression, returnByValue: true }, id);
-      if (value.exceptionDetails) {
-        const detail = value.exceptionDetails;
-        throw Object.assign(new Error((detail.exception?.description || detail.text || 'Unknown script exception').slice(0, 1600)),
-          { code: 'native_script_exception', method: 'Runtime.evaluate' });
-      }
-      return value;
+    pipe = nativePipe(child, socket, timeoutMs, disconnected);
+    const sessions = new Set(), key = '__chatgpt_api_quota_' + crypto.randomBytes(8).toString('hex'), binding = key + '_notify';
+    let latest = models();
+    const writeModels = (id, ids) => pipe.send('Runtime.evaluate', {
+      expression: 'if(globalThis[' + JSON.stringify(key) + '])globalThis[' + JSON.stringify(key) + '].models=new Set(' + JSON.stringify(ids) + ')',
+    }, id);
+    const seeds = new Map();
+    let resolveReady;
+    const ready = new Promise(resolve => { resolveReady = resolve; });
+    const failed = (error, id) => {
+      if (!sessions.has(id) || signal.aborted) return;
+      disconnected.abort(error);
     };
-    const accept = value => {
-      if (status.ready && !value.error) return;
-      status.pending = value.pending;
-      status.installed = Math.max(status.installed, value.installed || 0);
-      if (!status.ready) status.executed = value.executed;
-      status.ready ||= value.pending === 0 && value.installed > 0 && !value.error;
-      status.phase = status.ready ? 'ready' : 'installing';
-      if (value.error) {
-        status.errors++; status.lastError = value.error; status.code = 'native_module_failed';
-        status.failedAsset = value.failedAsset;
-      }
-      report();
-    };
-    const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
-    // Attach the handler before renderer events can arrive.
-    ready.catch(() => {});
     pipe.onEvent(event => {
-      (async () => {
-        if (event.method === 'Target.detachedFromTarget') { sessions.delete(event.params.sessionId); return; }
-        if (event.method === 'Runtime.bindingCalled' && event.params.name === binding) {
-          const result = JSON.parse(event.params.payload);
-          accept(result); return;
-        }
-        if (event.method !== 'Target.attachedToTarget') return;
-        const id = event.params.sessionId, target = event.params.targetInfo;
-        status.targets++;
-        if (target.type !== 'page' || target.url && !target.url.startsWith('app://-') && target.url !== 'about:blank') {
-          await pipe.send('Runtime.runIfWaitingForDebugger', {}, id); return;
-        }
-        sessions.add(id);
-        status.pages++; if (!status.ready) status.phase = 'installing'; report();
-        const source = bootstrapSource + ';if(globalThis[' + JSON.stringify(key) + '])globalThis[' + JSON.stringify(key) + '].models=new Set(' + JSON.stringify(models()) + ')';
-        // Queue the document bootstrap before releasing native script execution.
-        const setup = pipe.send('Page.addScriptToEvaluateOnNewDocument', { source }, id);
-        const bound = pipe.send('Runtime.addBinding', { name: binding }, id);
-        await Promise.all([setup, bound, pipe.send('Runtime.runIfWaitingForDebugger', {}, id)]);
-        await evaluate(source, id);
-        const result = await evaluate('JSON.stringify(globalThis[' + JSON.stringify(key) + ']&&{pending:globalThis[' + JSON.stringify(key) + '].pending,installed:globalThis[' + JSON.stringify(key) + '].installed,error:globalThis[' + JSON.stringify(key) + '].error,failedAsset:globalThis[' + JSON.stringify(key) + '].failedAsset})', id);
-        if (result.result?.value) {
-          const value = JSON.parse(result.result.value);
-          accept(value);
-        }
-        report();
-      })().catch(error => { if (child.exitCode === null) { status.errors++; status.code = error.code || 'native_setup_failed'; status.lastError = error.message; status.failure = errorDetails(error); report(); } });
+      if (signal.aborted) return;
+      if (event.method === 'Target.detachedFromTarget') {
+        sessions.delete(event.params.sessionId); seeds.delete(event.params.sessionId); return;
+      }
+      if (event.method === 'Runtime.bindingCalled' && event.params.name === binding && sessions.has(event.sessionId)) {
+        const id = event.sessionId;
+        try {
+          const value = JSON.parse(event.params.payload);
+          if (value.initial && seeds.get(id) !== latest) writeModels(id, latest).catch(error => failed(error, id));
+          if (status.ready) return;
+          if (value.error) noteUiFailure(status, Object.assign(new Error(value.error), { code: 'native_module_failed' }), value.failedAsset);
+          status.pending = value.pending;
+          status.installed = Math.max(status.installed, value.installed || 0);
+          if (value.pending === 0) {
+            if (!status.installed) noteUiFailure(status, new Error('No native compatibility modules were installed.'));
+            status.ready = status.installed > 0;
+            status.phase = status.errors ? 'degraded' : 'ready';
+            report(); resolveReady();
+          }
+        } catch (error) { failed(error, id); }
+        return;
+      }
+      if (event.method !== 'Target.attachedToTarget') return;
+      const { sessionId: id, targetInfo: target } = event.params;
+      status.targets++;
+      if (target.type !== 'page' || target.url && target.url !== 'about:blank' && !target.url.startsWith('app://-/')) return;
+      sessions.add(id); status.pages++;
+      if (status.phase === 'connecting') { status.phase = 'installing'; report(); }
+      const ids = latest; seeds.set(id, ids);
+      // Register in the renderer's document context. A debugger evaluation
+      // made during startup can leave the app:// module imports pending.
+      pipe.send('Runtime.addBinding', { name: binding }, id)
+        .then(() => pipe.send('Page.addScriptToEvaluateOnNewDocument', { source: quotaBootstrap(assets, ids, key, binding), runImmediately: true }, id))
+        .catch(error => failed(error, id));
     });
-    deadline = setTimeout(() => {
-      const commands = pipe.pendingMethods();
-      const code = commands.length ? 'native_command_timeout' : !status.pages ? 'native_page_not_attached'
-        : status.pending === undefined ? 'native_bootstrap_not_started' : 'native_module_load_timeout';
-      const reason = commands.length ? '客户端兼容命令未响应：' + commands.join(', ') : !status.pages ? '未连接到客户端主页面'
-        : status.pending === undefined ? '客户端主页面兼容脚本未开始执行' : '客户端界面模块加载未完成（剩余 ' + status.pending + ' 个）';
-      rejectReady(Object.assign(new Error(reason + '。请先更新官方客户端；详细原因见 data/state/native-quota.json。'), { code }));
-    }, startupTimeoutMs);
-    const exited = () => rejectReady(Object.assign(new Error('客户端在兼容初始化期间退出（' + (child.signalCode || child.exitCode) + '）。'), { code: 'native_client_exited' }));
-    child.once('exit', exited);
-    if (child.exitCode !== null || child.signalCode !== null) exited();
-    await pipe.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
-    await ready;
+    const attached = pipe.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
+    await Promise.race([Promise.all([attached, ready]), ended]);
     clearTimeout(deadline);
-    let refresh;
-    const watcher = fs.watch(path.dirname(cache), (_type, name) => {
-      if (String(name) !== path.basename(cache)) return;
-      clearTimeout(refresh); refresh = setTimeout(() => {
+    if (!status.ready) return;
+    watcher = fs.watch(path.dirname(cache), (_type, name) => {
+      if (name && String(name) !== path.basename(cache)) return;
+      clearTimeout(refresh);
+      refresh = setTimeout(() => {
         let ids; try { ids = models(); } catch { return; }
-        const expression = 'if(globalThis[' + JSON.stringify(key) + '])globalThis[' + JSON.stringify(key) + '].models=new Set(' + JSON.stringify(ids) + ')';
-        for (const session of sessions) evaluate(expression, session).catch(error => {
-          if (!sessions.has(session) || child.exitCode !== null) return;
-          status.errors++; status.lastError = describeError(error); status.failure = errorDetails(error); report();
-        });
+        if (ids.length === latest.length && ids.every((id, index) => id === latest[index])) return;
+        latest = ids;
+        for (const session of sessions) writeModels(session, ids).catch(error => failed(error, session));
       }, 100);
     });
-    child.once('exit', () => {
-      watcher.close(); clearTimeout(refresh); socket?.close();
-      status.ready = false; status.phase = 'stopped'; status.exitCode = child.exitCode; status.signal = child.signalCode;
-      onStatus({ ...status });
-    });
-    return child;
+    watcher.once('error', error => disconnected.abort(error));
+    await ended;
   } catch (error) {
-    status.failurePhase = status.phase; status.elapsedMs = Date.now() - started;
+    const failure = signal.aborted ? signal.reason : error;
+    // The debugging pipe can close just before Electron reports its exit.
+    if (!status.ready && failure.code === 'native_debugger_closed' && child.exitCode === null && child.signalCode === null) await delay(100);
+    const exited = child.exitCode !== null || child.signalCode !== null;
     status.pendingCommands = pipe?.pendingMethods();
-    socket?.terminate();
-    let failure = error;
-    try {
-      if (child && child.exitCode === null && child.signalCode === null) { child.kill(); await once(child, 'exit'); }
-    } catch (cleanupError) {
-      failure = new AggregateError([error, cleanupError], error.message + '\n' + cleanupError.message, { cause: error });
+    if (!exited) {
+      noteUiFailure(status, failure);
     }
-    child?.stdio?.[3]?.destroy(); child?.stdio?.[4]?.destroy();
-    status.ready = false; status.phase = 'failed'; status.errors = Math.max(1, status.errors); status.lastError = describeError(failure);
-    status.code ||= error.code || 'native_setup_failed'; status.failure ||= errorDetails(failure);
-    try { report(); } catch {}
-    throw failure;
-  } finally { clearTimeout(deadline); }
+    status.phase = exited ? 'stopped' : 'degraded'; status.ready = false;
+    report();
+  } finally {
+    clearTimeout(deadline); clearTimeout(refresh); watcher?.close();
+    child.off('exit', clientExited);
+    if (pipe) pipe.close(); else socket?.terminate();
+  }
 }
+
+export async function startQuotaCompatibleClient({ executable, archive, root, home, args = [], env = process.env,
+  onStatus = value => atomicPrivate(path.join(root, 'data/state/native-quota.json'), { updatedAt: new Date().toISOString(), ...value }),
+  onWarning = showQuotaWarning, onSpawn, launch, startupTimeoutMs = 15000 }) {
+  const status = { phase: 'scanning', ready: false, installed: 0, errors: 0, targets: 0, pages: 0 };
+  const clientVersion = archive.match(/OpenAI\.Codex_([\d.]+)_/)?.[1];
+  if (clientVersion) status.clientVersion = clientVersion;
+  let warned = false;
+  const report = () => {
+    try { onStatus({ ...status }); } catch {}
+    if (!warned && status.phase === 'degraded' && status.failurePhase !== 'ready') {
+      warned = true;
+      try { onWarning({ ...status }); } catch {}
+    }
+  };
+  const cache = path.join(root, 'data/cache/catalog-state.json');
+  let routeMode = 'mixed';
+  try { routeMode = JSON.parse(fs.readFileSync(path.join(root, 'data/state/route-state.json'), 'utf8')).mode; } catch {}
+  const models = () => gatewayQuotaModels(JSON.parse(fs.readFileSync(cache, 'utf8')), routeMode);
+  let assets, port, setupError;
+  report();
+  try {
+    const candidates = nativeQuotaAssets(archive, path.join(root, 'data/cache/native-ui-index.json'));
+    const hasGateway = models().length > 0;
+    for (const asset of candidates) {
+      if (!asset.supportedFormat) {
+        noteUiFailure(status, Object.assign(new Error('客户端界面模块格式已变更。'), { code: 'native_module_format' }), asset.url);
+      } else if (hasGateway && asset.legacySubmitCount > asset.submitCount) {
+        noteUiFailure(status, Object.assign(new Error('当前客户端的 API 发送界面规则已变更。'), { code: 'native_send_unsupported' }), asset.url);
+      }
+    }
+    const supported = candidates.filter(asset => asset.supportedFormat && asset.count);
+    status.modules = supported.length;
+    if (!supported.length) throw new Error('No supported native compatibility modules were found.');
+    if (launch) {
+      // LaunchServices cannot pass the debugging pipe to the application.
+      const reserve = net.createServer();
+      reserve.listen(0, '127.0.0.1'); await once(reserve, 'listening');
+      port = reserve.address().port;
+      await new Promise(resolve => reserve.close(resolve));
+    }
+    assets = supported;
+  } catch (error) { setupError = error; }
+  const debugArgs = !assets ? [] : port ? ['--remote-debugging-address=127.0.0.1', '--remote-debugging-port=' + port] : ['--remote-debugging-pipe'];
+  let child;
+  if (launch) child = await launch([...debugArgs, ...args]);
+  else {
+    const stdio = ['ignore', 'ignore', onSpawn ? 'pipe' : 'ignore'];
+    if (assets) stdio.push('pipe', 'pipe');
+    child = spawn(executable, [...debugArgs, ...args], { env: { ...env, CODEX_HOME: home }, windowsHide: true, detached: true, stdio });
+    await once(child, 'spawn');
+  }
+  onSpawn?.(child);
+  status.pid = child.pid;
+  if (setupError) {
+    noteUiFailure(status, setupError);
+    status.phase = 'degraded';
+    report();
+  } else {
+    status.phase = 'connecting'; report();
+    void installQuota({ child, port, models, cache, assets, timeoutMs: startupTimeoutMs, status, report });
+  }
+  return child;
+}
+
 async function main() {
   const [executable, archive, root, home] = process.argv.slice(2);
-  const file = path.join(root, 'data/state/native-quota.json');
-  const child = await startQuotaCompatibleClient({ executable, archive, root, home, onStatus: value => atomicPrivate(file, value) });
+  const child = await startQuotaCompatibleClient({ executable, archive, root, home });
   if (child.exitCode === null && child.signalCode === null) await once(child, 'exit');
   process.exitCode = child.exitCode ?? (child.signalCode ? 1 : 0);
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) main().catch(error => { process.stderr.write(error.message + '\n'); process.exitCode = 1; });
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) main().catch(error => { process.stderr.write(error.message + '\\n'); process.exitCode = 1; });

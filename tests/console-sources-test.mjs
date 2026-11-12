@@ -17,14 +17,16 @@ fs.cpSync(path.join(root, 'assets/console'), path.join(fixture, 'assets/console'
 for (const name of ['model-template.json', 'reasoning-levels.json', 'model-contexts.json']) fs.copyFileSync(path.join(root, 'assets', name), path.join(fixture, 'assets', name));
 fs.writeFileSync(path.join(fixture, 'package.json'), JSON.stringify({ version: '3.1.5' }));
 const sockets = new Set(), children = [], clients = [], records = [], checks = [];
-let modelRequests = 0, serial = 0, sourceBDown = false;
+let modelRequests = 0, serial = 0, sourceBDown = false, holdModels;
 const keys = { a: 'private-fixture-A-never-render', b: 'private-fixture-B-never-render' };
 const models = ['GPT/gpt-6.1-sol', '词元计划/glm-5.3-flash', 'qwen-image'];
 const peer = http.createServer(async (req, res) => {
   const source = req.url.split('/')[1], base = '/' + source + '/v1';
   if (req.headers.authorization !== 'Bearer ' + keys[source]) { res.writeHead(401); res.end('wrong source key'); return; }
   if (req.url === base + '/models') {
-    modelRequests++; if (source === 'b' && sourceBDown) { res.writeHead(503); res.end('{}'); return; }
+    modelRequests++;
+    if (source === 'a' && holdModels) { holdModels(res); return; }
+    if (source === 'b' && sourceBDown) { res.writeHead(503); res.end('{}'); return; }
     res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ data: models.map(id => ({ id, context_window: source === 'a' ? 128000 : 512000,
       ...(id === 'qwen-image' ? { supported_complexity_levels: source === 'a' ? ['low', 'high'] : ['low', 'medium'], supported_quality_levels: ['auto', 'low', 'high'] }
         : id === models[0] ? { supported_reasoning_levels: [{ effort: 'low' }, { effort: 'high' }] } : {}) })) })); return;
@@ -36,7 +38,7 @@ const peer = http.createServer(async (req, res) => {
   res.writeHead(200, { 'content-type': 'text/event-stream' });
   if (req.url.endsWith('/chat/completions')) {
     const event = { id: 'chat_source_' + (++serial), model, created: 1 };
-    res.write('data: ' + JSON.stringify({ ...event, choices: [{ index: 0, delta: { content: 'SOURCE_' + source } }] }) + '\n\n');
+    res.write('data: ' + JSON.stringify({ ...event, choices: [{ index: 0, delta: { content: 'SOURCE_' + source, reasoning_content: 'reasoning from source ' + source } }] }) + '\n\n');
     res.end('data: ' + JSON.stringify({ ...event, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }) + '\n\ndata: [DONE]\n\n'); return;
   }
   const response = { id: 'resp_source_' + (++serial), object: 'response', model, status: 'completed', output: [] };
@@ -111,8 +113,15 @@ try {
   const third = await sharedTurn({ model: chatAlias, previous_response_id: second.id, input: [{ role: 'user', content: 'Chat route continuation' }] });
   assert.equal(third.model, chatAlias); assert.equal(records.at(-1).source, 'b'); assert(records.at(-1).url.endsWith('/chat/completions'));
   for (const content of ['Original source history', 'Second source continuation', 'Chat route continuation']) assert(JSON.stringify(records.at(-1).body.messages).includes(content));
+  const thoughtFromB = await sharedTurn({ model: chatAlias, input: [{ role: 'user', content: 'Start a Chat history' }] });
+  await sharedTurn({ model: chatAlias, previous_response_id: thoughtFromB.id, input: [{ role: 'user', content: 'Continue on source B' }] });
+  assert(records.at(-1).body.messages.some(message => message.reasoning_content === 'reasoning from source b'));
+  await sharedTurn({ model: models[1], previous_response_id: thoughtFromB.id, input: [{ role: 'user', content: 'Continue on source A' }] });
+  assert(!records.at(-1).body.messages.some(message => message.reasoning_content), 'Same-name API sources were treated as one reasoning source');
+  assert(JSON.stringify(records.at(-1).body.messages).includes('reasoning from source b'));
   shared.close();
   checks.push('A single WebSocket preserves original history across same-name API sources and Responses-to-Chat switching without foreign response IDs');
+  checks.push('Private reasoning fields stay with their source; readable text survives switching between two APIs with the same model ID');
   const before = modelRequests; await delay(100); await fetch('http://127.0.0.1:' + port + '/healthz'); assert.equal(modelRequests, before);
   checks.push('Health reads and runtime idle time never trigger periodic model discovery');
   consoleServer = await startConsole({ root: fixture, open: false });
@@ -220,13 +229,43 @@ try {
   fs.writeFileSync(settingsFile, configuredSources);
   checks.push('A reused console rereads changed legacy settings and rejects drafts from before that change');
   await consoleServer.close(); consoleServer = null;
-  const automatic = await startConsole({ root: fixture, open: true, opener: () => {} });
-  const closeEvent = once(automatic.server, 'close'), controller = new AbortController();
-  const connection = await fetch(new URL('/api/lifetime', automatic.url), { signal: controller.signal,
-    headers: { authorization: 'Bearer ' + new URL(automatic.url).hash.slice(1) } });
-  await connection.body.getReader().read(); controller.abort();
+  consoleServer = await startConsole({ root: fixture, open: true, opener: () => {} });
+  const closeEvent = once(consoleServer.server, 'close');
+  const consoleState = path.join(fixture, 'data/state/console.json');
+  const authorization = 'Bearer ' + new URL(consoleServer.url).hash.slice(1);
+  async function openView() {
+    const controller = new AbortController();
+    const connection = await fetch(new URL('/api/lifetime', consoleServer.url), { signal: controller.signal, headers: { authorization: 'Bearer ' + new URL(consoleServer.url).hash.slice(1) } });
+    assert.equal(connection.status, 200);
+    await connection.body.getReader().read();
+    return controller;
+  }
+  const firstView = await openView(), lastView = await openView();
+  firstView.abort();
+  await delay(1700);
+  assert(consoleServer.server.listening, 'Closing one page stopped another');
+  const modelCache = path.join(fixture, 'data/cache/gateway-sources.json');
+  const savedCatalog = fs.readFileSync(modelCache);
+  const requested = new Promise(resolve => { holdModels = res => resolve({ closed: once(res, 'close') }); });
+  const refreshing = fetch(new URL('/api/refresh', consoleServer.url), { method: 'POST', headers: { authorization } });
+  const interrupted = assert.rejects(refreshing);
+  const sourceRequest = await requested;
+  lastView.abort();
   await closeEvent;
-  checks.push('The console exits after its last page closes, using the connection close event without heartbeat polling');
+  await interrupted; await sourceRequest.closed;
+  assert(!fs.existsSync(consoleState));
+  assert.deepEqual(fs.readFileSync(modelCache), savedCatalog, 'Closing the console replaced its previously completed catalog');
+  consoleServer = await startConsole({ root: fixture, open: true, opener: () => {} });
+  const manualClose = once(consoleServer.server, 'close');
+  await openView();
+  const closeResponse = await fetch(new URL('/api/close', consoleServer.url), { method: 'POST',
+    headers: { authorization: 'Bearer ' + new URL(consoleServer.url).hash.slice(1) } });
+  assert.deepEqual(await closeResponse.json(), { closed: true });
+  await manualClose;
+  consoleServer = null;
+  await assert.rejects(startConsole({ root: fixture, opener: () => { throw new Error('fixture browser unavailable'); } }), /fixture browser unavailable/);
+  assert(!fs.existsSync(consoleState));
+  checks.push('Last-tab exit and the close button release the server, active refresh, and state file; another tab keeps it open');
   const report = { passed: true, checks }; console.log(JSON.stringify(report, null, 2));
   fs.mkdirSync(path.join(root, 'data/diagnostics/console315'), { recursive: true });
   fs.writeFileSync(path.join(root, 'data/diagnostics/console315/console-sources-results.json'), JSON.stringify(report, null, 2));

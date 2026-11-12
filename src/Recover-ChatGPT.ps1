@@ -1,4 +1,4 @@
-﻿param([switch]$Immediate, [string]$Session = '', [int]$ControllerPid = 0, [switch]$StopOrphanedClient)
+﻿param([switch]$Immediate, [string]$Session = '', [int]$ControllerPid = 0, [switch]$WaitForClient)
 $ErrorActionPreference = 'Stop'
 $packageDir = Split-Path -Parent $PSScriptRoot
 . (Join-Path $packageDir 'src\Common.ps1')
@@ -14,7 +14,7 @@ try {
     $sameBoot = -not $state.boot -or ([string]$state.boot -eq (Get-RecoveryBoot))
     # Login recovery runs once and only recorded process identities can defer it.
     if ($sameBoot -and (Test-RecordedProcess $state.client)) {
-        if ($StopOrphanedClient -and -not (Test-RecordedProcess $state.controller)) { Stop-LauncherRecoveryClient $state.client }
+        if ($WaitForClient) { Wait-LauncherRecoveryClient $state.client }
         else { if ($Immediate) { throw '本次启动的 ChatGPT 仍在运行，尚不能恢复配置。' }; exit 0 }
     }
     if (-not $Immediate -and $sameBoot -and ((Test-RecordedProcess $state.owner) -or (Test-RecordedProcess $state.controller))) { exit 0 }

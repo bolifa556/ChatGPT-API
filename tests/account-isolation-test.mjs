@@ -119,4 +119,24 @@ assert.deepEqual(legacyRestored['thread-project-assignments'], legacyOriginal['t
 assert.equal(legacyRestored['electron-account-renderer-state-v1'].owner, 'old-account');
 assert.equal(legacyRestored.unrelated, 'new-value');
 
+const journal = path.join(fixture, 'data/state/desktop-state-compatibility.json');
+for (const future of ['unsupported JSON', '[]', '{"electron-account-renderer-state-v1":{"owner":{"type":"account"}}}']) {
+  fs.writeFileSync(file, future);
+  assert.equal(overlayDesktopState(ctx).applied, false);
+  assert(!fs.existsSync(journal));
+  assert.equal(fs.readFileSync(file, 'utf8'), future);
+}
+fs.writeFileSync(file, JSON.stringify(baseline));
+overlayDesktopState(ctx);
+const overlay = fs.readFileSync(file, 'utf8'), savedJournal = fs.readFileSync(journal);
+const futureScope = '{"electron-account-renderer-state-v1":{"owner":{"type":"account"}}}';
+fs.writeFileSync(file, futureScope);
+assert.equal(restoreDesktopState(ctx).pending, true);
+assert.equal(overlayDesktopState(ctx).applied, false);
+assert.equal(fs.readFileSync(file, 'utf8'), futureScope);
+assert.deepEqual(fs.readFileSync(journal), savedJournal);
+fs.writeFileSync(file, overlay);
+restoreDesktopState(ctx);
+assert.deepEqual(JSON.parse(fs.readFileSync(file)), baseline);
+
 console.log(JSON.stringify({ passed: true, checks: ['API-only project and onboarding state without account credentials', 'normal and interrupted restore without native scratch files', 'native preference edits retained in their original account scope', 'three repeated launches retain native preferences', 'explicit native account switches retain their own workspace', 'missing settings recover exact native snapshot memberships only when project IDs still exist'] }));

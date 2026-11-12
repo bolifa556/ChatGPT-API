@@ -75,7 +75,8 @@ export class GatewaySources {
     return models;
   }
   loadCached(legacy) { this.adoptLegacy(legacy); return this.collect(this.saved.sources || []); }
-  async discover() {
+  async discover({ signal } = {}) {
+    signal?.throwIfAborted();
     this.settings = readSettings(this.root, this.env); this.revision = settingsRevision(this.settings);
     for (const profile of this.settings.providers) if (profile.apiKey) this.secrets.add(profile.apiKey);
     const records = [], statuses = [];
@@ -84,9 +85,10 @@ export class GatewaySources {
       const status = { id: profile.id, name: profile.name, fingerprint: this.identity(profile), ready: false, models: 0, checkedAt: new Date().toISOString() };
       try {
         if (!profile.apiKey || !profile.baseUrl) throw new Error('API URL or Key is missing.');
+        const timeout = AbortSignal.timeout(12000);
         const up = await request(this.base(profile) + '/models', { dispatcher: this.dispatcher(profile),
           headers: { authorization: 'Bearer ' + profile.apiKey, accept: 'application/json', 'accept-encoding': 'identity' },
-          signal: AbortSignal.timeout(12000), headersTimeout: 12000, bodyTimeout: 12000 });
+          signal: signal ? AbortSignal.any([signal, timeout]) : timeout, headersTimeout: 12000, bodyTimeout: 12000 });
         const body = await up.body.text();
         if (up.statusCode < 200 || up.statusCode >= 300) throw Object.assign(new Error('HTTP ' + up.statusCode), { code: 'model_catalog_http_error', status: up.statusCode });
         const data = JSON.parse(body), ids = new Set();
@@ -97,6 +99,7 @@ export class GatewaySources {
         const record = { id: profile.id, fingerprint: this.identity(profile), checkedAt: new Date().toISOString(), models, nativeHeaderPrefix };
         records.push(record); Object.assign(status, { ready: true, checkedAt: record.checkedAt, models: models.length });
       } catch (error) {
+        if (signal?.aborted) return;
         status.error = redact(describeError(error), this.settings);
         status.failure = errorDetails(error, text => redact(text, this.settings));
         if (previous && Date.now() - Date.parse(previous.checkedAt) < TTL) {
@@ -105,6 +108,7 @@ export class GatewaySources {
       }
       statuses.push(status);
     }));
+    signal?.throwIfAborted();
     this.saved = { version: 1, revision: this.revision, sources: records, statuses };
     atomicPrivate(this.file, this.saved); this.collect(records);
     const ordered = this.profiles().map(profile => statuses.find(status => status.id === profile.id));

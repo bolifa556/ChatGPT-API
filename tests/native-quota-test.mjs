@@ -57,6 +57,12 @@ assert.equal(adaptedSubmit.legacySubmitCount, 1);
 const adaptedNamed = scopeNativeQuota(namedSubmitSource, key);
 assert.equal(adaptedNamed.submitCount, 1);
 assert.equal(adaptedNamed.legacySubmitCount, 1);
+const renamedSource = namedSubmitSource.replaceAll('eLmE', 'newReserveModule').replaceAll('a6kU', 'newUsageModule')
+  .replace('i._U', 'i.readReserve').replace('C.F9', 'C.reserve').replace('i.Ul', 'i.readUsage').replace('P.U', 'P.usage');
+const renamed = scopeNativeQuota(renamedSource, key);
+assert.equal(renamed.submitCount, 1, 'Minified import names changed despite equivalent native send rules');
+assert.equal(scopeNativeQuota(renamedSource.replace('"local"===nF', '"local"===otherHost'), key).submitCount, 0,
+  'A usage reason from a different host was scoped to the local model');
 const nativeSubmit = 'let blocked=otherBlock||workHomePolicy;return{activeCollaborationMode:mode,submitBlockState:state,submitDisabled:blocked};';
 const currentSubmit = scopeNativeQuota(source + nativeSubmit, key);
 assert.equal(currentSubmit.legacySubmitCount, 0);
@@ -86,6 +92,9 @@ try {
       if (!gateway) assert.deepEqual(result, invoke(submitSource));
       const named = invoke(adaptedNamed.text), expectedReasons = [otherBlock && 'permission-blocked', !gateway && hard && 'reserve-limit', !gateway && host === 'local' && ordinary && 'usage-limit'].filter(Boolean).join(',');
       assert.equal(named.submitDisabledReasons, expectedReasons, JSON.stringify({host,model,hard,ordinary,otherBlock}));
+      const afterUpgrade = new Function('host', 'model', 'otherBlock', 'n', 'i', renamed.text)(host, model, otherBlock,
+        name => name === 'newReserveModule' ? { reserve: hard } : { usage: ordinary }, { readReserve: value => value, readUsage: value => value });
+      assert.deepEqual(afterUpgrade, named);
       if (!gateway) assert.deepEqual(named, invoke(namedSubmitSource));
     }
   }

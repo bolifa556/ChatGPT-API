@@ -4,11 +4,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { createZstdDecompress } from 'node:zlib';
 import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { atomicPrivate } from './settings.mjs';
-import { RolloutIndex } from './rollout-index.mjs';
+import { createDiagnosticLog } from './diagnostics.mjs';
+import { RolloutIndex, rolloutBytes } from './rollout-index.mjs';
 
 const journalPath = root => path.join(root, 'data/state/thread-provider-compatibility.json');
 const canonicalHome = home => fs.realpathSync(home);
@@ -81,24 +81,20 @@ function openDatabase(file, readOnly) {
   // It has no routing rows, and opening it read-only can ask SQLite to recover.
   if (fs.statSync(file).size === 0) return null;
   const db = new DatabaseSync(file, { readOnly });
-  db.exec('PRAGMA busy_timeout = 0');
-  const columns = new Set(db.prepare('PRAGMA table_info(threads)').all().map(row => row.name));
-  if (!['id', 'model_provider'].every(name => columns.has(name))) { db.close(); return null; }
-  return db;
+  try {
+    db.exec('PRAGMA busy_timeout = 0');
+    const table = db.prepare('PRAGMA table_list(threads)').get();
+    if (table?.type === 'table') {
+      const columns = new Set(db.prepare('PRAGMA table_xinfo(threads)').all().filter(row => row.hidden === 0).map(row => row.name));
+      if (columns.has('id') && columns.has('model_provider')) return db;
+    }
+  } catch (error) { db.close(); throw error; }
+  db.close();
+  return null;
 }
-async function* rolloutBytes(file) {
-  if (!file.endsWith('.jsonl.zst')) { yield* fs.createReadStream(file); return; }
-  const size = fs.statSync(file).size;
-  for (let offset = 0; offset < size;) {
-    const input = fs.createReadStream(file, { start: offset }), source = createZstdDecompress({ chunkSize: 64 * 1024 });
-    input.once('error', error => source.destroy(error)); input.pipe(source);
-    try { yield* source; }
-    finally { source.destroy(); input.destroy(); }
-    // Node's Zstandard decoder stops at the end of one frame. Native readers
-    // accept concatenated frames, so continue from the exact consumed offset.
-    if (!source.bytesWritten) throw new Error('Compressed conversation did not contain a complete Zstandard frame.');
-    offset += source.bytesWritten;
-  }
+function skipDatabase(failed, home, file, error) {
+  if (!['ERR_SQLITE_ERROR', 'ENOENT', 'EACCES', 'EPERM'].includes(error.code)) throw error;
+  failed.push({ file: path.relative(home, file), code: error.code, message: error.message });
 }
 async function* lines(file) {
   let pending = [], length = 0;
@@ -201,13 +197,20 @@ function originalThread(state, file, meta) {
   if (!moved.length) return null;
   throw new Error('An archived conversation has ambiguous duplicate records; its recovery journal was retained.');
 }
+function logSkipped(root, phase, failed) {
+  if (!failed.length) return;
+  createDiagnosticLog(path.join(root, 'data/logs/history-compat.log'))(JSON.stringify({
+    phase, skipped: failed.length, files: failed.slice(0, 12),
+  }));
+}
+
 export async function restoreThreadProviders({ home, root }) {
   const journal = journalPath(root);
   if (!fs.existsSync(journal)) return { restored: 0 };
   home = canonicalHome(home);
   const state = JSON.parse(fs.readFileSync(journal, 'utf8')); validateJournal(state, home);
   const index = new RolloutIndex(home, root, metadata, lines);
-  const jobs = [];
+  const jobs = [], failed = [];
   const files = rolloutFiles(home);
   index.undo(state.undo, files);
   // Keep the durable undo until the entire restore commits. In-place metadata
@@ -216,6 +219,7 @@ export async function restoreThreadProviders({ home, root }) {
   // Paths can move when a conversation is archived. Match the native session ID.
   for (const file of files) {
     const entry = await index.get(file);
+    if (entry.compressionError) { failed.push({ file: path.relative(home, file), ...entry.compressionError }); continue; }
     const thread = entry.id ? originalThread(state, file, { id: entry.id, key: entry.records[0]?.key }) : null;
     if (!thread) continue;
     const saved = new Map();
@@ -240,13 +244,23 @@ export async function restoreThreadProviders({ home, root }) {
   // Recovery bytes become durable before touching an existing compressed slot.
   atomicPrivate(journal, state, { durable: true });
   await rewriteJobs(index, jobs);
-  const databaseFiles = new Set([...state.databases.map(item => item.file), ...databases(home)]);
+  const recordedDatabases = new Map(state.databases.map(item => [item.file, item.rows]));
+  const databaseFiles = new Set([...recordedDatabases.keys(), ...databases(home)]);
   for (const file of databaseFiles) {
     if (!fs.existsSync(file)) continue;
-    const db = openDatabase(file, false); if (!db) continue;
+    let db;
+    try { db = openDatabase(file, false); }
+    catch (error) {
+      // Native upgrades may leave retired indexes next to the active one. A
+      // journaled index can contain our writes and still needs recovery.
+      if (recordedDatabases.has(file)) throw error;
+      skipDatabase(failed, home, file, error);
+      continue;
+    }
+    if (!db) continue;
     try {
       db.exec('BEGIN IMMEDIATE');
-      const original = new Map((state.databases.find(item => item.file === file)?.rows || []).map(row => [row.id, row.model_provider]));
+      const original = new Map((recordedDatabases.get(file) || []).map(row => [row.id, row.model_provider]));
       const update = db.prepare('UPDATE threads SET model_provider = ? WHERE id = ? AND model_provider = ?');
       for (const id of new Set(state.threads.map(thread => thread.id))) {
         const provider = original.has(id) ? original.get(id) : recordedProvider(state, id);
@@ -265,7 +279,8 @@ export async function restoreThreadProviders({ home, root }) {
   }
   index.save();
   fs.unlinkSync(journal);
-  return { restored: state.threads.length };
+  logSkipped(root, 'restore', failed);
+  return { restored: state.threads.length, failed };
 }
 export async function repairThreadProviders({ home, root, provider = 'chatgpt_api_launcher', dryRun = false }) {
   home = canonicalHome(home);
@@ -274,30 +289,39 @@ export async function repairThreadProviders({ home, root, provider = 'chatgpt_ap
   if (fs.existsSync(journal)) throw new Error('Restore the previous conversation compatibility session before starting another.');
   const index = new RolloutIndex(home, root, metadata, lines);
   let threads = [];
+  const failed = [];
   for (const file of rolloutFiles(home)) {
-    const { id, originalProvider, records: indexed } = await index.get(file);
+    const { id, originalProvider, records: indexed, compressionError } = await index.get(file);
+    if (compressionError) { failed.push({ file: path.relative(home, file), ...compressionError }); continue; }
     const records = indexed.map(({ key, provider }) => ({ key, provider }));
-    if (id) threads.push({ id, relative: path.relative(home, file), originalProvider, records, differs: records.some(record => record.provider !== provider) });
+    if (typeof id === 'string' && id && records.length) {
+      threads.push({ id, relative: path.relative(home, file), originalProvider, records, differs: records.some(record => record.provider !== provider) });
+    }
   }
   const known = new Map(threads.map(thread => [thread.id, thread]));
   const dbs = [];
   for (const file of databases(home)) {
-    const db = openDatabase(file, true); if (!db) continue;
+    let db, rows;
     try {
-      const rows = db.prepare('SELECT id, model_provider FROM threads').all().filter(row => known.has(row.id));
-      for (const row of rows) {
-        const thread = known.get(row.id);
-        thread.originalProvider = row.model_provider || thread.originalProvider;
-        thread.differs ||= row.model_provider !== provider;
-      }
-      if (rows.length) dbs.push({ file, rows });
-    } finally { db.close(); }
+      db = openDatabase(file, true);
+      if (!db) continue;
+      rows = db.prepare('SELECT id, model_provider FROM threads').all().filter(row => known.has(row.id));
+    } catch (error) { skipDatabase(failed, home, file, error); continue; }
+    finally { db?.close(); }
+    for (const row of rows) {
+      const thread = known.get(row.id);
+      thread.originalProvider = row.model_provider || thread.originalProvider;
+      thread.differs ||= row.model_provider !== provider;
+    }
+    if (rows.length) dbs.push({ file, rows });
   }
   threads = threads.filter(thread => thread.differs);
   const selected = new Set(threads.map(thread => thread.id));
   for (const db of dbs) db.rows = db.rows.filter(row => selected.has(row.id));
-  const result = { dryRun, provider, candidates: threads.map(({ id, originalProvider }) => ({ threadId: id, previousProvider: originalProvider })), repaired: [], failed: [] };
-  if (dryRun || !threads.length) { if (!dryRun) index.save(); return result; }
+  const result = { dryRun, provider, candidates: threads.map(({ id, originalProvider }) => ({ threadId: id, previousProvider: originalProvider })), repaired: [], failed };
+  if (dryRun) return result;
+  logSkipped(root, 'begin', failed);
+  if (!threads.length) { index.save(); return result; }
   const state = { version: 1, home, provider, threads, databases: dbs };
   try {
     const jobs = threads.filter(thread => thread.records.some(record => record.provider !== provider)).map(thread => {
@@ -309,6 +333,7 @@ export async function repairThreadProviders({ home, root, provider = 'chatgpt_ap
     await rewriteJobs(index, jobs);
     for (const { file, rows } of dbs) {
       const db = openDatabase(file, false);
+      if (!db) continue;
       try {
         db.exec('BEGIN IMMEDIATE');
         const update = db.prepare('UPDATE threads SET model_provider = ? WHERE id = ? AND model_provider IS ?');
@@ -331,6 +356,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   try {
     const result = command === 'restore' ? await restoreThreadProviders({ home, root })
       : command === 'begin' ? await repairThreadProviders({ home, root }) : (() => { throw new Error('Expected begin/restore, CODEX_HOME and adapter root.'); })();
-    console.log(JSON.stringify(command === 'begin' ? { repaired: result.repaired.length } : result));
+    console.log(JSON.stringify(command === 'begin' ? { repaired: result.repaired.length, skipped: result.failed.length } : result));
   } catch (error) { console.error(error.stack || error.message); process.exitCode = 1; }
 }

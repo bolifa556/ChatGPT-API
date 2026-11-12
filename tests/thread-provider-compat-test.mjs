@@ -162,12 +162,55 @@ try {
   checks.push('Native plain-file precedence, compression after startup, archive moves and interrupted compressed scratch files recover without losing messages');
 
   const broken = path.join(sessions, 'invalid.jsonl.zst');
+  const truncated = path.join(archive, 'truncated.jsonl.zst');
+  const truncatedBytes = zstdCompressSync(Buffer.from(header('truncated', 'openai') + message)).subarray(0, -3);
   fs.writeFileSync(broken, 'invalid compressed data');
-  await assert.rejects(repairThreadProviders(ctx));
+  fs.writeFileSync(truncated, truncatedBytes);
+  const unrelated = source.get('fixture-1');
+  const withBadHistory = await repairThreadProviders(ctx);
+  assert.equal(withBadHistory.failed.length, 2);
+  assert(withBadHistory.repaired.some(row => row.threadId === 'fixture-1'));
+  assert((await restoreThreadProviders(ctx)).failed.length === 2);
   assert(!fs.existsSync(journal));
   assert.equal(fs.readFileSync(broken, 'utf8'), 'invalid compressed data');
-  fs.unlinkSync(broken); noScratch();
-  checks.push('Unreadable compressed history fails before changing any conversation or creating a recovery journal');
+  assert.deepEqual(fs.readFileSync(truncated), truncatedBytes);
+  assert.deepEqual(fs.readFileSync(unrelated.file), unrelated.bytes);
+  const fixed = Buffer.from(header('fixed', 'openai') + message);
+  const padding = Buffer.alloc(17); padding.writeUInt32LE(0x184d2a5f); padding.writeUInt32LE(9, 4);
+  fs.writeFileSync(broken, Buffer.concat([padding, zstdCompressSync(fixed.subarray(0, 13)), padding, zstdCompressSync(fixed.subarray(13)), padding]));
+  const reindexed = await repairThreadProviders(ctx);
+  assert.equal(reindexed.failed.length, 1);
+  assert(reindexed.repaired.some(row => row.threadId === 'fixed'));
+  await restoreThreadProviders(ctx);
+  assert.deepEqual(nativeDecompress(fs.readFileSync(broken)), fixed);
+  fs.unlinkSync(broken); fs.unlinkSync(truncated); noScratch();
+  checks.push('Damaged and truncated archives stay byte-for-byte intact while healthy conversations can be adapted and restored; repaired archives are re-indexed across Zstandard frame boundaries');
+
+  const retired = path.join(home, 'state_96.sqlite'), future = path.join(home, 'state_97.sqlite');
+  const newRollout = path.join(sessions, 'new-format.jsonl');
+  const newFormat = JSON.stringify({ type: 'session_meta', payload: { id: 'new-format', routing: { provider: 'new-native' } } }) + '\n' + message;
+  fs.writeFileSync(retired, 'retired database format');
+  fs.writeFileSync(newRollout, newFormat);
+  const newIndex = new DatabaseSync(future);
+  newIndex.exec("CREATE TABLE conversations (uuid TEXT PRIMARY KEY, provider TEXT); INSERT INTO conversations VALUES ('fixture-1', 'new-native'); CREATE VIEW threads AS SELECT uuid AS id, provider AS model_provider FROM conversations");
+  newIndex.close();
+  const originalFuture = fs.readFileSync(future);
+  const currentIndex = new DatabaseSync(dbFiles[0]);
+  currentIndex.prepare('INSERT INTO threads VALUES(?,?,?,?,?)').run('new-format', 'new-native', 'original-project', 'original-model', 10);
+  currentIndex.close();
+  const afterUpgrade = await repairThreadProviders(ctx);
+  assert(afterUpgrade.repaired.some(row => row.threadId === 'fixture-1'));
+  assert(!afterUpgrade.repaired.some(row => row.threadId === 'new-format'));
+  assert(afterUpgrade.failed.some(entry => entry.file === 'state_96.sqlite'));
+  assert.equal(rows(dbFiles[0]).find(row => row.id === 'new-format').model_provider, 'new-native');
+  const afterUpgradeRestore = await restoreThreadProviders(ctx);
+  assert(afterUpgradeRestore.failed.some(entry => entry.file === 'state_96.sqlite'));
+  assert(!fs.existsSync(journal));
+  assert.equal(fs.readFileSync(newRollout, 'utf8'), newFormat);
+  assert.equal(fs.readFileSync(retired, 'utf8'), 'retired database format');
+  assert.deepEqual(fs.readFileSync(future), originalFuture);
+  for (const file of [retired, future]) fs.unlinkSync(file);
+  checks.push('A retired SQLite format and unrecognized routing metadata leave compatible history usable and remain byte-for-byte intact');
 
   for (const compressed of [false, true]) {
     const id = 'forked-history-' + compressed, file = path.join(sessions, id + '.jsonl' + (compressed ? '.zst' : ''));

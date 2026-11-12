@@ -31,7 +31,7 @@ function Get-MainApp {
             }
         }
     }
-    return @(Get-CimInstance Win32_Process -Filter "name='ChatGPT.exe'" -ErrorAction SilentlyContinue | Where-Object {
+    return @(Get-CimInstance Win32_Process -Filter "name='$($native.processName)' OR name='ChatGPT.exe'" -ErrorAction SilentlyContinue | Where-Object {
         $_.CommandLine -and $_.CommandLine -notmatch '--type=' -and
         (-not $env:CODEX_ELECTRON_USER_DATA_PATH -or ($_.CommandLine.Contains('--user-data-dir=') -and $_.CommandLine.Contains($env:CODEX_ELECTRON_USER_DATA_PATH)))
     })
@@ -42,6 +42,9 @@ function Stop-Helpers {
 
 try {
     Wait-ClosingLauncherSession $packageDir
+    $launchPhase = '检查官方客户端'
+    $native = Get-NativeDesktopApp
+    $launchPhase = '恢复上次入口'
     $legacyLayout = Get-LegacyLayoutState $packageDir
     if ($legacyLayout -and $legacyLayout.pending -and @(Get-MainApp).Count -eq 0) {
         # Let the old watcher restore its journal before selecting the new paths.
@@ -61,9 +64,6 @@ try {
     try { $lock = [IO.File]::Open($lockPath,'OpenOrCreate','ReadWrite','None') }
     catch { throw '另一个入口正在准备配置，请稍后再点击。' }
     $launchPhase = '检查官方客户端'
-    $package = Get-AppxPackage -Name OpenAI.Codex | Sort-Object Version -Descending | Select-Object -First 1
-    if (-not $package) { throw '未找到已安装的 ChatGPT/Codex 桌面应用。' }
-    $appId = $package.PackageFamilyName + '!App'
     $running = @(Get-MainApp)
     $state = Read-LauncherState $packageDir
     $activeEntry = if ($state -and $state.active) { if ($state.entryMode) { $state.entryMode } else { 'api' } } else { 'official' }
@@ -76,8 +76,8 @@ try {
     }
     if ($running.Count -gt 0) {
         if ($env:CODEX_ELECTRON_USER_DATA_PATH) {
-            Start-Process -FilePath (Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\chatgpt-desktop.exe') -ArgumentList ('--user-data-dir="' + $env:CODEX_ELECTRON_USER_DATA_PATH + '"') -WindowStyle Hidden
-        } else { & (Join-Path $env:WINDIR 'explorer.exe') "shell:AppsFolder\$appId" }
+            Start-Process -FilePath $native.launch -ArgumentList ('--user-data-dir="' + $env:CODEX_ELECTRON_USER_DATA_PATH + '"') -WindowStyle Hidden
+        } else { & (Join-Path $env:WINDIR 'explorer.exe') ('shell:AppsFolder\' + $native.appId) }
         exit 0
     }
     $launchPhase = '读取并恢复配置'
@@ -90,9 +90,9 @@ try {
     $shimPath = Join-Path $packageDir 'src\shim.mjs'
     $authMode = Get-LauncherRouteMode $Mode (Get-CodexHome)
     $launchPhase = '准备模型目录'
-    if ($Mode -eq 'official') { $prepared = Ensure-LocalRouter $packageDir $authMode $Mode -PrepareOnly }
+    if ($Mode -eq 'official') { $prepared = Ensure-LocalRouter $packageDir $authMode $Mode -PrepareOnly -NativeCli $native.cli }
     else {
-        $prepared = Invoke-GatewayPreparation { Ensure-LocalRouter $packageDir $authMode $Mode -PrepareOnly } { Show-ApiSettings $packageDir } {
+        $prepared = Invoke-GatewayPreparation { Ensure-LocalRouter $packageDir $authMode $Mode -PrepareOnly -NativeCli $native.cli } { Show-ApiSettings $packageDir } {
             param($values)
             Stop-Helpers
             Set-LauncherSettings $packageDir $values.base $values.key
@@ -118,9 +118,7 @@ try {
         $notice = if ($authMode -eq 'mixed') { '网关目前不可用。有效缓存中的网关模型请求可能失败；已登录的官方模型仍使用官方通道。' } else { '网关目前不可用。此入口只使用网关模型，请检查网关连接。' }
         Show-Message $notice
     }
-    $launchPhase = '启动客户端并连接界面'
-    $nativeAlias = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\chatgpt-desktop.exe'
-    if (-not (Test-Path -LiteralPath $nativeAlias)) { $nativeAlias = Join-Path $package.InstallLocation 'app\ChatGPT.exe' }
+    $launchPhase = '启动客户端'
     $sessionState = Join-Path $packageDir 'data\state\native-session.json'
     $sessionLog = Join-Path $packageDir 'data\logs\native-session-stderr.log'
     $sessionScript = Join-Path $packageDir 'src\native-session.mjs'
@@ -128,7 +126,7 @@ try {
     Write-LauncherFile $sessionState ($starting | ConvertTo-Json)
     $starting.phase = if ($Mode -eq 'official') { 'disabled' } else { 'waiting' }
     Write-LauncherFile (Join-Path $packageDir 'data\state\native-quota.json') ($starting | ConvertTo-Json)
-    $arguments = @((Join-Path $packageDir 'src\Recover-ChatGPT.vbs'),(Get-CodexHome),$nativeAlias,(Join-Path $package.InstallLocation 'app\resources\app.asar'),$Mode,$recoverySession) | ForEach-Object { '"' + $_ + '"' }
+    $arguments = @((Join-Path $packageDir 'src\Recover-ChatGPT.vbs'),(Get-CodexHome),$native.launch,$native.archive,$Mode,$recoverySession) | ForEach-Object { '"' + $_ + '"' }
     $controller = Start-Process -FilePath (Join-Path $env:WINDIR 'System32\wscript.exe') -ArgumentList $arguments -WindowStyle Hidden -PassThru
     Set-LauncherRecoveryOwner $packageDir $recoverySession $controller.Id
     $null = Wait-LauncherNativeClient $packageDir $recoverySession $controller
@@ -160,11 +158,13 @@ try {
                         }
                     }
                 }
-                Stop-Helpers
-                Stop-LauncherRecoveryClient $recovery.client
-                $lock.Dispose(); $lock = $null
-                & (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $packageDir 'src\Recover-ChatGPT.ps1') -Immediate -Session $recoverySession
-                if ($LASTEXITCODE -ne 0) { throw '配置恢复尚未完成，请查看 data\logs\recovery.log。' }
+                # A launched client keeps its configuration until its own exit.
+                if (-not (Test-RecordedProcess $recovery.client)) {
+                    Stop-Helpers
+                    $lock.Dispose(); $lock = $null
+                    & (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $packageDir 'src\Recover-ChatGPT.ps1') -Immediate -Session $recoverySession
+                    if ($LASTEXITCODE -ne 0) { throw '配置恢复尚未完成，请查看 data\logs\recovery.log。' }
+                }
             }
         } catch {
             $message += [Environment]::NewLine + $_.Exception.Message

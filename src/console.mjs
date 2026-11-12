@@ -2,7 +2,8 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { GatewaySources } from './gateway-sources.mjs';
 import { readEnvFile, readSettings, publicSettings, saveSettings, settingsRevision, atomicPrivate, overrideKey, redact } from './settings.mjs';
@@ -14,9 +15,14 @@ import { cleanManagedLogs, createDiagnosticLog, describeError, errorDetails } fr
 const moduleRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const readJson = (file, fallback = null) => { try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { return fallback; } };
 const json = (res, status, value) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); };
-export function openBrowser(url) {
-  const command = process.platform === 'win32' ? ['rundll32.exe', ['url.dll,FileProtocolHandler', url]] : process.platform === 'darwin' ? ['open', [url]] : ['xdg-open', [url]];
-  const child = execFile(command[0], command[1], { windowsHide: true }, () => {}); child.unref();
+const BROWSER_OPEN_MS = 30000;
+const LAST_PAGE_MS = 1500;
+export async function openBrowser(url) {
+  const command = process.platform === 'win32' ? ['rundll32.exe', ['url.dll,FileProtocolHandler', url]]
+    : process.platform === 'darwin' ? ['/usr/bin/open', [url]] : ['xdg-open', [url]];
+  const child = spawn(command[0], command[1], { detached: true, stdio: 'ignore', windowsHide: true });
+  await once(child, 'spawn');
+  child.unref();
 }
 async function requestBody(req) {
   let size = 0; const chunks = [];
@@ -32,23 +38,28 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
   const identity = crypto.createHash('sha256').update(root).digest('hex');
   const stateFile = path.join(root, 'data/state/console.json');
   const previous = readJson(stateFile);
+  let reusedUrl;
   if (previous?.port && previous?.token) {
     try {
-      const response = await fetch('http://127.0.0.1:' + Number(previous.port) + '/api/ping', { headers: { authorization: 'Bearer ' + previous.token }, signal: AbortSignal.timeout(700) });
+      const response = await fetch('http://127.0.0.1:' + Number(previous.port) + '/api/ping' + (open ? '?opening=1' : ''), { headers: { authorization: 'Bearer ' + previous.token }, signal: AbortSignal.timeout(700) });
       const state = await response.json();
       if (state.service === 'chatgpt-api-console' && state.identity === identity && state.version === version && state.buildId === buildId) {
-        const url = 'http://127.0.0.1:' + previous.port + '/#' + previous.token;
-        if (open) opener(url);
-        return { reused: true, url, close: async () => {} };
+        reusedUrl = 'http://127.0.0.1:' + previous.port + '/#' + previous.token;
       }
     } catch {}
   }
+  if (reusedUrl) {
+    if (open) await opener(reusedUrl);
+    return { reused: true, url: reusedUrl, close: async () => {} };
+  }
   let settings = readSettings(root, env), refresh = null;
-  const views = new Set(); let idleTimer, closing;
+  const views = new Set(), lifetime = new AbortController();
+  let idleTimer, closing;
   const close = () => closing ||= new Promise(resolve => {
     clearTimeout(idleTimer);
-    for (const view of views) view.destroy();
+    lifetime.abort();
     server.close(resolve);
+    server.closeAllConnections();
   });
   const idle = ms => { if (open) { clearTimeout(idleTimer); idleTimer = setTimeout(close, ms); idleTimer.unref(); } };
   const token = crypto.randomBytes(32).toString('hex');
@@ -108,22 +119,25 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
     } finally { pool.destroy(); }
   }
   const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url, 'http://127.0.0.1');
     const authority = '127.0.0.1:' + server.address().port;
     res.setHeader('x-content-type-options', 'nosniff'); res.setHeader('referrer-policy', 'no-referrer');
     res.setHeader('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
     if (req.headers.host !== authority || req.headers.origin && req.headers.origin !== 'http://' + authority) return json(res, 403, { error: '仅允许控制台本机页面访问。' });
     try {
+      const url = new URL(req.url, 'http://127.0.0.1');
       if (url.pathname.startsWith('/api/')) {
         if (req.headers.authorization !== 'Bearer ' + token) return json(res, 401, { error: '控制台连接已失效，请重新打开控制台。' });
         if (req.method === 'GET' && url.pathname === '/api/lifetime') {
           clearTimeout(idleTimer); views.add(res);
           res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' });
           res.write(': connected\n\n');
-          res.once('close', () => { views.delete(res); if (!views.size && !closing) idle(5000); });
+          res.once('close', () => { views.delete(res); if (!views.size && !closing) idle(LAST_PAGE_MS); });
           return;
         }
-        if (req.method === 'GET' && url.pathname === '/api/ping') return json(res, 200, { service: 'chatgpt-api-console', version, identity, buildId });
+        if (req.method === 'GET' && url.pathname === '/api/ping') {
+          if (url.searchParams.has('opening') && !views.size) idle(BROWSER_OPEN_MS);
+          return json(res, 200, { service: 'chatgpt-api-console', version, identity, buildId });
+        }
         if (req.method === 'GET' && url.pathname === '/api/state') return json(res, 200, await state());
         if (req.method === 'POST' && url.pathname === '/api/keys/reveal') {
           if (!String(req.headers['content-type']).startsWith('application/json')) return json(res, 415, { error: '需要 JSON 请求。' });
@@ -147,26 +161,45 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
             // Match the launchers: only Windows owns the optional legacy SSH tunnel.
             const transport = process.platform === 'win32' ? env.GATEWAY_TRANSPORT : 'direct';
             const pool = new GatewaySources(root, env, { transport, tunnelPort: Number(env.GATEWAY_TUNNEL_PORT || 18003) });
-            try { pool.loadCached(readJson(path.join(root, 'data/cache/catalog-state.json'), {})); await pool.discover(); }
-            finally { await pool.close(); }
+            try {
+              pool.loadCached(readJson(path.join(root, 'data/cache/catalog-state.json'), {}));
+              await pool.discover({ signal: lifetime.signal });
+            }
+            finally { if (lifetime.signal.aborted) pool.destroy(); else await pool.close(); }
           })().finally(() => { refresh = null; });
           await refresh; return json(res, 200, await state());
         }
-        if (req.method === 'POST' && url.pathname === '/api/close') { json(res, 200, { closed: true }); setTimeout(() => server.close(), 50).unref(); return; }
+        if (req.method === 'POST' && url.pathname === '/api/close') {
+          res.once('finish', close);
+          return json(res, 200, { closed: true });
+        }
         return json(res, 404, { error: '未找到操作。' });
       }
       if (req.method !== 'GET') return json(res, 405, { error: '不支持此请求。' });
       const assets = { '/': ['index.html', 'text/html; charset=utf-8'], '/console.css': ['console.css', 'text/css; charset=utf-8'], '/console.js': ['console.js', 'text/javascript; charset=utf-8'], '/icon.svg': ['icon.svg', 'image/svg+xml'] };
       const asset = assets[url.pathname]; if (!asset) return json(res, 404, { error: '未找到页面。' });
-      res.writeHead(200, { 'content-type': asset[1], 'cache-control': 'no-store' }); res.end(fs.readFileSync(path.join(assetRoot, asset[0])));
-    } catch (error) { json(res, error.status || 400, { error: redact(error.message, settings, [env.API_KEY]) }); }
+      const body = fs.readFileSync(path.join(assetRoot, asset[0]));
+      res.writeHead(200, { 'content-type': asset[1], 'cache-control': 'no-store' }); res.end(body);
+    } catch (error) {
+      if (!res.destroyed) json(res, error.status || 400, { error: redact(error.message, settings, [env.API_KEY]) });
+    }
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   const port = server.address().port, url = 'http://127.0.0.1:' + port + '/#' + token;
-  atomicPrivate(stateFile, { pid: process.pid, port, token, version, identity });
-  server.on('close', () => { clearTimeout(idleTimer); if (readJson(stateFile)?.token === token) fs.rmSync(stateFile, { force: true }); });
-  idle(30000);
-  if (open) opener(url);
+  server.on('close', () => {
+    clearTimeout(idleTimer);
+    if (readJson(stateFile)?.token === token) {
+      try { fs.rmSync(stateFile, { force: true }); } catch {}
+    }
+  });
+  try {
+    atomicPrivate(stateFile, { pid: process.pid, port, token, version, identity });
+    idle(BROWSER_OPEN_MS);
+    if (open) await opener(url);
+  } catch (error) {
+    await close();
+    throw error;
+  }
   return { server, url, close };
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

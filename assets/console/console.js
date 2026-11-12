@@ -3,13 +3,18 @@ const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&a
 const tokens = value => value == null ? '未提供' : value >= 1000000 ? (value / 1000000).toLocaleString('en-US', { maximumFractionDigits: 2 }) + 'M' : value >= 1000 ? (value / 1000).toLocaleString('en-US', { maximumFractionDigits: 1 }) + 'K' : value.toLocaleString();
 let token = location.hash.slice(1) || sessionStorage.getItem('console-token') || '';
 if (token) sessionStorage.setItem('console-token', token);
-const lifetime = new AbortController();
-fetch('/api/lifetime', { headers: { authorization: 'Bearer ' + token }, signal: lifetime.signal }).then(async response => {
-  if (!response.ok) return;
-  const reader = response.body.getReader();
-  while (!(await reader.read()).done) {}
-}).catch(() => {});
-window.addEventListener('pagehide', () => lifetime.abort(), { once: true });
+let lifetime;
+function connectLifetime() {
+  lifetime = new AbortController();
+  fetch('/api/lifetime', { headers: { authorization: 'Bearer ' + token }, signal: lifetime.signal }).then(async response => {
+    if (!response.ok) return;
+    const reader = response.body.getReader();
+    while (!(await reader.read()).done) {}
+  }).catch(() => {});
+}
+connectLifetime();
+window.addEventListener('pagehide', () => lifetime.abort());
+window.addEventListener('pageshow', event => { if (event.persisted) connectLifetime(); });
 history.replaceState(null, '', location.pathname);
 let data, draft, dirty = false, busy = false, toastTimer;
 const savedKeyMask = '••••••••••••••••';
@@ -292,6 +297,6 @@ $('#image-routing').onchange = () => { draft.imageRouting = $('#image-routing').
 $('#discard').onclick = () => render(data);
 $('#save-settings').onclick = async () => { busy = true; updateSavebar(); try { render(await api('settings', draft)); toast('已保存，重开客户端后应用。'); } catch (error) { toast(error.message); } finally { busy = false; updateSavebar(); } };
 $('#refresh-models').onclick = async () => { busy = true; updateSavebar(); const button = $('#refresh-models'); button.textContent = '正在加载…'; try { render(await api('refresh', {})); toast('模型目录已更新。'); } catch (error) { toast(error.message); } finally { busy = false; button.textContent = '刷新模型目录'; updateSavebar(); } };
-$('#close-console').onclick = async () => { if (dirty && !confirm('尚有未保存的修改，仍然退出？')) return; try { await api('close', {}); document.body.innerHTML = '<main class="closed"><div class="content"><h1>控制台已退出</h1><p>可以关闭此页面；需要时从安装目录重新打开控制台。</p></div></main>'; } catch (error) { toast(error.message); } };
+$('#close-console').onclick = async () => { if (dirty && !confirm('尚有未保存的修改，仍然退出？')) return; try { await api('close', {}); dirty = false; document.body.innerHTML = '<main class="closed"><div class="content"><h1>控制台已退出</h1><p>可以关闭此页面；需要时从安装目录重新打开控制台。</p></div></main>'; } catch (error) { toast(error.message); } };
 window.addEventListener('beforeunload', event => { if (dirty) { event.preventDefault(); event.returnValue = ''; } });
 api('state').then(render).catch(error => { $('#load-error').textContent = error.message; $('#load-error').hidden = false; });

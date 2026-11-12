@@ -9,38 +9,35 @@ const server = http.createServer((_req, res) => {
 });
 const wss = new WebSocketServer({ server });
 wss.on('connection', socket => {
-  let binding, armed = false;
-  const commands = [];
+  let binding;
   const send = value => socket.send(JSON.stringify(value));
-  const notify = value => send({ method: 'Runtime.bindingCalled', params: { name: binding, payload: JSON.stringify(value) }, sessionId: 'page-fixture' });
+  const notify = value => {
+    if (socket.readyState === 1) send({ method: 'Runtime.bindingCalled', params: { name: binding, payload: JSON.stringify(value) }, sessionId: 'page-fixture' });
+  };
   socket.on('message', raw => {
-    const call = JSON.parse(raw); commands.push(call.method);
-    if (call.method === 'Runtime.runIfWaitingForDebugger' && scenario !== 'foreign-page' && !binding) {
-      send({ id: call.id, error: { message: 'Readiness binding was registered after renderer execution' } }); return;
-    }
+    const call = JSON.parse(raw);
+    const reply = (value = {}) => send({ id: call.id, ...(call.sessionId ? { sessionId: call.sessionId } : {}), ...value });
     if (scenario === 'unresponsive') return;
     if (scenario === 'exit' && call.method === 'Target.setAutoAttach') { process.exit(17); }
-    let result = {};
+    if (call.method === 'Target.setAutoAttach' && call.params.waitForDebuggerOnStart !== false) {
+      return reply({ error: { message: 'The debugger paused the renderer' } });
+    }
     if (call.method === 'Runtime.addBinding') binding = call.params.name;
-    if (call.method === 'Runtime.evaluate') {
-      const snapshot = call.params.expression.startsWith('JSON.stringify(');
-      if (scenario === 'script-error' && !snapshot) result = { exceptionDetails: { text: 'Uncaught', exception: { description: 'SyntaxError: fixture bootstrap failed' } } };
-      else if (snapshot && scenario !== 'unstarted') {
-        const value = { pending: scenario === 'ready' ? 0 : 1, installed: scenario === 'ready' ? 1 : 0, error: null };
-        if (scenario === 'module-error') { value.error = 'TypeError: Failed to fetch dynamically imported module'; value.failedAsset = 'app://-/assets/quota.js'; }
-        result = { result: { type: 'string', value: JSON.stringify(value) } };
-        if (scenario === 'notified' && !armed) {
-          armed = true;
-          setTimeout(() => notify({ pending: 0, installed: 1, error: null }), 20);
-          setTimeout(() => notify({ pending: 1, installed: 0, error: null }), 60);
-        }
-      } else result = { result: { type: 'undefined' } };
+    if (call.method === 'Page.addScriptToEvaluateOnNewDocument') {
+      if (!binding || call.params.runImmediately !== true || scenario === 'script-error') {
+        return reply({ error: { message: 'Fixture document bootstrap failed' } });
+      }
+      if (scenario !== 'unstarted') notify({ initial: true, pending: 1, installed: 0 });
+      if (scenario === 'module-error' || scenario === 'partial-module-error') {
+        notify({ pending: scenario === 'partial-module-error' ? 1 : 0, installed: 0,
+          error: 'TypeError: Failed to fetch dynamically imported module', failedAsset: 'app://-/assets/quota.js' });
+      }
+      if (['ready', 'notified', 'partial-module-error', 'updated-module-format'].includes(scenario)) {
+        setTimeout(() => notify({ pending: 0, installed: 1 }), 40);
+      }
+      if (scenario === 'notified') setTimeout(() => notify({ pending: 1, installed: 0 }), 80);
     }
-    if (call.method === 'Runtime.runIfWaitingForDebugger' && binding && commands.indexOf('Runtime.addBinding') < commands.indexOf('Runtime.runIfWaitingForDebugger')) {
-      // This verifies registration precedes the renderer's first execution.
-      result = { bindingRegisteredBeforeResume: true };
-    }
-    send({ id: call.id, result, ...(call.sessionId ? { sessionId: call.sessionId } : {}) });
+    reply({ result: {} });
     if (call.method === 'Target.setAutoAttach') send({ method: 'Target.attachedToTarget', params: { sessionId: 'page-fixture',
       targetInfo: { type: 'page', url: scenario === 'foreign-page' ? 'https://example.invalid/' : 'app://-/index.html' } } });
   });

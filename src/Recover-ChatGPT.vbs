@@ -12,7 +12,7 @@ If WScript.Arguments.Count = 5 Then
     ' Run waits on the process handle; this does not poll the process list.
     code = shell.Run(command, 0, True)
     If fso.FileExists(fso.BuildPath(root, "data\state\recovery-state.json")) Then
-        command = Chr(34) & shell.ExpandEnvironmentStrings("%SystemRoot%") & "\System32\WindowsPowerShell\v1.0\powershell.exe" & Chr(34) & " -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File " & Chr(34) & fso.BuildPath(root, "src\Recover-ChatGPT.ps1") & Chr(34) & " -Immediate -StopOrphanedClient -Session " & WScript.Arguments(4)
+        command = Chr(34) & shell.ExpandEnvironmentStrings("%SystemRoot%") & "\System32\WindowsPowerShell\v1.0\powershell.exe" & Chr(34) & " -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File " & Chr(34) & fso.BuildPath(root, "src\Recover-ChatGPT.ps1") & Chr(34) & " -Immediate -WaitForClient -Session " & WScript.Arguments(4)
         code = shell.Run(command, 0, True)
     End If
     WScript.Quit code

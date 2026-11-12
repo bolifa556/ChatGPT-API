@@ -26,7 +26,7 @@ export async function runNativeSession({ router, start, recover, onStatus = () =
     report({ phase: 'router' });
     await router.routerReady;
     report({ phase: 'launching' });
-    child = await start(track, report);
+    child = await start(track);
     if (stopping) stop();
     else {
       if (child.exitCode !== null || child.signalCode !== null) throw new Error('Native client exited before startup confirmation (' + (child.signalCode || child.exitCode) + ').');
@@ -88,12 +88,11 @@ async function main() {
     await runNativeSession({
       router,
       onStatus: report,
-      start: async (track, progress) => {
+      start: async track => {
         if (entryMode !== 'official') return startQuotaCompatibleClient({ executable, archive, root, home, args,
           onSpawn: track,
           onStatus: value => {
             atomicPrivate(path.join(root, 'data/state/native-quota.json'), { session, entryMode, updatedAt: new Date().toISOString(), ...value });
-            if (!state.ready && !state.stopped) progress({ phase: value.phase, ...(value.pid ? { pid: value.pid } : {}) });
           } });
         const child = spawn(executable, args, { env: process.env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
         await once(child, 'spawn'); track(child); return child;

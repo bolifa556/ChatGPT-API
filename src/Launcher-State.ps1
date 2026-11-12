@@ -138,15 +138,49 @@ function Set-LauncherProvider([string]$content, [string]$id, [string]$baseUrl, [
     # owns upstream keys; no credential subprocess or router probe is needed.
     return Set-TableText $content ($table + '.auth') $null
 }
-function Get-NativeClientVersion([string]$installLocation = '', [string]$cacheFile = $script:NativeVersionCachePath) {
-    if (-not $installLocation) {
-        $package = Get-AppxPackage -Name OpenAI.Codex | Sort-Object Version -Descending | Select-Object -First 1
-        if (-not $package) { return '' }
-        $installLocation = $package.InstallLocation
+function Get-NativeDesktopApp {
+    $package = Get-AppxPackage -Name OpenAI.Codex | Sort-Object Version -Descending | Select-Object -First 1
+    if (-not $package) { throw '未找到已安装的 ChatGPT/Codex 桌面应用。' }
+    $manifest = Get-AppxPackageManifest -Package $package
+    $applications = @($manifest.SelectNodes("/*[local-name()='Package']/*[local-name()='Applications']/*[local-name()='Application']") | Where-Object {
+        $visual = $_.SelectSingleNode("*[local-name()='VisualElements']")
+        $visual -and $visual.GetAttribute('AppListEntry') -ne 'none' -and $_.GetAttribute('Executable') -match '\.exe$'
+    })
+    $app = if ($applications.Count -eq 1) { $applications[0] } else { $applications | Where-Object { $_.GetAttribute('Id') -eq 'App' } | Select-Object -First 1 }
+    if (-not $app) { throw 'Windows 安装注册中找不到 ChatGPT/Codex 桌面入口。' }
+    $relative = $app.GetAttribute('Executable').Replace('/','\')
+    $prefix = [IO.Path]::GetFullPath($package.InstallLocation).TrimEnd('\') + '\'
+    $executable = [IO.Path]::GetFullPath((Join-Path $prefix $relative))
+    if (-not $executable.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)) { throw 'Windows 安装注册中的 ChatGPT/Codex 路径无效。' }
+    $resources = Join-Path (Split-Path -Parent $executable) 'resources'
+    $windowsApps = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps'
+    $packageAliases = Join-Path $windowsApps $package.PackageFamilyName
+    $launch = $executable
+    foreach ($extension in $app.SelectNodes("*[local-name()='Extensions']/*[local-name()='Extension' and @Category='windows.appExecutionAlias']")) {
+        $target = $extension.GetAttribute('Executable').Replace('/','\')
+        if ($target -and $target -ine $relative) { continue }
+        foreach ($entry in $extension.SelectNodes("*[local-name()='AppExecutionAlias']/*[local-name()='ExecutionAlias']")) {
+            $name = $entry.GetAttribute('Alias')
+            if ($name -notmatch '^[^\\/:]+\.exe$') { continue }
+            $aliasPath = @((Join-Path $packageAliases $name), (Join-Path $windowsApps $name)) |
+                Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+            if ($aliasPath) { $launch = $aliasPath; break }
+        }
+        if ($launch -ne $executable) { break }
     }
+    return [pscustomobject]@{
+        appId = $package.PackageFamilyName + '!' + $app.GetAttribute('Id')
+        processName = [IO.Path]::GetFileName($executable)
+        launch = $launch
+        archive = Join-Path $resources 'app.asar'
+        cli = Join-Path $resources 'codex.exe'
+    }
+}
+function Get-NativeClientVersion([string]$cliPath = '', [string]$cacheFile = $script:NativeVersionCachePath) {
     $temporaryCli = $null
     try {
-        $source = Get-Item -LiteralPath (Join-Path $installLocation 'app\resources\codex.exe') -ErrorAction Stop
+        if (-not $cliPath) { $cliPath = (Get-NativeDesktopApp).cli }
+        $source = Get-Item -LiteralPath $cliPath -ErrorAction Stop
         # Store packages are immutable and their path changes on update. Read
         # the real CLI version once per installed binary, without scanning or
         # hashing the native client's executable cache on every launch.
@@ -270,8 +304,8 @@ function Apply-LauncherConfig([string]$packageDir, [string]$configPath, [string]
     }
     if ($entryMode -eq 'official') { $content = Set-RootLine $content 'model_catalog_json' $null }
     else { $content = Set-RootString $content 'model_catalog_json' (Get-LauncherDataPath $packageDir 'models-smr.json') }
-    foreach ($id in @('chatgpt_api_launcher','chatgpt_api_mixed','smr')) {
-        if ($id -eq 'chatgpt_api_launcher' -or (Get-TableText $content ('model_providers.' + $id))) { $content = Set-LauncherMixedProvider $content $shimBase $packageDir $signedIn $id }
+    foreach ($id in @('chatgpt_api_mixed','smr')) {
+        if (Get-TableText $content ('model_providers.' + $id)) { $content = Set-LauncherMixedProvider $content $shimBase $packageDir $signedIn $id }
     }
     # One runtime binding across entries. Old bindings are temporarily overlaid
     # by the launch helper and restored when the native client exits.
@@ -293,9 +327,7 @@ function Apply-LauncherConfig([string]$packageDir, [string]$configPath, [string]
         if ($savedEffort) { $content = Set-RootString $content 'model_reasoning_effort' $savedEffort }
     }
     if ($ids.Count -and $ids -cnotcontains $selected) {
-        if ($entryMode -eq 'apionly' -and $previous.lastApiOnlyModel -and $ids -ccontains $previous.lastApiOnlyModel) { $selected = $previous.lastApiOnlyModel }
-        elseif ($entryMode -eq 'api' -and $previous.lastApiModel -and $ids -ccontains $previous.lastApiModel) { $selected = $previous.lastApiModel }
-        elseif ($ids -ccontains 'GPT/gpt-6-sol') { $selected = 'GPT/gpt-6-sol' }
+        if ($ids -ccontains 'GPT/gpt-6-sol') { $selected = 'GPT/gpt-6-sol' }
         else { $selected = $ids[0] }
         $content = Set-RootString $content 'model' $selected
     }

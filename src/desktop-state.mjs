@@ -17,6 +17,24 @@ const globalKeys = ['active-workspace-roots', 'electron-saved-workspace-roots', 
   'remote-connection-auto-connect-by-host-id', 'queued-follow-ups'];
 const journalFile = root => path.join(root, 'data/state/desktop-state-compatibility.json');
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+function accountScope(state) {
+  const scope = state?.[scopeKey];
+  return isRecord(scope) && (scope.owner == null || typeof scope.owner === 'string')
+    && (scope.inactive == null || isRecord(scope.inactive)) ? scope : null;
+}
+function knownDesktopState(state) {
+  return isRecord(state) && (!Object.hasOwn(state, scopeKey) || accountScope(state) !== null);
+}
+function readDesktopState(file) {
+  try {
+    const text = fs.readFileSync(file, 'utf8');
+    return { text, state: JSON.parse(text) };
+  } catch (error) {
+    if (!['ENOENT', 'EACCES', 'EPERM', 'EBUSY'].includes(error.code) && !(error instanceof SyntaxError)) throw error;
+    return null;
+  }
+}
 function assign(target, key, value) { if (value === undefined) delete target[key]; else target[key] = value; }
 function snapshot(state) {
   return { atoms: structuredClone(state[atomsKey] || {}),
@@ -27,21 +45,22 @@ function writeState(file, value) {
 }
 export function recoverMissingDesktopState({ root, home }) {
   const file = path.join(home, '.codex-global-state.json');
-  if (!fs.existsSync(file)) return { recovered: false };
-  const current = JSON.parse(fs.readFileSync(file, 'utf8')), scope = current[scopeKey];
+  const savedState = readDesktopState(file), current = savedState?.state, scope = accountScope(current);
   if (!scope || scope.owner) return { recovered: false };
-  const states = [current, ...Object.values(scope.inactive || {}).map(value => value.globals || {})];
+  const states = [current, ...Object.values(scope.inactive || {}).map(value => value?.globals || {})];
   // Explicit empty project settings can be intentional. Recover only the
   // missing-key state left by a cleared native account scope.
   if (states.some(value => Object.hasOwn(value, 'local-projects') || Object.hasOwn(value, 'thread-project-assignments'))) return { recovered: false };
   const database = fs.readdirSync(home).filter(name => /^state_\d+\.sqlite$/.test(name) && fs.statSync(path.join(home, name)).size > 0)
     .sort((a, b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0])).at(-1);
   if (!database) return { recovered: false };
-  const db = new DatabaseSync(path.join(home, database), { readOnly: true });
-  let projects;
-  try { projects = new Set(db.prepare('SELECT id FROM projects').all().map(row => row.id)); }
+  let db, projects;
+  try {
+    db = new DatabaseSync(path.join(home, database), { readOnly: true });
+    projects = new Set(db.prepare('SELECT id FROM projects').all().map(row => row.id));
+  }
   catch { return { recovered: false }; }
-  finally { db.close(); }
+  finally { db?.close(); }
   if (!projects.size) return { recovered: false };
   const candidates = fs.readdirSync(home).filter(name => name === '.codex-global-state.json.bak'
     || /^\.\.codex-global-state\.json(?:\.bak)?\.tmp-\d+-[a-f0-9-]+$/.test(name))
@@ -59,9 +78,9 @@ export function recoverMissingDesktopState({ root, home }) {
     // removed. Project IDs and memberships come directly from its own snapshot.
     const prior = scope.inactive[sourceId];
     const recovered = snapshot(saved);
-    scope.inactive[sourceId] = { atoms: { ...recovered.atoms, ...prior.atoms }, globals: { ...recovered.globals, ...prior.globals } };
+    scope.inactive[sourceId] = { atoms: { ...recovered.atoms, ...prior?.atoms }, globals: { ...recovered.globals, ...prior?.globals } };
     atomicPrivate(path.join(root, 'data/state/desktop-state-repair.json'), {
-      home: fs.realpathSync(home), source: candidate.file, originalText: fs.readFileSync(file, 'utf8'),
+      home: fs.realpathSync(home), source: candidate.file, originalText: savedState.text,
       projects: ids.length, assignments: Object.keys(saved['thread-project-assignments']).length,
     }, { durable: true });
     writeState(file, current); writeState(file + '.bak', current);
@@ -85,6 +104,9 @@ export function restoreDesktopState({ root, home }) {
       }
       catch { current = structuredClone(saved.applied); }
     }
+    // A newer native preference schema can replace the file during an update.
+    // Keep both the client's new data and the journal for the previous format.
+    if (!knownDesktopState(current)) return { pending: true };
     if (equal(current, saved.applied)) {
       writeState(file, saved.originalText);
       if (saved.backupText !== undefined) writeState(file + '.bak', saved.backupText);
@@ -129,6 +151,7 @@ export function restoreDesktopState({ root, home }) {
     atomicPrivate(file, saved.originalText, { durable: true, temporaryPath: file + '.chatgpt-api.tmp' });
     fs.unlinkSync(journal); return;
   }
+  if (!knownDesktopState(current)) return { pending: true };
   if (saved.version === 1 && saved.source?.globals?.['local-projects']
       && !Object.hasOwn(current, 'local-projects') && !Object.hasOwn(current, 'thread-project-assignments')
       && !current[scopeKey]?.owner) {
@@ -159,22 +182,22 @@ export function restoreDesktopState({ root, home }) {
 }
 export function overlayDesktopState({ root, home }) {
   const journal = journalFile(root);
+  const file = path.join(home, '.codex-global-state.json');
   if (fs.existsSync(journal)) {
     const saved = JSON.parse(fs.readFileSync(journal, 'utf8'));
     if (saved.home !== fs.realpathSync(home)) throw new Error('Desktop preference recovery belongs to another native home.');
+    const current = readDesktopState(file);
+    if (current && !knownDesktopState(current.state)) return { applied: false, pending: true };
     return { applied: true, reused: true };
   }
   recoverMissingDesktopState({ root, home });
-  const file = path.join(home, '.codex-global-state.json');
-  if (!fs.existsSync(file)) return { applied: false };
-  const current = JSON.parse(fs.readFileSync(file, 'utf8'));
-  const scope = current[scopeKey];
+  const document = readDesktopState(file), current = document?.state, scope = accountScope(current);
   if (!scope) return { applied: false };
   // The native client keeps inactive snapshots in account-switch order. Prefer
   // the current owner, otherwise its most recently saved desktop state.
   const sourceId = scope.owner || Object.keys(scope.inactive || {}).at(-1);
   const source = scope.owner ? snapshot(current) : scope.inactive?.[sourceId];
-  const saved = { version: 2, home: fs.realpathSync(home), originalText: fs.readFileSync(file, 'utf8'), scope, sourceId };
+  const saved = { version: 2, home: fs.realpathSync(home), originalText: document.text, scope, sourceId };
   if (fs.existsSync(file + '.bak')) saved.backupText = fs.readFileSync(file + '.bak', 'utf8');
   if (source?.globals && source?.atoms) {
     for (const [key, value] of Object.entries(source.globals)) current[key] = value;

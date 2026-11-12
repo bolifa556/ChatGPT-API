@@ -153,16 +153,13 @@ function Wait-ClosingLauncherSession([string]$packageDir) {
         } finally { $process.Dispose() }
     }
 }
-function Stop-LauncherRecoveryClient($entry) {
-    if (-not $entry -or -not $entry.pid) { return }
+function Wait-LauncherRecoveryClient($entry) {
     $client = Get-Process -Id $entry.pid -ErrorAction SilentlyContinue
     if (-not $client) { return }
     try {
-        # Open its process handle before checking the recorded identity again.
-        if (-not $client.HasExited -and (Test-RecordedProcess $entry)) {
-            try { $client.Kill() } catch { if (-not $client.HasExited) { throw } }
-            if (-not $client.WaitForExit(10000)) { throw '本次客户端仍在退出，配置恢复尚未完成。' }
-        }
+        # Retain the exact handle after checking its recorded identity.
+        try { $null = $client.Handle } catch { if ($client.HasExited) { return }; throw }
+        if (Test-RecordedProcess $entry) { $client.WaitForExit() }
     } finally { $client.Dispose() }
 }
 function Set-LauncherRecoveryClient([string]$packageDir, [string]$session, $process) {

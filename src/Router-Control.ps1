@@ -52,7 +52,7 @@ function Get-LauncherRouterSelection([string]$packageDir, [string]$routeMode = '
     }
     return [pscustomobject]@{ mode = $routeMode; entryMode = $entryMode }
 }
-function Ensure-LocalRouter([string]$packageDir, [string]$routeMode = '', [string]$entryMode = '', [switch]$PrepareOnly) {
+function Ensure-LocalRouter([string]$packageDir, [string]$routeMode = '', [string]$entryMode = '', [switch]$PrepareOnly, [string]$nativeCli = '') {
     $selection = Get-LauncherRouterSelection $packageDir $routeMode $entryMode
     $mode = $selection.mode
     $entryMode = $selection.entryMode
@@ -80,7 +80,7 @@ function Ensure-LocalRouter([string]$packageDir, [string]$routeMode = '', [strin
             throw 'The router on this port uses a different version or configuration. Fully exit ChatGPT and reopen chatgpt-api.'
         }
         $nativeAccount = $mode -eq 'mixed'
-        $clientVersion = if ($nativeAccount) { Get-NativeClientVersion } else { '' }
+        $clientVersion = if ($nativeAccount) { Get-NativeClientVersion $nativeCli } else { '' }
         $logDir=Join-Path $packageDir 'data\logs';[void](New-Item -ItemType Directory -Path $logDir -Force)
         $transport=Get-GatewayTransport $settings['GATEWAY_TRANSPORT']
         if($transport -eq 'ssh' -and $entryMode -ne 'official'){

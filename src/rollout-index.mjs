@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { createZstdCompress, zstdCompressSync, zstdDecompressSync } from 'node:zlib';
+import { createZstdCompress, createZstdDecompress, zstdCompressSync, zstdDecompressSync } from 'node:zlib';
 import { atomicPrivate } from './settings.mjs';
 
 function stamp(file) {
@@ -20,6 +20,58 @@ function slot(bytes, length = 0) {
   output.writeUInt32LE(size - frame.length - 8, frame.length + 4);
   return output;
 }
+function invalidFrame(message) {
+  return Object.assign(new Error(message), { code: 'invalid_rollout_compression' });
+}
+
+export async function* rolloutBytes(file) {
+  if (!file.endsWith('.jsonl.zst')) { yield* fs.createReadStream(file); return; }
+  const fd = fs.openSync(file, 'r'), header = Buffer.alloc(8);
+  try {
+    const { size } = fs.fstatSync(fd);
+    let offset = 0;
+    const read = length => {
+      if (offset + length > size || fs.readSync(fd, header, 0, length, offset) !== length) {
+        throw invalidFrame('Incomplete Zstandard frame.');
+      }
+      offset += length;
+    };
+    const advance = length => {
+      offset += length;
+      if (offset > size) throw invalidFrame('Incomplete Zstandard frame.');
+    };
+    // Use the frame boundaries defined by Zstandard, including frames that
+    // contain no JSONL bytes. A decoder may stop after one frame or consume
+    // another on the next input chunk, and can accept a truncated last frame.
+    while (offset < size) {
+      const start = offset;
+      read(4);
+      const magic = header.readUInt32LE();
+      if (magic >= 0x184d2a50 && magic <= 0x184d2a5f) { read(4); advance(header.readUInt32LE()); continue; }
+      if (magic !== 0xfd2fb528) throw invalidFrame('Unknown Zstandard frame descriptor.');
+      read(1);
+      const descriptor = header[0], singleSegment = (descriptor & 0x20) !== 0;
+      const contentSizeLength = [singleSegment ? 1 : 0, 2, 4, 8][descriptor >>> 6];
+      advance((singleSegment ? 0 : 1) + [0, 1, 2, 4][descriptor & 3] + contentSizeLength);
+      let last;
+      do {
+        read(3);
+        const block = header.readUIntLE(0, 3), type = (block >>> 1) & 3;
+        if (type === 3) throw invalidFrame('Invalid Zstandard block type.');
+        advance(type === 1 ? 1 : block >>> 3);
+        last = block & 1;
+      } while (!last);
+      if (descriptor & 4) advance(4);
+      const input = fs.createReadStream(file, { start, end: offset - 1 });
+      const decoder = createZstdDecompress();
+      input.once('error', error => decoder.destroy(error));
+      input.pipe(decoder);
+      try { yield* decoder; }
+      finally { decoder.destroy(); input.destroy(); }
+    }
+  } finally { fs.closeSync(fd); }
+}
+
 const compactEntry = entry => ({ ...entry, records: entry.records.map(({ encoded, ...record }) => record) });
 export class RolloutIndex {
   constructor(home, root, parse, lines) {
@@ -28,7 +80,14 @@ export class RolloutIndex {
     this.entries = {}; this.seen = new Set(); this.dirty = false;
     try {
       const saved = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-      if ([1, 2].includes(saved.version) && saved.home === home) this.entries = saved.entries || {};
+      if ([1, 2, 3].includes(saved.version) && saved.home === home) {
+        this.entries = saved.entries || {};
+        if (saved.version < 3) {
+          for (const [relative, entry] of Object.entries(this.entries)) {
+            if (relative.endsWith('.jsonl.zst') && !entry.framed) delete this.entries[relative];
+          }
+        }
+      }
     } catch {}
   }
   async get(file) {
@@ -36,16 +95,23 @@ export class RolloutIndex {
     this.seen.add(relative);
     const saved = this.entries[relative];
     if (saved?.token === token) return saved;
-    const entry = { token, records: [], originalProvider: 'openai', framed: false };
+    let entry = { token, records: [], originalProvider: 'openai', framed: false };
     let offset = 0;
-    for await (const bytes of this.lines(file)) {
-      const meta = this.parse(bytes);
-      if (!entry.id && meta?.id) entry.id = meta.id;
-      if (meta?.provider) {
-        entry.originalProvider = meta.provider;
-        entry.records.push({ key: meta.key, provider: meta.provider, offset, length: bytes.length });
+    try {
+      for await (const bytes of this.lines(file)) {
+        const meta = this.parse(bytes);
+        if (!entry.id && meta?.id) entry.id = meta.id;
+        if (meta?.provider) {
+          entry.originalProvider = meta.provider;
+          entry.records.push({ key: meta.key, provider: meta.provider, offset, length: bytes.length });
+        }
+        offset += bytes.length;
       }
-      offset += bytes.length;
+    } catch (error) {
+      if (error.code !== 'invalid_rollout_compression' && !error.code?.startsWith('ZSTD_error_')) throw error;
+      // An incomplete or invalid rollout has no usable routing metadata.
+      // Cache by file stamp so that a repaired history is indexed next time.
+      entry = { token, records: [], compressionError: { code: error.code, message: error.message } };
     }
     if (stamp(file) !== token) throw new Error('A conversation changed while reading its routing metadata.');
     this.entries[relative] = entry; this.dirty = true;
@@ -114,7 +180,9 @@ export class RolloutIndex {
     }
   }
   async rewrite(file, temporary, transform) {
-    const entry = await this.get(file), before = fs.statSync(file);
+    const entry = await this.get(file);
+    if (entry.compressionError) throw invalidFrame(entry.compressionError.message);
+    const before = fs.statSync(file);
     const compressed = file.endsWith('.jsonl.zst');
     const records = []; let position = 0, changed = false;
     const remember = (bytes, length, encoded) => {
@@ -199,6 +267,6 @@ export class RolloutIndex {
   }
   save() {
     for (const key of Object.keys(this.entries)) if (!this.seen.has(key)) { delete this.entries[key]; this.dirty = true; }
-    if (this.dirty) atomicPrivate(this.file, { version: 2, home: this.home, entries: this.entries });
+    if (this.dirty) atomicPrivate(this.file, { version: 3, home: this.home, entries: this.entries });
   }
 }
