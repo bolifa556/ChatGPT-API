@@ -31,15 +31,20 @@ export class NonGptAdapter {
   }
   register(name, namespace, custom) {
     if (typeof name !== 'string' || !name) throw new Error('Tool name is missing');
-    const key = alias(name, namespace), meta = { name, namespace, custom };
+    const key = custom || namespace ? alias(name, namespace) : name;
+    const meta = { name, namespace, custom };
     if (this.mapping.has(key) && JSON.stringify(this.mapping.get(key)) !== JSON.stringify(meta)) throw new Error('Ambiguous tool definition');
     this.mapping.set(key, meta);
     return key;
   }
   historyName(name, namespace, custom) {
-    const matches = [...this.mapping].filter(([, m]) => m.custom === custom &&
-      ((m.name === name && (!namespace || namespace === m.namespace)) || (!namespace && name === [m.namespace, m.name].filter(Boolean).join('.'))));
-    return matches.length === 1 ? matches[0][0] : this.register(name, namespace, custom);
+    const known = this.mapping.get(name);
+    if (!namespace && known && (custom === undefined || known.custom === custom)) return name;
+    const matches = [...this.mapping].filter(([, m]) => (custom === undefined || m.custom === custom) &&
+      (!namespace || namespace === m.namespace) && (m.name === name || name === [m.namespace, m.name].filter(Boolean).join('.')));
+    if (matches.length === 1) return matches[0][0];
+    if (!namespace && custom !== true) return name;
+    return this.register(name, namespace, custom ?? false);
   }
   tools(values, namespace) {
     return values.flatMap(original => {
@@ -52,8 +57,8 @@ export class NonGptAdapter {
         return [{ type: 'function', name: this.register(t.name, namespace, true), description,
           parameters: { type: 'object', properties: { input: { type: 'string' } }, required: ['input'], additionalProperties: false } }];
       }
-      if (t.type === 'function' && namespace) {
-        this.stats.namespaceTools++;
+      if (t.type === 'function') {
+        if (namespace) this.stats.namespaceTools++;
         t.name = this.register(t.name, namespace, false);
       }
       return [t];
@@ -64,9 +69,7 @@ export class NonGptAdapter {
     const value = structuredClone(original);
     if (Array.isArray(value.tools)) value.tools = value.tools.map(t => this.choice(t));
     if (value.name && ['function', 'custom'].includes(value.type)) {
-      let key = alias(value.name, value.namespace);
-      const matches = [...this.mapping].filter(([, m]) => m.name === value.name);
-      if (!this.mapping.has(key) && !value.namespace && matches.length === 1) key = matches[0][0];
+      const key = this.historyName(value.name, value.namespace, value.type === 'custom');
       if (this.mapping.has(key)) { value.type = 'function'; value.name = key; delete value.namespace; }
     }
     return value;
@@ -139,16 +142,15 @@ export class NonGptAdapter {
         delete item.input; delete item.namespace; delete item.id;
       } else if (item.type === 'custom_tool_call_output') {
         item.type = 'function_call_output'; delete item.id;
-      } else if (item.type === 'function_call' && item.namespace) {
-        item.name = this.historyName(item.name, item.namespace, false); delete item.namespace; delete item.id;
+      } else if (item.type === 'function_call') {
+        const name = this.historyName(item.name, item.namespace, false);
+        if (item.namespace || name !== item.name) { item.name = name; delete item.namespace; delete item.id; }
       } else if (item.type === 'message' && item.id) item.id = safeId(item.id, 'message');
       if (originalId && !item.id && references.has(originalId) && ['function_call', 'function_call_output'].includes(item.type))
         item.id = safeId(originalId, item.type, item.type === 'function_call' ? 'fc_' : 'fco_');
       if (originalId && item.id && originalId !== item.id) renames.set(originalId, item.id);
-      if (item.type === 'function_call_output' && !item.call_id && item.name) {
-        const matches = [...this.mapping].filter(([, meta]) => meta.name === item.name && (!item.namespace || meta.namespace === item.namespace));
-        if (matches.length === 1) { item.name = matches[0][0]; delete item.namespace; }
-        else if (item.namespace) { item.name = this.historyName(item.name, item.namespace, false); delete item.namespace; }
+      if (item.type === 'function_call_output' && item.name) {
+        item.name = this.historyName(item.name, item.namespace); delete item.namespace;
       }
     }
     if (renames.size) data.input = data.input.map(item => item?.type === 'item_reference' && renames.has(item.id) ? { ...item, id: renames.get(item.id) } : item);
@@ -173,7 +175,9 @@ export class NonGptAdapter {
     // message items. It is not a message field and contains no conversation data.
     else if (Array.isArray(item.summary) && !item.summary.length) delete item.summary;
     const meta = this.mapping.get(item.name);
-    if (meta && item.type === 'function_call') {
+    // An unfinished wrapper retains its raw function-call form. Its arguments
+    // cannot yet be decoded into a complete native custom-tool input.
+    if (meta && item.type === 'function_call' && !(meta.custom && item.status === 'incomplete')) {
       item.name = meta.name;
       if (meta.namespace) item.namespace = meta.namespace;
       if (meta.custom) { item.type = 'custom_tool_call'; item.input = partial && !item.arguments ? '' : this.raw(item.arguments); delete item.arguments; }

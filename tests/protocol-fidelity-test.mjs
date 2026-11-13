@@ -29,6 +29,71 @@ assert.throws(() => chatRequest({ input: [{ type: 'function_call_output', output
 assert.throws(() => chatRequest({ input: [{ type: 'function_call_output', name: 'lookup', output: [{ type: 'input_image', image_url: 'data:image/png;base64,fixture' }] }] }), /non-text/);
 checks.push('Named results retain identity without fabricated calls/IDs; unambiguous existing calls are reused');
 
+for (const releaseOriginal of [false, true]) {
+  for (const call of [
+    { namespace: 'functions', name: 'lookup' },
+    { name: 'functions.lookup' },
+    { namespace: 'functions', name: 'functions.lookup' },
+  ]) {
+    const original = { ...source, tool_choice: { type: 'function', ...call }, input: [
+      { type: 'function_call', ...call, call_id: 'original-qualified-call', arguments: '{}' },
+      { type: 'function_call_output', name: 'functions.lookup', output: 'Original qualified result' },
+    ] };
+    const before = JSON.stringify(original);
+    const result = new NonGptAdapter(original).request({ releaseOriginal });
+    assert.equal(result.input[0].name, result.tools[0].name);
+    assert.equal(result.input[1].name, result.tools[0].name);
+    assert.deepEqual(result.tool_choice, { type: 'function', name: result.tools[0].name });
+    assert.equal(chatRequest(result).messages.at(-1).tool_call_id, 'original-qualified-call');
+    assert.equal(JSON.stringify(original), before);
+  }
+  const standalone = new NonGptAdapter({ ...source, input: [
+    { type: 'function_call_output', name: 'functions.lookup', output: 'Original standalone result' },
+  ] }).request({ releaseOriginal });
+  assert.equal(chatRequest(standalone).messages.at(-1).name, standalone.tools[0].name);
+}
+checks.push('Qualified tool names resolve to the same alias in definitions, calls and named results for both request-copy paths');
+
+const duplicateLeaf = new NonGptAdapter({ model: 'custom/model', tools: [
+  { type: 'function', name: 'lookup', parameters: { type: 'object' } }, ...source.tools,
+], input: [
+  { type: 'function_call', name: 'lookup', call_id: 'root-call', arguments: '{}' },
+  { type: 'function_call', name: 'functions.lookup', call_id: 'namespace-call', arguments: '{}' },
+  { type: 'function_call_output', name: 'lookup', output: 'Root result' },
+  { type: 'function_call_output', name: 'functions.lookup', output: 'Namespace result' },
+] }).request();
+assert.equal(duplicateLeaf.input[0].name, 'lookup');
+assert.equal(duplicateLeaf.input[1].name, duplicateLeaf.tools[1].name);
+assert.deepEqual(chatRequest(duplicateLeaf).messages.slice(-2).map(item => item.tool_call_id), ['root-call', 'namespace-call']);
+checks.push('A root function and a namespaced function with the same leaf name keep their original call/result associations');
+
+const identifiedResult = new NonGptAdapter({ ...source, input: [
+  { type: 'function_call', namespace: 'functions', name: 'lookup', call_id: 'identified-call', arguments: '{}' },
+  { type: 'function_call_output', namespace: 'functions', name: 'functions.lookup', call_id: 'identified-call', output: 'Identified result' },
+] }).request();
+assert.equal(identifiedResult.input[1].name, identifiedResult.tools[0].name);
+assert.equal(identifiedResult.input[1].call_id, 'identified-call');
+assert.equal(chatRequest(identifiedResult).messages.at(-1).tool_call_id, 'identified-call');
+
+const parameterSource = { model: 'custom/model', input: 'Original input', max_output_tokens: 1234,
+  text: { verbosity: 'high' }, service_tier: 'priority', safety_identifier: 'original-user',
+  prompt_cache_retention: '24h', prompt_cache_options: { mode: 'explicit', ttl: '30m' } };
+const parameterSnapshot = JSON.stringify(parameterSource);
+const parameterResult = chatRequest(parameterSource, { supported_parameters: ['max_completion_tokens'] });
+assert.equal(parameterResult.max_completion_tokens, 1234);
+assert(!Object.hasOwn(parameterResult, 'max_tokens'));
+assert.equal(parameterResult.verbosity, 'high');
+for (const key of ['service_tier', 'safety_identifier', 'prompt_cache_retention', 'prompt_cache_options'])
+  assert.deepEqual(parameterResult[key], parameterSource[key]);
+assert.equal(JSON.stringify(parameterSource), parameterSnapshot);
+assert.equal(chatRequest(parameterSource).max_tokens, 1234);
+for (const model of ['o1', 'openai/o3-mini', 'GPT/gpt-5.1', 'GPT/gpt-6-sol']) {
+  const request = { ...parameterSource, model };
+  assert.equal(chatRequest(request).max_completion_tokens, 1234);
+  assert.equal(chatRequest(request, { supported_parameters: ['max_tokens'] }).max_tokens, 1234);
+}
+checks.push('Chat verbosity, cache controls and caller identity survive; declared token-limit parameters override documented model defaults');
+
 const annotation = { type: 'url_citation', url_citation: { start_index: 0, end_index: 6, title: 'Original source', url: 'https://example.com/source' } };
 const expected = { type: 'url_citation', ...annotation.url_citation };
 const response = chatResponse({ id: 'citation', model: 'actual-upstream-model', service_tier: 'priority', choices: [{ finish_reason: 'stop', message: { content: 'Answer', annotations: [annotation] } }] }, 'requested-model');

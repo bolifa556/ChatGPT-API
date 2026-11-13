@@ -57,7 +57,7 @@ function content(value) {
 }
 function parts(value) { return value == null ? [] : typeof value === 'string' ? [{ type: 'text', text: value }] : value; }
 
-export function chatRequest(payload) {
+export function chatRequest(payload, metadata) {
   if (payload.previous_response_id) throw unsupported('Chat continuation requires the complete input history.');
   const messages = [], system = [], calls = new Map();
   const aliyun = payload.model?.startsWith('阿里云订阅/');
@@ -109,10 +109,16 @@ export function chatRequest(payload) {
   }
   if (system.length) messages.unshift({ role: 'system', content: system.join('\n\n') });
   const result = { model: payload.model, messages };
-  for (const key of ['stream','temperature','top_p','frequency_penalty','presence_penalty','logit_bias','user','seed','metadata','service_tier','parallel_tool_calls','store','prompt_cache_key']) {
+  for (const key of ['stream','temperature','top_p','frequency_penalty','presence_penalty','logit_bias','user','seed','metadata','service_tier','parallel_tool_calls','store','prompt_cache_key','prompt_cache_retention','prompt_cache_options','safety_identifier']) {
     if (payload[key] !== undefined) result[key] = copy(payload[key]);
   }
-  if (payload.max_output_tokens !== undefined) result.max_tokens = payload.max_output_tokens;
+  if (payload.max_output_tokens !== undefined) {
+    const parameters = Array.isArray(metadata?.supported_parameters) ? metadata.supported_parameters : [];
+    const completionLimit = parameters.includes('max_completion_tokens') || !parameters.includes('max_tokens') &&
+      /^(?:o[134](?:-|$)|gpt-[5-9](?:[.-]|$))/i.test(payload.model?.split('/').at(-1) || '');
+    result[completionLimit ? 'max_completion_tokens' : 'max_tokens'] = payload.max_output_tokens;
+  }
+  if (payload.text?.verbosity !== undefined) result.verbosity = copy(payload.text.verbosity);
   if (payload.reasoning?.effort !== undefined) result.reasoning_effort = payload.reasoning.effort;
   if (payload.tools) result.tools = payload.tools.map(tool => {
     // These gateways accept native hosted-tool declarations as extensions.

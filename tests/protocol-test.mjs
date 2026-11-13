@@ -118,6 +118,26 @@ assert.equal(limited.finish().at(-1).type, 'response.incomplete');
 assert.throws(() => new ChatEvents(model).finish(), error => error.code === 'incomplete_upstream_response');
 checks.push('Chat JSON and SSE produce identical native output, reasoning, calls and usage; length limits remain incomplete');
 
+for (const reason of ['length', 'content_filter']) for (const partial of ['{"input":"unfinished', '{"input":', '']) {
+  const incompleteChat = new ChatEvents(model), incompleteNative = new NonGptEvents(adapter), events = [];
+  const value = { id: 'partial_' + reason, created: 10, model, choices: [{ index: 0, finish_reason: reason,
+    message: { role: 'assistant', tool_calls: [{ id: 'call_partial', type: 'function', function: { name, arguments: partial } }] } }] };
+  const json = adapter.response(chatResponse(value, model));
+  for (const event of incompleteChat.convert({ ...value, choices: [{ index: 0, finish_reason: reason,
+    delta: { tool_calls: [{ index: 0, ...value.choices[0].message.tool_calls[0] }] } }] })) events.push(...incompleteNative.convert(event));
+  for (const event of incompleteChat.finish()) events.push(...incompleteNative.convert(event));
+  incompleteNative.finish();
+  assert.equal(events.at(-1).type, 'response.incomplete');
+  assert.deepEqual(events.at(-1).response, json);
+  assert.equal(json.output[0].type, 'function_call');
+  assert.equal(json.output[0].arguments, partial);
+  assert.equal(json.output[0].call_id, 'call_partial');
+  assert.equal(json.output[0].status, 'incomplete');
+  assert(!events.some(event => event.type === 'response.output_item.done'));
+  assert.equal(new ResponseOutput().finish(json.output).complete, false);
+}
+checks.push('Truncated custom wrappers retain the exact unfinished function call and incomplete status in JSON/SSE without completing tool calls or reusable history');
+
 assert.equal(chatRequest({ model, service_tier: 'priority', input: [] }).service_tier, 'priority');
 for (const tier of ['priority', 'default', null, undefined]) {
   const value = { id: 'chat_tier', created: 10,

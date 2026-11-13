@@ -233,7 +233,7 @@ function prepareRequest(payload, which, pathname = '/v1/responses', metadata, fo
     const adapter = new NonGptAdapter(payload, { preserveReasoning: true, reasoningModel: metadata?.id });
     const converted = adapter.request({ releaseOriginal: true });
     const chat = forceChat || usesChat(converted, metadata);
-    return { payload: chat ? chatRequest(converted) : restoreHostedImageHistory(converted, codexHome).payload, changed: true, adapter, chat };
+    return { payload: chat ? chatRequest(converted, metadata) : restoreHostedImageHistory(converted, codexHome).payload, changed: true, adapter, chat };
   }
   return historyForTarget(payload, which);
 }

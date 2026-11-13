@@ -60,12 +60,14 @@
 | custom 工具 | 用 function 的单个字符串参数 input 承载原始输入；返回时解包，工具由客户端执行 |
 | additional_tools 历史项目 | 官方原生路径保留在 input 中，包括 ID、角色与引用；旧载体缺 role 时只补 developer。网关完整请求才把定义移入 tools，保留命名空间，当前定义覆盖旧定义；不将工具定义变成对话文字 |
 | function_call / custom_tool_call 历史 | 保留 call_id、实际参数和顺序；自定义工具仅包一层 JSON 字符串参数。合法空字符串保留，缺失输入明确报错 |
-| function_call_output / custom_tool_call_output | 保留 call_id 和原始结果。Chat 转为 role=tool、tool_call_id；内容只改外层格式 |
+| function_call_output / custom_tool_call_output | 保留 call_id 和原始结果，名称按工具定义统一转换。Chat 优先使用真实 call_id 或按名称匹配的唯一已有调用；只有名称的结果保留为具名函数结果 |
 | auto/none/required、指定工具、allowed_tools | 依目标协议转换工具选择，别名与定义一致；不替用户选择另一种工具 |
 | web_search 等上游扩展工具声明 | 保留声明，不因客户端默认声明了它就阻断普通请求；不模拟上游没有的工具能力 |
 | text.format | Chat 映射为 response_format；json_schema 的 name/description/schema/strict 原样保留；不添加“请输出 JSON”提示词 |
 | reasoning.effort | 按原值传递；Chat 使用 reasoning_effort。不自动降档，不新增重试档位 |
-| max_output_tokens | Chat 映射 max_tokens |
+| max_output_tokens | Chat 优先按模型目录声明选择 max_completion_tokens / max_tokens，缺少声明时使用对应模型类型的默认字段 |
+| text.verbosity | Chat 映射 verbosity，保留原值 |
+| prompt_cache_key、prompt_cache_retention、prompt_cache_options、safety_identifier | Chat 保留同名参数和原值 |
 | service_tier | 请求原值传递，包括 Chat 路径；不因菜单未声明速度档位而删除用户已有设置 |
 | temperature、top_p、parallel_tool_calls 等对应选项 | 按目标接口的同义字段传递；非 GPT 路线原有 reasoning.context 清理保留 |
 | previous_response_id | 只交给拥有该状态的服务；跨服务续聊用已有完整输入替换外部 response ID，不插入“继续”消息 |

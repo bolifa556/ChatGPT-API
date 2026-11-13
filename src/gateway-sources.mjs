@@ -8,7 +8,7 @@ import { readSettings, settingsRevision, publicModelId, atomicPrivate, redact } 
 import { describeError, errorDetails } from './diagnostics.mjs';
 
 const TTL = 24 * 60 * 60 * 1000;
-const fields = ['id', 'type', 'capabilities', 'supported_endpoints', 'output_modalities', 'architecture',
+const fields = ['id', 'type', 'capabilities', 'supported_endpoints', 'supported_parameters', 'output_modalities', 'architecture',
   'service_tiers', 'additional_speed_tiers', 'default_service_tier', ...contextFields, ...strengthMetadataFields];
 const readJson = file => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } };
 const fingerprint = profile => crypto.createHash('sha256').update(profile.baseUrl + '\n' + profile.apiKey).digest('hex');

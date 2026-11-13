@@ -83,6 +83,8 @@ let proxyCount = 0, downloads = 0, allowResponses = false, held, finishHeartbeat
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
 const models = [{ id: 'GPT/gpt-fixture' }, { id: 'chat-only' }, { id: 'ws-chat-only' },
   { id: 'deepseek-reasoner', supported_endpoints: ['chat/completions'] },
+  { id: 'chat-modern-limit', supported_endpoints: ['chat/completions'], supported_parameters: ['max_completion_tokens'] },
+  { id: 'chat-truncated', supported_endpoints: ['chat/completions'] },
   { id: 'chat-error', supported_endpoints: ['chat/completions'] }, { id: 'flux-dev', type: 'image' }];
 async function listen(server) {
   servers.push(server); server.on('connection', socket => { sockets.add(socket); socket.on('error', () => {}); socket.once('close', () => sockets.delete(socket)); });
@@ -100,6 +102,15 @@ const peer = http.createServer(async (req, res) => {
     if (req.url.endsWith('/images/generations')) { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ created: 1, data: [{ url: 'http://' + req.headers.host + (body.prompt === 'redirect' ? '/redirect' : '/image') }] })); return; }
     if (req.url.endsWith('/responses') && (body.model === 'ws-chat-only' || body.model === 'chat-only' && !allowResponses)) { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { code: 'unsupported_endpoint', message: 'Responses endpoint not implemented' } })); return; }
     if (body.auditStatus) { res.writeHead(body.auditStatus, { 'content-type': 'application/json', 'content-encoding': 'gzip' }); res.end(zlib.gzipSync(JSON.stringify({ error: body.auditError || originalError }))); return; }
+    if (body.model === 'chat-truncated') {
+      const call = { id: 'call_partial', type: 'function', function: { name: body.tools[0].function.name, arguments: '{"input":"unfinished' } };
+      const completion = { id: 'chat_partial', created: 1, model: body.model, choices: [{ index: 0, finish_reason: 'length', message: { role: 'assistant', tool_calls: [call] } }] };
+      if (body.stream) {
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.end('data: ' + JSON.stringify({ ...completion, choices: [{ index: 0, finish_reason: 'length', delta: { tool_calls: [{ index: 0, ...call }] } }] }) + '\n\ndata: [DONE]\n\n');
+      } else { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(completion)); }
+      return;
+    }
     res.writeHead(200, { 'content-type': 'text/event-stream' }); res.flushHeaders();
     if (req.url.endsWith('/chat/completions')) {
       if (body.model === 'chat-error') { res.end('event: error\ndata: ' + JSON.stringify({ error: originalError }) + '\n\n'); return; }
@@ -172,6 +183,51 @@ try {
   }
   allowResponses = true; await (await fetch(base + '/readyz')).arrayBuffer(); response = await post(base, original); await response.text(); assert.equal(records.at(-1).path, '/v1/responses');
   checks.push('Only rejected unsupported endpoints convert once to Chat over HTTP/WS; instructions and Fast survive; hints reset on catalog refresh');
+  {
+    const request = { model: 'chat-modern-limit', input: [{ role: 'user', content: 'Original input' }], max_output_tokens: 1234,
+      text: { verbosity: 'high' }, prompt_cache_retention: '24h', service_tier: 'priority' };
+    response = await post(base, request); await response.text();
+    assert.equal(records.at(-1).body.max_completion_tokens, 1234);
+    assert(!Object.hasOwn(records.at(-1).body, 'max_tokens'));
+    assert.equal(records.at(-1).body.verbosity, 'high');
+    assert.equal(records.at(-1).body.prompt_cache_retention, '24h');
+    assert.equal(records.at(-1).body.service_tier, 'priority');
+  }
+  {
+    const tools = [{ type: 'custom', name: 'exec', format: { type: 'text' } }];
+    for (const stream of [false, true]) {
+      response = await post(base, { model: 'chat-truncated', input: [], tools, stream });
+      assert.equal(response.status, 200);
+      let result;
+      if (stream) {
+        const events = []; for await (const packet of ssePackets(response.body)) if (packet.data) events.push(packet.data);
+        assert.equal(events.at(-1).type, 'response.incomplete');
+        assert(!events.some(event => event.type === 'error' || event.type === 'response.output_item.done'));
+        result = events.at(-1).response;
+      } else result = await response.json();
+      assert.equal(result.status, 'incomplete');
+      assert.equal(result.output[0].arguments, '{"input":"unfinished');
+    }
+    const socket = new WebSocket(base.replace('http:', 'ws:') + '/v1/responses'); socket.on('error', () => {}); await once(socket, 'open');
+    try {
+      const turn = value => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => { socket.off('message', accept); reject(Error('Incomplete Chat fixture timed out')); }, 5000);
+        function accept(raw) {
+          const event = JSON.parse(raw);
+          if (['response.completed', 'response.incomplete', 'error'].includes(event.type)) { clearTimeout(timer); socket.off('message', accept); resolve(event); }
+        }
+        socket.on('message', accept); socket.send(JSON.stringify({ type: 'response.create', ...value }));
+      });
+      const incomplete = await turn({ model: 'chat-truncated', input: [], tools });
+      assert.equal(incomplete.type, 'response.incomplete');
+      const retry = await turn({ model: 'chat-truncated', previous_response_id: incomplete.response.id, input: [] });
+      assert.equal(retry.error.code, 'previous_response_not_found');
+      const continued = await turn({ model: 'chat-modern-limit', input: [{ role: 'user', content: 'Original complete history' }], max_output_tokens: 1234 });
+      assert.equal(continued.type, 'response.completed');
+      assert.equal(records.at(-1).body.max_completion_tokens, 1234);
+    } finally { const closed = once(socket, 'close'); socket.close(); await closed; }
+  }
+  checks.push('Model token-limit declarations and Chat controls survive HTTP/WS; truncated JSON/SSE tools remain incomplete and the same connection accepts a full-history continuation');
   {
     const adapter = new NonGptAdapter({ model: 'deepseek-reasoner' });
     const thought = adapter.item({ type: 'reasoning', id: 'upstream_thought', summary: [{ type: 'summary_text', text: 'Original thinking' }] });

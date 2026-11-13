@@ -121,6 +121,8 @@ export class ResponseOutput {
       // from a stream item can create an object neither endpoint emitted.
       this.items.set(key, item); this.pending.delete(key);
     }
-    return { output: [...this.items].sort(([a], [b]) => a - b).map(([, item]) => item), complete: this.pending.size === 0 };
+    const items = [...this.items].sort(([a], [b]) => a - b).map(([, item]) => item);
+    const unfinishedCall = items.some(item => item?.type?.endsWith('_call') && ['in_progress', 'incomplete'].includes(item.status));
+    return { output: items, complete: this.pending.size === 0 && !unfinishedCall };
   }
 }

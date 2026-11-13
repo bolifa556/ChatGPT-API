@@ -111,6 +111,17 @@ const server=http.createServer(async(req,res)=>{
     const body=await readRequestJson(req);
     res.writeHead(200,{'content-type':'text/event-stream'});
     if(req.url.endsWith('/chat/completions')){
+      if (phase.truncated) {
+        const tool = flatten(body.tools || []).find(isExec);
+        assert(tool, 'Native custom tool missing from the partial-call fixture');
+        phase.requests++;
+        records.push({ model: body.model, url: req.url, body });
+        const chunk = { id: 'chat_partial_' + ++serial, created: 1, model: body.model,
+          choices: [{ index: 0, finish_reason: 'length', delta: { tool_calls: [{ index: 0,
+            id: 'call_partial_' + serial, type: 'function', function: { name: tool.name, arguments: '{"input":"' } }] } }] };
+        res.end('data: ' + JSON.stringify(chunk) + '\n\ndata: [DONE]\n\n');
+        return;
+      }
       // Reuse the same audited response logic, encoding its original output as Chat.
       const items=[];events(body,req.url,e=>{if(e.type==='response.output_item.done')items.push(e.item);});
       if(phase.interrupt)return;
@@ -168,8 +179,14 @@ async function doTurn(threadId,model,options){
     await rpc('turn/interrupt',{threadId,turnId:started.turn.id});
   }
   let done;for(let n=0;n<700;n++){done=notifications.slice(offset).find(v=>v.method==='turn/completed'&&v.params?.turn?.id===started.turn.id);if(done)break;await delay(50);}
-  assert(done,'Native turn never completed');assert.equal(done.params.turn.status,phase.interrupt?'interrupted':'completed',JSON.stringify(done.params.turn.error));
-  if(!phase.interrupt){
+  assert(done,'Native turn never completed');
+  const expectedStatus = phase.interrupt ? 'interrupted' : phase.truncated ? 'failed' : 'completed';
+  assert.equal(done.params.turn.status, expectedStatus, JSON.stringify(done.params.turn.error));
+  if (phase.truncated) {
+    assert.match(done.params.turn.error?.message || '', /output.*tokens|token.*limit|maximum.*tokens/i);
+    assert(!notifications.slice(offset).some(note => note.method === 'item/completed' && note.params.item.type === 'commandExecution'));
+  }
+  if(!phase.interrupt && !phase.truncated){
     assert.equal(fs.readFileSync(phase.file,'utf8').trim(),phase.marker);assert(phase.requests>1,'Native tool execution did not continue the model');
     assert(notifications.slice(offset).some(n=>n.method==='item/completed'&&n.params.item.type==='commandExecution'&&n.params.item.exitCode===0),'No successful native terminal execution');
     if(phase.media){
@@ -187,7 +204,7 @@ async function doTurn(threadId,model,options){
     const expected=Math.floor(info.context_window*(info.effective_context_window_percent??95)/100);
     assert.equal(modelContextWindow,expected,'Native token-usage window does not match the selected model: '+model);
   }
-  return{model,status:done.params.turn.status,requests:phase.requests,modelContextWindow,media:phase.media||false,plan:phase.plan||false,steer:phase.steer||false,mcp:phase.mcp||false,question:phase.questionAnswered||false,itemTypes:[...new Set(notifications.slice(offset).filter(n=>n.method==='item/completed').map(n=>n.params.item.type))]};
+  return{model,status:done.params.turn.status,requests:phase.requests,modelContextWindow,media:phase.media||false,plan:phase.plan||false,steer:phase.steer||false,mcp:phase.mcp||false,question:phase.questionAnswered||false,truncated:phase.truncated||false,itemTypes:[...new Set(notifications.slice(offset).filter(n=>n.method==='item/completed').map(n=>n.params.item.type))]};
 }
 async function doCompact(threadId,marker,{remote=false}={}){
   phase={requests:0,compaction:true,marker};const offset=notifications.length,recordOffset=records.length;
@@ -275,6 +292,10 @@ try{
       if(extended){
         row.steps.push(await doTurn(threadId,model,{marker,file,interrupt:true,steer:true}));
         row.steps.push(await doTurn(threadId,model,{marker,file,media:true,plan:true,mcp:true,question:true}));
+        if (model.startsWith('词元计划/')) {
+          row.steps.push(await doTurn(threadId,model,{marker,file,truncated:true}));
+          row.steps.push(await doTurn(threadId,model,{marker,file}));
+        }
       }
       row.steps.push(await doTurn(threadId,official.slug,{marker,file}));
       if(extended){
