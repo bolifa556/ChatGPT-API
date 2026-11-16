@@ -14,6 +14,7 @@ import { usesChat, chatRequest, chatResponse, ChatEvents, chatEndpointUnavailabl
 import { decodedStream, ssePackets, encodeSse, isSseControl } from './sse.mjs';
 import { forwardImages, imageOnlyModel, imageCapabilities } from './image-compat.mjs';
 import { ResponseImages, restoreHostedImageHistory } from './responses-images.mjs';
+import { NativeWebSearch } from './native-web-search.mjs';
 import { contextFields, rememberContexts, contextKey, applyContext } from './model-context.mjs';
 import { officialDispatcherFor, readEncodedBody, outgoingBody, writeChunk, writeWebSocket, relayClose,
   requestWithAbort as request, protocolError, releaseResponseBody, RESPONSE_TIMEOUTS, MAX_REQUEST_BYTES,
@@ -59,7 +60,7 @@ const mediaDispatcher = transport === 'direct' ? gatewayDispatcher : gatewayDisp
 const officialDispatcher = officialDispatcherFor(officialProxy);
 const sourceId = crypto.createHash('sha256').update(gatewayBase + '\n' + (env.API_KEY || '')).digest('hex');
 const buildHash = crypto.createHash('sha256');
-for (const name of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs','responses-images.mjs','model-context.mjs','model-strength.mjs','transport.mjs','response-state.mjs','diagnostics.mjs','settings.mjs','gateway-sources.mjs']) buildHash.update(fs.readFileSync(path.join(dir, name)));
+for (const name of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs','responses-images.mjs','native-web-search.mjs','model-context.mjs','model-strength.mjs','transport.mjs','response-state.mjs','diagnostics.mjs','settings.mjs','gateway-sources.mjs']) buildHash.update(fs.readFileSync(path.join(dir, name)));
 for (const name of ['model-contexts.json', 'model-template.json']) {
   if (fs.existsSync(path.join(root, 'assets', name))) buildHash.update(fs.readFileSync(path.join(root, 'assets', name)));
 }
@@ -76,6 +77,7 @@ let status = { gateway: { ready: false }, official: { ready: false } };
 let refreshInFlight;
 let observedClientVersion, configuredVersionAtObservation;
 const controllers = new Set();
+const nativeSearch = new NativeWebSearch();
 export let routerReady;
 export let closeRouter;
 
@@ -427,6 +429,23 @@ async function handleHttp(req, res) {
     ...(mode === 'mixed' ? { models: catalog.official } : {}),
     object: 'list', data: [...new Set([...(mode === 'mixed' ? catalog.official.map(m => m.slug) : []), ...(gatewayEnabled ? catalog.gatewayIds : [])])].map(id => ({ id, object: 'model' })) });
   let incoming = await readEncodedBody(req);
+  if (/^\/(?:v1\/)?alpha\/search$/.test(url.pathname)) {
+    if (req.method !== 'POST') throw Object.assign(new Error('Native search requires POST.'), { status: 405, code: 'invalid_search_method' });
+    const body = parseRequest(incoming.decoded.toString('utf8'));
+    if (route(body.model) === 'gateway') {
+      const gateway = sources.target(body.model, catalog.gatewayModels);
+      const controller = new AbortController(); controllers.add(controller);
+      res.on('close', () => { if (!res.writableEnded) controller.abort(); });
+      try {
+        const value = await nativeSearch.run(body, { gateway, signal: controller.signal,
+          headers: { ...headersFor(req.headers, 'gateway', gateway.profile), 'content-type': 'application/json' },
+          send: (payload, headers) => request(gateway.base + '/responses', { method: 'POST', headers,
+            body: JSON.stringify(payload), dispatcher: gateway.dispatcher, signal: controller.signal, ...RESPONSE_TIMEOUTS }) });
+        log('native search completed ' + JSON.stringify({ model: body.model, references: value.results.length, apiOnly: mode === 'gateway' }));
+        return json(res, 200, value);
+      } finally { controllers.delete(controller); }
+    }
+  }
   const imageRoute = /^\/(?:v1\/)?images\/(generations|edits)$/.exec(url.pathname);
   if (imageRoute) {
     const body = incoming.decoded;

@@ -6,6 +6,7 @@
 - [本地控制台](console.md)
 - [配置、认证与数据位置](configuration.md)
 - [上下文容量与 API 连接设置](model-context.md)
+- [原生联网搜索兼容与上游要求](native-web-search.md)
 - [Linux 使用说明](linux-readme.md)
 - [macOS DMG 使用说明](macos-dmg-readme.md)
 - [发布包](../release/README.md)

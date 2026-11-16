@@ -55,6 +55,9 @@ try {
     [IO.Compression.ZipFile]::ExtractToDirectory([IO.Path]::GetFullPath($Archive), $extracted)
     $release = Join-Path $extracted $releaseName
     Assert (Test-Path -LiteralPath (Join-Path $release '安装.cmd')) 'Missing release entry point.'
+    $searchModule = Join-Path $release 'payload\src\native-web-search.mjs'
+    Assert (Test-Path -LiteralPath $searchModule) 'Missing native web-search adapter in release payload.'
+    Assert ((Get-FileHash -LiteralPath $searchModule).Hash -eq (Get-FileHash -LiteralPath (Join-Path $root 'src\native-web-search.mjs')).Hash) 'Packaged native web-search adapter differs from current source.'
     foreach ($file in Get-ChildItem -LiteralPath $release -Recurse -File -Filter *.ps1) {
         $tokens = $null; $errors = $null
         $null = [Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
@@ -123,7 +126,7 @@ try {
     Assert ($LASTEXITCODE -eq 0) 'Bundled dependencies did not load from the independent installation.'
     Assert ((Get-NativeConfigHashes) -ceq $before) 'Release test changed native account/configuration files.'
     $report = [ordered]@{passed=$true;archive=[IO.Path]::GetFullPath($Archive);version=$package.version;checks=@(
-        'clean archive allowlist','PowerShell 5.1 package syntax','independent install with Chinese/spaces/brackets in path',
+        'clean archive allowlist','native web-search adapter matches source','PowerShell 5.1 package syntax','independent install with Chinese/spaces/brackets in path',
         'offline runtime and dependency setup','shortcuts target installed directory','update preserves settings and user files',
         'active-process update guard','path traversal and private-file protection','corrupt payload rejected before writes',
         'packaged JavaScript and dependency imports','native config and auth unchanged'
