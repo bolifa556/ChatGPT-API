@@ -92,7 +92,8 @@ jobs:
           retention-days: 1
 
   macos:
-    runs-on: macos-latest
+    # clang targets ARM64 explicitly when building the DMG on this Intel host.
+    runs-on: macos-15-intel
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
