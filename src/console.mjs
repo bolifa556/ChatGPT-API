@@ -7,9 +7,10 @@ import { once } from 'node:events';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { GatewaySources } from './gateway-sources.mjs';
 import { readEnvFile, readSettings, publicSettings, saveSettings, settingsRevision, atomicPrivate, overrideKey, redact } from './settings.mjs';
-import { rememberContexts, contextKey, applyContext } from './model-context.mjs';
+import { rememberContexts, contextKey, applyContext, DEFAULT_CONTEXT_WINDOW } from './model-context.mjs';
 import { imageOnlyModel, imageCapabilities, automaticImageCandidates } from './image-compat.mjs';
 import { modelStrengths } from './model-strength.mjs';
+import { probeModels } from './model-probe.mjs';
 import { cleanManagedLogs, createDiagnosticLog, describeError, errorDetails } from './diagnostics.mjs';
 
 const moduleRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -34,7 +35,11 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
   cleanManagedLogs(root);
   let env = readEnvFile(path.join(root, 'data/.env'));
   const version = readJson(path.join(root, 'package.json'), { version: '3.1.5' }).version;
-  const buildId = crypto.createHash('sha256').update(fs.readFileSync(fileURLToPath(import.meta.url))).digest('hex');
+  const build = crypto.createHash('sha256');
+  for (const file of ['src/console.mjs', 'src/model-probe.mjs', 'src/model-context.mjs', 'src/model-strength.mjs', 'src/settings.mjs', 'assets/console/index.html', 'assets/console/console.js', 'assets/console/console.css']) {
+    build.update(fs.readFileSync(path.join(moduleRoot, file)));
+  }
+  const buildId = build.digest('hex');
   const identity = crypto.createHash('sha256').update(root).digest('hex');
   const stateFile = path.join(root, 'data/state/console.json');
   const previous = readJson(stateFile);
@@ -52,7 +57,7 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
     if (open) await opener(reusedUrl);
     return { reused: true, url: reusedUrl, close: async () => {} };
   }
-  let settings = readSettings(root, env), refresh = null;
+  let settings = readSettings(root, env), refresh = null, refreshRevision;
   const views = new Set(), lifetime = new AbortController();
   let idleTimer, closing;
   const close = () => closing ||= new Promise(resolve => {
@@ -81,7 +86,7 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
     for (const profile of pool.profiles()) {
       if (!profile.baseUrl) continue;
       capacities.set(profile.id, rememberContexts({ file: path.join(root, 'data/cache/model-contexts.json'), base: profile.baseUrl,
-        models: pool.models.filter(model => model._providerId === profile.id && !imageOnlyModel(model)).map(model => ({ ...model, id: model._upstreamId })), known }));
+        models: pool.models.filter(model => model._providerId === profile.id && !imageOnlyModel(model)).map(model => ({ ...model, id: model._upstreamId })), official, known }));
     }
     return pool.models.map(model => {
       const profile = pool.profile(model._providerId), record = capacities.get(profile.id)?.entries[contextKey(profile.baseUrl, model._upstreamId)];
@@ -89,13 +94,31 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
       const configuredImage = [profile.imageModel, profile.imageEditModel].includes(model._upstreamId)
         || selected?.providerId === profile.id && selected.modelId === model._upstreamId;
       const image = imageCapabilities(configuredImage ? { ...model, type: 'image' } : model);
-      const key = overrideKey(profile.id, model._upstreamId), resolved = applyContext({ ...template }, record, { limit: settings.contextLimit, override: settings.contextOverrides[key] });
+      const key = overrideKey(profile.id, model._upstreamId);
+      const capacity = settings.modelCapacities[key] || record?.capacity || DEFAULT_CONTEXT_WINDOW;
+      const resolved = applyContext({ ...template }, record, { override: settings.contextOverrides[key], capacity: settings.modelCapacities[key] });
       return { id: model.id, name: model._upstreamId, providerId: profile.id, providerName: profile.name, overrideKey: key, kind: image.known ? 'image' : 'chat',
-        image, strengths: modelStrengths(model, official),
-        capacity: record?.capacity || null, capacitySource: record?.source || 'unreported', fallbackCapacity: template.context_window, limit: resolved.context_window,
+        image, strengths: modelStrengths(model, official, record?.strengths, settings.strengthOverrides[key]),
+        capacity, capacitySource: settings.modelCapacities[key] ? 'manual' : record?.source || 'unreported', limit: resolved.context_window,
         effectivePercent: resolved.effective_context_window_percent ?? 95,
         effective: Math.floor(resolved.context_window * (resolved.effective_context_window_percent ?? 95) / 100) };
     });
+  }
+  function refreshModels() {
+    const revision = settingsRevision(readSettings(root, readEnvFile(path.join(root, 'data/.env'))));
+    if (refresh && refreshRevision !== revision) return refresh.then(() => refreshModels());
+    if (!refresh) refresh = (async () => {
+      refreshRevision = revision;
+      env = readEnvFile(path.join(root, 'data/.env'));
+      const transport = process.platform === 'win32' ? env.GATEWAY_TRANSPORT : 'direct';
+      const pool = new GatewaySources(root, env, { transport, tunnelPort: Number(env.GATEWAY_TUNNEL_PORT || 18003) });
+      try {
+        pool.loadCached(readJson(path.join(root, 'data/cache/catalog-state.json'), {}));
+        await pool.discover({ signal: lifetime.signal });
+        await probeModels(pool, { signal: lifetime.signal });
+      } finally { if (lifetime.signal.aborted) pool.destroy(); else await pool.close(); }
+    })().finally(() => { refresh = null; });
+    return refresh;
   }
   async function state() {
     env = readEnvFile(path.join(root, 'data/.env'));
@@ -153,21 +176,15 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
           if (!String(req.headers['content-type']).startsWith('application/json')) return json(res, 415, { error: '需要 JSON 配置。' });
           const value = await requestBody(req);
           env = readEnvFile(path.join(root, 'data/.env'));
-          settings = saveSettings(root, value, env); return json(res, 200, await state());
+          const previous = readSettings(root, env);
+          settings = saveSettings(root, value, env);
+          const addedSource = settings.providers.some(profile => profile.enabled && !previous.providers.some(old =>
+            old.enabled && old.id === profile.id && old.baseUrl === profile.baseUrl && old.apiKey === profile.apiKey));
+          if (addedSource) await refreshModels();
+          return json(res, 200, await state());
         }
         if (req.method === 'POST' && url.pathname === '/api/refresh') {
-          if (!refresh) refresh = (async () => {
-            env = readEnvFile(path.join(root, 'data/.env'));
-            // Match the launchers: only Windows owns the optional legacy SSH tunnel.
-            const transport = process.platform === 'win32' ? env.GATEWAY_TRANSPORT : 'direct';
-            const pool = new GatewaySources(root, env, { transport, tunnelPort: Number(env.GATEWAY_TUNNEL_PORT || 18003) });
-            try {
-              pool.loadCached(readJson(path.join(root, 'data/cache/catalog-state.json'), {}));
-              await pool.discover({ signal: lifetime.signal });
-            }
-            finally { if (lifetime.signal.aborted) pool.destroy(); else await pool.close(); }
-          })().finally(() => { refresh = null; });
-          await refresh; return json(res, 200, await state());
+          await refreshModels(); return json(res, 200, await state());
         }
         if (req.method === 'POST' && url.pathname === '/api/close') {
           res.once('finish', close);

@@ -1,6 +1,7 @@
 const $ = selector => document.querySelector(selector);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const tokens = value => value == null ? '未提供' : value >= 1000000 ? (value / 1000000).toLocaleString('en-US', { maximumFractionDigits: 2 }) + 'M' : value >= 1000 ? (value / 1000).toLocaleString('en-US', { maximumFractionDigits: 1 }) + 'K' : value.toLocaleString();
+const contextNumber = value => (value / 1000).toLocaleString('en-US', { maximumFractionDigits: 3 });
+const contextText = value => contextNumber(value ?? 262000) + 'K';
 let token = location.hash.slice(1) || sessionStorage.getItem('console-token') || '';
 if (token) sessionStorage.setItem('console-token', token);
 let lifetime;
@@ -69,11 +70,20 @@ function showChoices(button, last = false) {
 document.addEventListener('pointerdown', event => { if (openChoice && !openChoice.menu.contains(event.target) && !openChoice.button.contains(event.target)) closeChoice(); });
 window.addEventListener('resize', () => closeChoice());
 window.addEventListener('scroll', event => { if (openChoice && !openChoice.menu.contains(event.target)) closeChoice(); }, true);
-const helpAnchor = document.querySelector('.help-anchor');
-helpAnchor.addEventListener('pointerenter', () => helpAnchor.classList.remove('help-dismissed'));
-helpAnchor.addEventListener('focusin', () => helpAnchor.classList.remove('help-dismissed'));
-$('#image-routing-help').onclick = () => helpAnchor.classList.remove('help-dismissed');
-document.addEventListener('keydown', event => { if (event.key === 'Escape') helpAnchor.classList.add('help-dismissed'); });
+const helpAnchors = [...document.querySelectorAll('.help-anchor')];
+for (const anchor of helpAnchors) {
+  const reveal = () => {
+    anchor.classList.remove('help-dismissed');
+    if (!anchor.classList.contains('table-help')) return;
+    const tooltip = anchor.querySelector('.help-tooltip'), bounds = anchor.getBoundingClientRect();
+    tooltip.style.left = Math.max(12, Math.min(bounds.left, innerWidth - tooltip.offsetWidth - 12)) + 'px';
+    tooltip.style.top = (bounds.bottom + tooltip.offsetHeight + 12 > innerHeight ? Math.max(12, bounds.top - tooltip.offsetHeight - 8) : bounds.bottom + 8) + 'px';
+  };
+  anchor.addEventListener('pointerenter', reveal);
+  anchor.addEventListener('focusin', reveal);
+  anchor.querySelector('.help-label').onclick = reveal;
+}
+document.addEventListener('keydown', event => { if (event.key === 'Escape') for (const anchor of helpAnchors) anchor.classList.add('help-dismissed'); });
 async function api(route, body) {
   const response = await fetch('/api/' + route, { method: body === undefined ? 'GET' : 'POST', headers: { authorization: 'Bearer ' + token, ...(body === undefined ? {} : { 'content-type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const result = await response.json(); if (!response.ok) throw new Error(result.error || '操作未完成。'); return result;
@@ -82,9 +92,11 @@ function toast(message) { clearTimeout(toastTimer); $('#toast').textContent = me
 function changed() { dirty = true; updateSavebar(); }
 function updateSavebar() {
   $('.savebar').classList.toggle('dirty', dirty);
-  $('#save-settings').disabled = !dirty || busy; $('#discard').disabled = !dirty || busy; $('#refresh-models').disabled = busy || dirty;
+  $('#save-settings').disabled = !dirty || busy; $('#refresh-models').disabled = busy || dirty;
   $('#save-status').textContent = busy ? '正在处理…' : dirty ? '未保存' : '已保存';
   $('#add-source').disabled = busy;
+  for (const control of document.querySelectorAll('.source-card input,.source-card button,.model-value,.image-strength,#image-routing')) control.disabled = busy;
+  for (const control of document.querySelectorAll('.image-default')) control.disabled = busy || control.dataset.automatic === 'true';
 }
 function field(provider, name, label, placeholder = '', full = false) {
   const secret = name === 'apiKey';
@@ -192,6 +204,7 @@ function renderSources() {
       draft.providers = draft.providers.filter(item => item.id !== provider.id);
       for (const key of Object.keys(draft.contextOverrides)) if (JSON.parse(key)[0] === provider.id) delete draft.contextOverrides[key];
       for (const key of Object.keys(draft.imageStrengths || {})) if (JSON.parse(key)[0] === provider.id) delete draft.imageStrengths[key];
+      for (const name of ['modelCapacities', 'strengthOverrides']) for (const key of Object.keys(draft[name] || {})) if (JSON.parse(key)[0] === provider.id) delete draft[name][key];
       if (draft.preferredProviderId === provider.id) draft.preferredProviderId = draft.providers.find(item => item.enabled)?.id || '';
       if (draft.defaultImageModel?.providerId === provider.id) draft.defaultImageModel = null;
       changed(); renderSources(); renderSourceFilters(); renderModels(); updateCounts();
@@ -205,19 +218,70 @@ function updateCounts() {
 }
 const strengthLabel = value => value;
 const explicitStrengths = capability => (capability?.levels || []).filter(level => level !== 'auto');
+function capabilityFor(model, field) {
+  const levels = draft.strengthOverrides?.[model.overrideKey]?.[field];
+  if (!levels) return model.strengths?.[field];
+  const ranks = { auto: -1, none: 0, off: 0, minimal: 1, low: 2, standard: 2, medium: 3, high: 4, hd: 4, xhigh: 5, max: 6, ultra: 7 };
+  const ordered = levels.every(level => Object.hasOwn(ranks, level.toLowerCase()));
+  const values = ordered ? [...levels].sort((a, b) => ranks[a.toLowerCase()] - ranks[b.toLowerCase()]) : levels;
+  return { status: 'known', levels: values, highest: ordered ? values.at(-1) : null, source: 'manual' };
+}
+function editable(model, field, content, className = '') {
+  return '<button type="button" class="model-value ' + className + '" data-edit="' + field + '" data-key="' + escape(model.overrideKey) + '" aria-label="' + escape('修改 ' + model.name + ' ' + ({ context: '当前配置', capacity: '已知容量', reasoning: '思考档位', complexity: '图片思考档位', quality: '画质档位' })[field]) + '" title="点击修改">' + escape(content) + '</button>';
+}
+function editModel(button, model) {
+  const field = button.dataset.edit, numeric = ['context', 'capacity'].includes(field);
+  const input = document.createElement('input');
+  input.type = 'text'; input.className = 'model-editor' + (numeric ? ' numeric' : '');
+  input.setAttribute('aria-label', button.getAttribute('aria-label'));
+  input.autocomplete = 'off'; input.spellcheck = false;
+  if (numeric) {
+    const value = field === 'context' ? draft.contextOverrides[model.overrideKey] || draft.modelCapacities?.[model.overrideKey] || model.capacity || model.limit
+      : draft.modelCapacities?.[model.overrideKey] || model.capacity;
+    input.inputMode = 'decimal'; input.value = value == null ? '' : String(value / 1000);
+  } else input.value = (capabilityFor(model, field)?.levels || []).join(' / ');
+  button.replaceWith(input); input.focus(); input.select();
+  let cancelled = false;
+  input.onkeydown = event => {
+    if (event.key === 'Escape') { cancelled = true; input.blur(); }
+    else if (event.key === 'Enter') { event.preventDefault(); input.blur(); }
+  };
+  input.oninput = () => {
+    if (field !== 'context') return;
+    const value = Number(input.value.replace(/k$/i, '').replaceAll(',', '')) * 1000;
+    if (Number.isSafeInteger(value) && value > 0) input.closest('tr').querySelector('[data-effective]').textContent = contextText(Math.floor(value * (model.effectivePercent ?? 95) / 100));
+  };
+  input.onblur = () => {
+    if (!cancelled) {
+      const key = model.overrideKey;
+      if (numeric) {
+        const value = Number(input.value.replace(/k$/i, '').replaceAll(',', '')) * 1000;
+        if (Number.isSafeInteger(value) && value > 0) {
+          const target = field === 'context' ? draft.contextOverrides : draft.modelCapacities ||= {};
+          target[key] = value; changed();
+        } else toast('请填写有效的 K 数值。');
+      } else {
+        const levels = [...new Set(input.value.trim().split(/[\s,/|]+/).filter(Boolean))];
+        if (levels.length && levels.length <= 32 && levels.every(level => /^[a-z0-9][a-z0-9_-]{0,31}$/i.test(level))) {
+          draft.strengthOverrides ||= {}; draft.strengthOverrides[key] ||= {}; draft.strengthOverrides[key][field] = levels; changed();
+        } else toast('请填写英文档位，用斜线或逗号分隔。');
+      }
+    }
+    renderModels();
+  };
+}
 function strengthCell(model) {
-  const title = capability => ({ catalog: '接口声明', 'native-catalog': '官方模型目录', documentation: '官方型号规格' })[capability?.source] || '';
+  const title = capability => ({ catalog: '接口声明', 'native-catalog': '官方模型目录', documentation: '官方型号规格', 'model-validation': '接口声明', manual: '手动设置' })[capability?.source] || '';
   const text = capability => capability?.status === 'known' ? capability.levels.map(strengthLabel).join(' / ') : capability?.status === 'unsupported' ? '不支持' : '无法检测';
-  if (model.kind !== 'image') return '<span class="strength-levels" title="' + escape(title(model.strengths?.reasoning) + '：' + (model.strengths?.reasoning?.levels || []).join(' / ')) + '">' + escape(text(model.strengths?.reasoning)) + '</span>';
-  if (['complexity', 'quality'].every(field => !model.strengths?.[field] || model.strengths[field].status === 'unknown')) return '<span class="model-note">无法检测</span>';
+  if (model.kind !== 'image') return editable(model, 'reasoning', text(capabilityFor(model, 'reasoning')), 'strength-levels');
   const choice = draft.imageStrengths?.[model.overrideKey] || {};
   return '<div class="image-strengths">' + ['complexity', 'quality'].map(field => {
-    const capability = model.strengths?.[field], name = field === 'complexity' ? '思考' : '画质';
-    if (capability?.status !== 'known') return '<div class="strength-control"><span>' + name + '</span><span class="model-note">' + escape(text(capability)) + '</span></div>';
+    const capability = capabilityFor(model, field), name = field === 'complexity' ? '思考' : '画质';
+    if (capability?.status !== 'known') return '<div class="strength-control"><span>' + name + '</span>' + editable(model, field, text(capability), 'model-note') + '</div>';
     const levels = explicitStrengths(capability);
     if (!levels.length) return '<div class="strength-control"><span>' + name + '</span><span class="model-note">无法检测</span></div>';
     const value = levels.includes(choice[field]) ? choice[field] : levels.includes(capability.highest) ? capability.highest : '';
-    return '<div class="strength-control" title="' + escape(title(capability) + '；默认使用可确认的最高档位') + '"><span>' + name + '</span><button type="button" class="choice-trigger compact image-strength" data-key="' + escape(model.overrideKey) + '" data-field="' + field + '" value="' + escape(value) + '" aria-label="' + escape(model.name + ' ' + name + '强度') + '"></button></div>';
+    return '<div class="strength-control" title="' + escape(title(capability)) + '">' + editable(model, field, name, 'strength-name') + '<button type="button" class="choice-trigger compact image-strength" data-key="' + escape(model.overrideKey) + '" data-field="' + field + '" value="' + escape(value) + '" aria-label="' + escape(model.name + ' ' + name + '强度') + '"></button></div>';
   }).join('') + '</div>';
 }
 function renderModels() {
@@ -228,26 +292,22 @@ function renderModels() {
   const models = data.models.filter(model => draft.providers.some(provider => provider.id === model.providerId && provider.enabled) && (!source || model.providerId === source) && (model.name + (draft.providers.find(provider => provider.id === model.providerId)?.name || model.providerName)).toLowerCase().includes(search));
   $('#filtered-count').textContent = models.length + ' 个模型'; $('#models-empty').hidden = models.length > 0;
   $('#model-rows').innerHTML = models.map(model => {
-    const override = draft.contextOverrides[model.overrideKey] || '';
-    const actual = Math.min(Number(override) || model.capacity || model.fallbackCapacity || model.limit, model.capacity || Infinity, Number(draft.contextLimit));
+    const capacity = draft.modelCapacities?.[model.overrideKey] || model.capacity;
+    const actual = draft.contextOverrides[model.overrideKey] || capacity || model.limit;
     const providerName = draft.providers.find(provider => provider.id === model.providerId)?.name || model.providerName;
     if (model.kind === 'image') {
       const selected = defaultImage?.providerId === model.providerId && defaultImage.modelId === model.name;
       const automatic = selected && !draft.defaultImageModel;
       const control = model.image?.generation
-        ? '<label class="image-default-choice' + (selected ? ' selected' : '') + '"><input type="checkbox" class="image-default" data-id="' + escape(model.id) + '" ' + (selected ? 'checked ' : '') + (automatic ? 'disabled ' : '') + 'aria-label="' + escape(model.name + ' · ' + providerName + ' 默认生图') + '"><span>默认生图' + (automatic ? '（自动）' : '') + '</span></label>'
+        ? '<label class="image-default-choice' + (selected ? ' selected' : '') + '"><input type="checkbox" class="image-default" data-automatic="' + automatic + '" data-id="' + escape(model.id) + '" ' + (selected ? 'checked ' : '') + (automatic ? 'disabled ' : '') + 'aria-label="' + escape(model.name + ' · ' + providerName + ' 默认生图') + '"><span>默认生图' + (automatic ? '（自动）' : '') + '</span></label>'
         : '<span class="model-note">仅图片编辑</span>';
-      return '<tr class="image-model-row"><td><strong>' + escape(model.name) + '</strong><span class="model-kind">图片</span></td><td>' + escape(providerName) + '</td><td></td><td></td><td>' + control + '</td><td class="model-strength">' + strengthCell(model) + '</td></tr>';
+      return '<tr class="image-model-row"><td><strong>' + escape(model.name) + '</strong><span class="model-kind">图片</span></td><td>' + escape(providerName) + '</td><td></td><td>' + control + '</td><td class="model-strength">' + strengthCell(model) + '</td></tr>';
     }
-    return '<tr><td><strong>' + escape(model.name) + '</strong></td><td>' + escape(providerName) + '</td><td>' + tokens(model.capacity) + '</td><td><input class="model-override" type="number" min="4096" max="2000000" data-key="' + escape(model.overrideKey) + '" value="' + override + '" placeholder="自动" aria-label="' + escape(model.name) + ' 的上下文上限"></td><td><div class="model-current"><span data-effective="' + escape(model.overrideKey) + '">' + tokens(Math.floor(actual * (model.effectivePercent ?? 95) / 100)) + '</span></div></td><td class="model-strength">' + strengthCell(model) + '</td></tr>';
+    return '<tr><td><strong>' + escape(model.name) + '</strong></td><td>' + escape(providerName) + '</td><td>' + editable(model, 'capacity', contextText(capacity)) + '</td><td><div class="model-current">' + editable(model, 'context', contextText(actual)) + '<svg class="context-arrow" width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M3 10h13M11 5l5 5-5 5"/></svg><span class="context-effective" data-effective="' + escape(model.overrideKey) + '">' + contextText(Math.floor(actual * (model.effectivePercent ?? 95) / 100)) + '</span></div></td><td class="model-strength">' + strengthCell(model) + '</td></tr>';
   }).join('');
-  for (const input of document.querySelectorAll('.model-override')) input.oninput = () => {
-    const model = models.find(item => item.overrideKey === input.dataset.key); draft.contextOverrides[input.dataset.key] = input.value ? Number(input.value) : null;
-    const actual = Math.min(Number(input.value) || model.capacity || model.fallbackCapacity || model.limit, model.capacity || Infinity, Number(draft.contextLimit));
-    input.closest('tr').querySelector('[data-effective]').textContent = tokens(Math.floor(actual * (model.effectivePercent ?? 95) / 100)); changed();
-  };
+  for (const button of document.querySelectorAll('[data-edit]')) button.onclick = () => editModel(button, models.find(model => model.overrideKey === button.dataset.key));
   for (const select of document.querySelectorAll('.image-strength')) {
-    const capability = models.find(item => item.overrideKey === select.dataset.key).strengths[select.dataset.field];
+    const capability = capabilityFor(models.find(item => item.overrideKey === select.dataset.key), select.dataset.field);
     setChoices(select, explicitStrengths(capability).map(level => ({ value: level, label: strengthLabel(level) })), select.value);
     // Unknown ordering must not display an invented default as the saved choice.
     if (!select.value) select.querySelector('.choice-value').textContent = '未指定';
@@ -265,10 +325,11 @@ function renderModels() {
     changed(); renderModels();
     [...document.querySelectorAll('.image-default')].find(item => item.dataset.id === model.id)?.focus();
   };
+  updateSavebar();
 }
 function render(result) {
   data = result; draft = structuredClone(result.settings); dirty = false;
-  $('#version').textContent = 'v' + result.version; $('#context-limit').value = draft.contextLimit;
+  $('#version').textContent = 'v' + result.version;
   $('#notice').hidden = !result.configurationSaved || !result.runtime.restartRequired;
   $('#notice').textContent = '设置已保存。完全退出并重新打开 ChatGPT 后，加载新的 API 来源、模型菜单和上下文设置。';
   renderSourceFilters();
@@ -291,12 +352,18 @@ $('#add-source').onclick = () => {
   draft.providers.push({ id, name: 'API 来源 ' + (draft.providers.length + 1), baseUrl: '', apiKey: '', enabled: true, imageModel: '', imageEditModel: '', imageEditFormat: 'json' });
   changed(); renderSources(); renderSourceFilters(); updateCounts(); $('.source-card:last-child [data-field=baseUrl]').focus();
 };
-$('#context-limit').oninput = event => { draft.contextLimit = Number(event.target.value); changed(); updateCounts(); renderModels(); };
 $('#model-search').oninput = renderModels; $('#model-source-filter').onchange = renderModels;
 $('#image-routing').onchange = () => { draft.imageRouting = $('#image-routing').value; changed(); };
-$('#discard').onclick = () => render(data);
-$('#save-settings').onclick = async () => { busy = true; updateSavebar(); try { render(await api('settings', draft)); toast('已保存，重开客户端后应用。'); } catch (error) { toast(error.message); } finally { busy = false; updateSavebar(); } };
-$('#refresh-models').onclick = async () => { busy = true; updateSavebar(); const button = $('#refresh-models'); button.textContent = '正在加载…'; try { render(await api('refresh', {})); toast('模型目录已更新。'); } catch (error) { toast(error.message); } finally { busy = false; button.textContent = '刷新模型目录'; updateSavebar(); } };
+$('#save-settings').onclick = async () => {
+  const discover = draft.providers.some(provider => provider.enabled && !data.settings.providers.some(saved =>
+    saved.enabled && saved.id === provider.id && saved.baseUrl === provider.baseUrl && !provider.apiKey));
+  busy = true; updateSavebar();
+  const button = $('#save-settings'); button.textContent = discover ? '正在检测模型…' : '正在保存…';
+  try { render(await api('settings', draft)); toast('已保存，重开客户端后应用。'); }
+  catch (error) { toast(error.message); }
+  finally { busy = false; button.textContent = '保存设置'; updateSavebar(); }
+};
+$('#refresh-models').onclick = async () => { busy = true; updateSavebar(); const button = $('#refresh-models'); button.textContent = '正在检测…'; try { render(await api('refresh', {})); toast('模型目录已更新。'); } catch (error) { toast(error.message); } finally { busy = false; button.textContent = '刷新模型目录'; updateSavebar(); } };
 $('#close-console').onclick = async () => { if (dirty && !confirm('尚有未保存的修改，仍然退出？')) return; try { await api('close', {}); dirty = false; document.body.innerHTML = '<main class="closed"><div class="content"><h1>控制台已退出</h1><p>可以关闭此页面；需要时从安装目录重新打开控制台。</p></div></main>'; } catch (error) { toast(error.message); } };
 window.addEventListener('beforeunload', event => { if (dirty) { event.preventDefault(); event.returnValue = ''; } });
 api('state').then(render).catch(error => { $('#load-error').textContent = error.message; $('#load-error').hidden = false; });

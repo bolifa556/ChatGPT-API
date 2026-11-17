@@ -41,7 +41,7 @@ function peer(name){
   }
   if(req.url.startsWith('/models')||req.url.startsWith('/v1/models')||req.url.startsWith('/backend-api/codex/models')){
    if(name==='gateway'&&!gatewayOnline){res.writeHead(503);res.end('{}');return}
-   res.setHeader('content-type','application/json');res.end(JSON.stringify(name==='official'?{models:[officialModel]}:{data:[{id:'GPT/gpt-6-sol'},{id:'Other/test-model'}]}));return;
+   res.setHeader('content-type','application/json');res.end(JSON.stringify(name==='official'?{models:[officialModel]}:{data:[{id:'GPT/gpt-6-sol'},{id:'Other/test-model',supported_reasoning_efforts:['low','standard','high']}]}));return;
   }
   const body=await readRequestJson(req);
   records.push({name,transport:'http',body,headers:req.headers});
@@ -68,8 +68,9 @@ try{
  const menu=JSON.parse(fs.readFileSync(path.join(fixture,'data/cache/models-smr.json'),'utf8')).models;
  assert.deepEqual(menu.map(m=>m.slug),['gpt-6-sol','GPT/gpt-6-sol','Other/test-model']);
  assert(menu[1].priority>menu[0].priority&&menu[2].priority>menu[1].priority);
- assert.deepEqual(menu[2].supported_reasoning_levels,officialModel.supported_reasoning_levels);assert(menu[2].supported_reasoning_levels.some(x=>x.effort==='ultra'));
- results.push('Official models stay above name-sorted gateway models; reasoning levels match official GPT including Ultra');
+ assert.deepEqual(menu[1].supported_reasoning_levels,officialModel.supported_reasoning_levels);assert(menu[1].supported_reasoning_levels.some(x=>x.effort==='ultra'));
+ assert.deepEqual(menu[2].supported_reasoning_levels.map(item=>item.effort),['low','high']);
+ results.push('Official models stay above gateway models; GPT keeps official levels and other models use their own declared levels');
  const before=fs.statSync(path.join(fixture,'data/cache/models-smr.json')).mtimeMs;await run(['--prepare']);assert.equal(fs.statSync(path.join(fixture,'data/cache/models-smr.json')).mtimeMs,before);results.push('Unchanged catalogs are reused; authenticated refresh succeeds');
  const p=spawn(process.execPath,[path.join(root,'src/shim.mjs')],{env:{...process.env,CODEX_HOME:path.join(fixture,'home'),CHATGPT_API_ROOT:fixture},windowsHide:true,stdio:['ignore','ignore','pipe']});children.push(p);let err='';p.stderr.on('data',d=>err+=d);
  let ready=false;for(let i=0;i<60;i++){try{const h=await(await fetch(base+'/healthz')).json();if(h.service==='chatgpt-api-router'){ready=true;break}}catch{}await delay(50)}assert(ready,err);
@@ -119,7 +120,7 @@ try{
  results.push('Unavailable gateway with stale cache cannot block the official channel or advertise stale API models');
  gatewayOnline=true;fs.writeFileSync(path.join(fixture,'data/state/route-state.json'),JSON.stringify({mode:'gateway',gatewayTransport:'direct',officialProxy:''}));fs.unlinkSync(path.join(fixture,'home/auth.json'));fs.unlinkSync(path.join(fixture,'home/models_cache.json'));
  const apiOnly=JSON.parse(await run(['--prepare']));assert.equal(apiOnly.official.enabled,false);
- const onlyModels=JSON.parse(fs.readFileSync(path.join(fixture,'data/cache/models-smr.json'),'utf8')).models;assert.deepEqual(onlyModels.map(m=>m.slug),['GPT/gpt-6-sol','Other/test-model']);assert.equal(onlyModels[1].use_responses_lite,false);assert(onlyModels[1].supported_reasoning_levels.some(x=>x.effort==='ultra'));results.push('Fresh no-login catalog uses packaged templates including Ultra, contains only gateway models and disables non-GPT lite');
+ const onlyModels=JSON.parse(fs.readFileSync(path.join(fixture,'data/cache/models-smr.json'),'utf8')).models;assert.deepEqual(onlyModels.map(m=>m.slug),['GPT/gpt-6-sol','Other/test-model']);assert.equal(onlyModels[1].use_responses_lite,false);assert.deepEqual(onlyModels[1].supported_reasoning_levels.map(item=>item.effort),['low','high']);results.push('Fresh no-login catalog uses packaged templates including Ultra, contains only gateway models and disables non-GPT lite');
  gatewayOnline=false;fs.writeFileSync(path.join(fixture,'data/.env'),fs.readFileSync(path.join(fixture,'data/.env'),'utf8').replace('API_KEY=mock-gateway','API_KEY=changed-key'));
  await assert.rejects(run(['--prepare']),/no current cache/);results.push('Changing the key cannot reuse another gateway cache');
  fs.mkdirSync(path.join(root,'data/diagnostics'),{recursive:true});

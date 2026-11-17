@@ -14,6 +14,7 @@ import { usesChat, chatRequest, chatResponse, ChatEvents, chatEndpointUnavailabl
 import { decodedStream, ssePackets, encodeSse, isSseControl } from './sse.mjs';
 import { forwardImages, imageOnlyModel, imageCapabilities } from './image-compat.mjs';
 import { ResponseImages, restoreHostedImageHistory } from './responses-images.mjs';
+import { NativeWebSearch } from './native-web-search.mjs';
 import { contextFields, rememberContexts, contextKey, applyContext } from './model-context.mjs';
 import { officialDispatcherFor, readEncodedBody, outgoingBody, writeChunk, writeWebSocket, relayClose,
   requestWithAbort as request, protocolError, releaseResponseBody, RESPONSE_TIMEOUTS, MAX_REQUEST_BYTES,
@@ -21,7 +22,7 @@ import { officialDispatcherFor, readEncodedBody, outgoingBody, writeChunk, write
 import { PendingResponses, HistoryCache, laneOf } from './response-state.mjs';
 import { GatewaySources } from './gateway-sources.mjs';
 import { overrideKey, redact } from './settings.mjs';
-import { canRequestFast } from './model-strength.mjs';
+import { canRequestFast, modelStrengths } from './model-strength.mjs';
 import { cleanManagedLogs, createDiagnosticLog, errorDetails, describeError } from './diagnostics.mjs';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
@@ -59,7 +60,7 @@ const mediaDispatcher = transport === 'direct' ? gatewayDispatcher : gatewayDisp
 const officialDispatcher = officialDispatcherFor(officialProxy);
 const sourceId = crypto.createHash('sha256').update(gatewayBase + '\n' + (env.API_KEY || '')).digest('hex');
 const buildHash = crypto.createHash('sha256');
-for (const name of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs','responses-images.mjs','model-context.mjs','model-strength.mjs','transport.mjs','response-state.mjs','diagnostics.mjs','settings.mjs','gateway-sources.mjs']) buildHash.update(fs.readFileSync(path.join(dir, name)));
+for (const name of ['shim.mjs','history-compat.mjs','non-gpt-compat.mjs','sse.mjs','chat-compat.mjs','image-compat.mjs','responses-images.mjs','native-web-search.mjs','search-compat.mjs','model-context.mjs','model-strength.mjs','transport.mjs','response-state.mjs','diagnostics.mjs','settings.mjs','gateway-sources.mjs']) buildHash.update(fs.readFileSync(path.join(dir, name)));
 for (const name of ['model-contexts.json', 'model-template.json']) {
   if (fs.existsSync(path.join(root, 'assets', name))) buildHash.update(fs.readFileSync(path.join(root, 'assets', name)));
 }
@@ -76,6 +77,7 @@ let status = { gateway: { ready: false }, official: { ready: false } };
 let refreshInFlight;
 let observedClientVersion, configuredVersionAtObservation;
 const controllers = new Set();
+const nativeSearch = new NativeWebSearch(sources);
 export let routerReady;
 export let closeRouter;
 
@@ -188,12 +190,21 @@ function writeDesktopCatalog() {
     const gpt = isGptModel(originalId);
     const native = gpt ? catalog.official.find(m => m.slug?.toLowerCase() === leaf.toLowerCase()) : null;
     const model = structuredClone(native || template);
-    applyContext(model, contexts.get(profile.id)?.entries[contextKey(profile.baseUrl, originalId)], { limit: sources.settings.contextLimit,
-      override: sources.settings.contextOverrides[overrideKey(profile.id, originalId)] });
+    const key = overrideKey(profile.id, originalId), record = contexts.get(profile.id)?.entries[contextKey(profile.baseUrl, originalId)];
+    applyContext(model, record, { override: sources.settings.contextOverrides[key], capacity: sources.settings.modelCapacities[key] });
+    const strengths = modelStrengths(upstream, catalog.official, record?.strengths, sources.settings.strengthOverrides[key]);
+    // ModelInfo accepts a closed effort enum. Keep native additions from the
+    // installed client's own catalog without forwarding arbitrary API labels.
+    const nativeEfforts = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra',
+      ...(native?.supported_reasoning_levels || []).map(item => item.effort)]);
+    const reasoning = strengths.reasoning.status === 'known' ? strengths.reasoning.levels.filter(effort => nativeEfforts.has(effort)) : [];
+    const descriptions = native?.supported_reasoning_levels || levels.supported_reasoning_levels;
+    const preferred = native?.default_reasoning_level || upstream?.default_reasoning_level || levels.default_reasoning_level;
     Object.assign(model, { slug: id, display_name: profiles.length > 1 || profile.id !== 'default' ? originalId + ' · ' + profile.name : id,
       description: 'API · ' + profile.name, priority: gatewayPriority + index,
-      visibility: 'list', supported_in_api: true, supported_reasoning_levels: levels.supported_reasoning_levels,
-      default_reasoning_level: levels.default_reasoning_level, comp_hash: null });
+      visibility: 'list', supported_in_api: true,
+      supported_reasoning_levels: reasoning.map(effort => structuredClone(descriptions.find(item => item.effort === effort) || { effort, description: '' })),
+      default_reasoning_level: reasoning.includes(preferred) ? preferred : reasoning.includes(strengths.reasoning.highest) ? strengths.reasoning.highest : reasoning.at(-1) || null, comp_hash: null });
     // OpenAI-compatible model lists commonly contain IDs only. GPT still accepts
     // the native priority request; missing catalog fields must not hide it.
     // An explicit upstream declaration (including an empty list) takes precedence.
@@ -225,7 +236,7 @@ function historyForTarget(payload, which) {
   if (debug && result.changed) log('history compatibility model=' + payload.model + ' ' + JSON.stringify(result.stats));
   return { ...result, changed: images.changed || result.changed };
 }
-function prepareRequest(payload, which, pathname = '/v1/responses', metadata, forceChat = false) {
+function prepareRequest(payload, which, pathname = '/v1/responses', metadata, forceChat = false, gateway) {
   if (which === 'gateway' && (!isGptModel(payload.model) || usesChat(payload, metadata) || forceChat)) {
     if (pathname.endsWith('/responses/compact')) throw Object.assign(new Error('GPT opaque compaction is unavailable for non-GPT models.'), { status: 400, code: 'incompatible_compacted_history' });
     // The public model ID includes the source for aliased models. The wire
@@ -233,7 +244,7 @@ function prepareRequest(payload, which, pathname = '/v1/responses', metadata, fo
     const adapter = new NonGptAdapter(payload, { preserveReasoning: true, reasoningModel: metadata?.id });
     const converted = adapter.request({ releaseOriginal: true });
     const chat = forceChat || usesChat(converted, metadata);
-    return { payload: chat ? chatRequest(converted, metadata) : restoreHostedImageHistory(converted, codexHome).payload, changed: true, adapter, chat };
+    return { payload: chat ? chatRequest(converted, metadata, gateway) : restoreHostedImageHistory(converted, codexHome).payload, changed: true, adapter, chat };
   }
   return historyForTarget(payload, which);
 }
@@ -245,7 +256,7 @@ async function chatFallback(upstream, payload, gateway, url, incomingHeaders, si
   if (!chatEndpointUnavailable(upstream.statusCode, data, text)) return { rejectedBody };
   // Only a definitive, unaccepted endpoint rejection permits this conversion.
   // Reuse the original request, never a synthetic prompt or a partial result.
-  const adapted = prepareRequest(payload, 'gateway', url.pathname, gateway.metadata, true);
+  const adapted = prepareRequest(payload, 'gateway', url.pathname, gateway.metadata, true, gateway);
   const body = Buffer.from(JSON.stringify(adapted.payload));
   const headers = gatewayResponseHeaders({ ...headersFor(incomingHeaders, 'gateway', gateway.profile), 'content-type': 'application/json' }, false);
   const next = await request(gateway.base + '/chat/completions' + url.search, {
@@ -427,6 +438,30 @@ async function handleHttp(req, res) {
     ...(mode === 'mixed' ? { models: catalog.official } : {}),
     object: 'list', data: [...new Set([...(mode === 'mixed' ? catalog.official.map(m => m.slug) : []), ...(gatewayEnabled ? catalog.gatewayIds : [])])].map(id => ({ id, object: 'model' })) });
   let incoming = await readEncodedBody(req);
+  if (/^\/(?:v1\/)?alpha\/search$/.test(url.pathname)) {
+    if (req.method !== 'POST') throw Object.assign(new Error('Native search requires POST.'), { status: 405, code: 'invalid_search_method' });
+    const body = parseRequest(incoming.decoded.toString('utf8'));
+    incoming = null;
+    const which = route(body.model), gateway = which === 'gateway' ? sources.target(body.model, catalog.gatewayModels) : null;
+    const controller = new AbortController(); controllers.add(controller);
+    res.on('close', () => { if (!res.writableEnded) controller.abort(); });
+    let upstream;
+    try {
+      const headers = headersFor(req.headers, which, gateway?.profile);
+      headers['content-type'] = 'application/json';
+      const send = (endpoint, payload, outgoing) => request((gateway?.base || officialBase) + endpoint + url.search, {
+        method: 'POST', headers: outgoing, body: JSON.stringify(payload),
+        dispatcher: gateway?.dispatcher || officialDispatcher, signal: controller.signal, ...RESPONSE_TIMEOUTS });
+      upstream = gateway ? await nativeSearch.run(body, { gateway, headers, send, signal: controller.signal })
+        : await send('/alpha/search', body, headers);
+      const outgoing = { ...upstream.headers };
+      for (const name of ['connection', 'transfer-encoding', 'keep-alive']) delete outgoing[name];
+      res.writeHead(upstream.statusCode, outgoing);
+      for await (const chunk of upstream.body) await writeChunk(res, chunk);
+      res.end();
+    } finally { releaseResponseBody(upstream?.body); controllers.delete(controller); }
+    return;
+  }
   const imageRoute = /^\/(?:v1\/)?images\/(generations|edits)$/.exec(url.pathname);
   if (imageRoute) {
     const body = incoming.decoded;
@@ -476,7 +511,7 @@ async function handleHttp(req, res) {
     readDecodeMs: started - receivedAt }));
   try {
     let resolved = which === 'gateway' ? await gatewayImageReferences(gatewayRequest(parsed, gateway), req.headers, controller.signal) : parsed;
-    let adapted = prepareRequest(resolved, which, url.pathname, gateway?.metadata);
+    let adapted = prepareRequest(resolved, which, url.pathname, gateway?.metadata, false, gateway);
     let { body, encoding } = await outgoingBody(incoming, adapted.payload, adapted.changed || resolved !== parsed, which === 'official');
     incoming = parsed = null;
     upstreamBytes = body.length;
@@ -747,7 +782,7 @@ if (process.argv.includes('--prepare')) {
         const requestId = crypto.randomUUID(), started = Date.now();
         try {
           let resolved = await gatewayImageReferences(gatewayRequest(body, gateway), req.headers, controller.signal);
-          let adapted = prepareRequest(resolved, 'gateway', '/v1/responses', gateway.metadata);
+          let adapted = prepareRequest(resolved, 'gateway', '/v1/responses', gateway.metadata, false, gateway);
           const headers = gatewayResponseHeaders({ ...headersFor(req.headers, 'gateway', gateway.profile), 'content-type': 'application/json' }, !adapted.adapter, gateway.metadata?._nativeHeaderPrefix);
           let wireText = JSON.stringify(adapted.payload);
           if (debug) log('WS request ' + JSON.stringify({ connectionId, requestId, route: 'gateway', model: event.model, bytes: Buffer.byteLength(wireText) }));

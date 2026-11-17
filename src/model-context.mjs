@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const CONTEXT_CAP = 500000;
+export const DEFAULT_CONTEXT_WINDOW = 262000;
 export const contextFields = ['context_window', 'max_context_window', 'context_length', 'max_model_len',
-  'max_input_tokens', 'max_input_length', 'max_sequence_length', 'limits', 'model_info'];
+  'max_input_tokens', 'max_input_length', 'max_sequence_length', 'limits', 'model_info', 'top_provider'];
 export function tokenCount(value) {
   if (typeof value === 'string') {
     const match = value.trim().replaceAll(',', '').match(/^(\d+(?:\.\d+)?)\s*([kKmM]?)$/);
@@ -13,7 +13,7 @@ export function tokenCount(value) {
   return Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 export function reportedCapacity(model) {
-  const objects = [model, model?.limits, model?.model_info, model?.architecture];
+  const objects = [model, model?.limits, model?.model_info, model?.architecture, model?.top_provider];
   // A deployment's configured limit takes precedence over the architecture's capacity.
   const deployed = tokenCount(model?.max_model_len);
   if (deployed) return deployed;
@@ -48,7 +48,8 @@ export function rememberContexts({ file, base, models, official = [], known = {}
     // 3.1.0 could cache a native default window as a gateway's actual capacity.
     // Correct only that inferred record from local specifications; upstream limits remain authoritative.
     const inferredDefault = previous?.source === 'native-model-catalog' && documented?.capacity > previous.capacity;
-    if (previous && tokenCount(previous.capacity) && !inferredDefault) continue;
+    const fallback = ['unreported', 'probe-fallback', 'default-context-window'].includes(previous?.source);
+    if (previous && tokenCount(previous.capacity) && !inferredDefault && !fallback) continue;
     let found, capacity = reportedCapacity(model);
     if (capacity) found = { capacity, source: 'gateway-model-metadata' };
     if (!found && documented?.capacity) found = documented;
@@ -58,9 +59,8 @@ export function rememberContexts({ file, base, models, official = [], known = {}
       capacity = tokenCount(native?.max_context_window);
       if (capacity) found = { capacity, source: 'native-model-catalog-max' };
     }
-    // Unreported capacities remain explicitly unverified; never label a GPT template as an upstream fact.
-    if (!found && previous?.capacity === null) continue;
-    cache.entries[key] = { ...(found || { capacity: null, source: 'unreported' }), checkedAt: new Date().toISOString() };
+    if (!found && previous?.source === 'default-context-window') continue;
+    cache.entries[key] = { ...previous, ...(found || { capacity: DEFAULT_CONTEXT_WINDOW, source: 'default-context-window' }) };
     changed = true;
   }
   if (changed) {
@@ -74,11 +74,8 @@ export function rememberContexts({ file, base, models, official = [], known = {}
   }
   return cache;
 }
-export function applyContext(model, record, { limit: configuredLimit = CONTEXT_CAP, override } = {}) {
-  const capacity = tokenCount(record?.capacity);
-  const fallback = tokenCount(model.context_window) || 128000;
-  const desired = tokenCount(override) || capacity || fallback;
-  const limit = Math.min(desired, capacity || desired, tokenCount(configuredLimit) || CONTEXT_CAP);
+export function applyContext(model, record, { override, capacity } = {}) {
+  const limit = tokenCount(override) || tokenCount(capacity) || tokenCount(record?.capacity) || DEFAULT_CONTEXT_WINDOW;
   model.context_window = limit;
   model.max_context_window = limit;
   // Let the native client derive its compaction threshold from this model's window.

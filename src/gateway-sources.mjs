@@ -2,14 +2,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { requestWithAbort as request, normalizeGatewayTransport, gatewayDispatcherFor } from './transport.mjs';
-import { contextFields } from './model-context.mjs';
+import { contextFields, contextKey } from './model-context.mjs';
 import { strengthMetadataFields } from './model-strength.mjs';
-import { readSettings, settingsRevision, publicModelId, atomicPrivate, redact } from './settings.mjs';
+import { searchProtocols } from './search-compat.mjs';
+import { readSettings, settingsRevision, publicModelId, atomicPrivate, overrideKey, redact } from './settings.mjs';
 import { describeError, errorDetails } from './diagnostics.mjs';
 
 const TTL = 24 * 60 * 60 * 1000;
 const fields = ['id', 'type', 'capabilities', 'supported_endpoints', 'supported_parameters', 'output_modalities', 'architecture',
-  'service_tiers', 'additional_speed_tiers', 'default_service_tier', ...contextFields, ...strengthMetadataFields];
+  'service_tiers', 'additional_speed_tiers', 'default_service_tier', 'default_reasoning_level', ...contextFields, ...strengthMetadataFields];
 const readJson = file => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } };
 const fingerprint = profile => crypto.createHash('sha256').update(profile.baseUrl + '\n' + profile.apiKey).digest('hex');
 export class GatewaySources {
@@ -49,6 +50,22 @@ export class GatewaySources {
     if (!this.protocols.has(profile)) this.protocols.set(profile, new Map());
     this.protocols.get(profile).set(model, 'chat');
   }
+  searchProtocol({ profile, model }) {
+    const record = this.saved.sources?.find(source => source.id === profile.id && source.fingerprint === this.identity(profile));
+    const protocol = record?.searchProtocols?.[model];
+    return searchProtocols.has(protocol) ? protocol : null;
+  }
+  rememberSearch({ profile, model }, protocol) {
+    if (this.searchProtocol({ profile, model }) === protocol) return;
+    const saved = readJson(this.file) || this.saved;
+    const record = saved.sources?.find(source => source.id === profile.id && source.fingerprint === this.identity(profile));
+    if (!record || !searchProtocols.has(protocol)) return;
+    this.saved = saved;
+    if (record.searchProtocols?.[model] === protocol) return;
+    record.searchProtocols = { ...record.searchProtocols, [model]: protocol };
+    // A cache-write failure must not discard an already completed search.
+    try { atomicPrivate(this.file, saved); } catch {}
+  }
   adoptLegacy(catalog) {
     const profile = this.profile('default');
     if (!profile || this.saved.sources.some(source => source.id === 'default') || catalog?.sourceId !== this.identity(profile)) return;
@@ -56,6 +73,7 @@ export class GatewaySources {
     this.saved.sources.push({ id: 'default', fingerprint: this.identity(profile), checkedAt: catalog.gatewayAt, models });
   }
   collect(records) {
+    const capabilities = readJson(path.join(this.root, 'data/cache/model-contexts.json'))?.entries || {};
     const seen = new Set(), models = [], sources = [];
     for (const profile of this.profiles()) {
       const record = records.find(source => source.id === profile.id && source.fingerprint === this.identity(profile));
@@ -65,6 +83,8 @@ export class GatewaySources {
         const id = publicModelId(profile.id, original.id);
         if (seen.has(id)) throw new Error('Duplicate public model identity: ' + id);
         seen.add(id); models.push({ ...original, id, _providerId: profile.id, _upstreamId: original.id,
+          _probedStrengths: capabilities[contextKey(profile.baseUrl, original.id)]?.strengths,
+          _strengthOverrides: this.settings.strengthOverrides[overrideKey(profile.id, original.id)],
           // Older caches used this extension for every native request. Keep
           // that behavior until the existing one-shot discovery identifies the
           // endpoint; newly discovered ordinary APIs get no proprietary headers.
@@ -109,6 +129,13 @@ export class GatewaySources {
       statuses.push(status);
     }));
     signal?.throwIfAborted();
+    const latest = readJson(this.file) || this.saved;
+    for (const record of records) {
+      const previous = latest.sources?.find(source => source.id === record.id && source.fingerprint === record.fingerprint);
+      const ids = new Set(record.models.map(model => model.id));
+      const protocols = Object.entries(previous?.searchProtocols || {}).filter(([model, protocol]) => ids.has(model) && searchProtocols.has(protocol));
+      if (protocols.length) record.searchProtocols = Object.fromEntries(protocols);
+    }
     this.saved = { version: 1, revision: this.revision, sources: records, statuses };
     atomicPrivate(this.file, this.saved); this.collect(records);
     const ordered = this.profiles().map(profile => statuses.find(status => status.id === profile.id));

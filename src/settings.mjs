@@ -4,8 +4,6 @@ import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { validStrength } from './model-strength.mjs';
 
-export const DEFAULT_CONTEXT_LIMIT = 500000;
-export const MAX_CONTEXT_LIMIT = 2000000;
 export const settingsPath = root => path.join(root, 'data/providers.json');
 export function readEnvFile(file) {
   let text; try { text = fs.readFileSync(file, 'utf8'); } catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
@@ -65,8 +63,6 @@ export function normalizeSettings(value, previous, { allowEmpty = false } = {}) 
       imageModel: shortText(item.imageModel, '', 300), imageEditModel: shortText(item.imageEditModel, '', 300), imageEditFormat: item.imageEditFormat === 'multipart' ? 'multipart' : 'json' };
   });
   if (!allowEmpty && !providers.some(provider => provider.enabled)) throw new Error('请至少启用一个 API 来源。');
-  const contextLimit = Number(value.contextLimit ?? DEFAULT_CONTEXT_LIMIT);
-  if (!Number.isSafeInteger(contextLimit) || contextLimit < 4096 || contextLimit > MAX_CONTEXT_LIMIT) throw new Error('上下文上限应为 4,096 至 2,000,000 tokens。');
   const overrides = value.contextOverrides ?? {};
   if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides) || Object.keys(overrides).length > 2000) throw new Error('模型上下文配置无效。');
   const contextOverrides = {};
@@ -75,8 +71,30 @@ export function normalizeSettings(value, previous, { allowEmpty = false } = {}) 
     if (!Array.isArray(identity) || identity.length !== 2 || !ids.has(identity[0]) || typeof identity[1] !== 'string' || identity[1].length > 500) throw new Error('模型上下文来源无效。');
     if (raw === '' || raw === null || raw === 0) continue;
     const limit = Number(raw);
-    if (!Number.isSafeInteger(limit) || limit < 4096 || limit > MAX_CONTEXT_LIMIT) throw new Error('单模型上下文应为 4,096 至 2,000,000 tokens，留空为自动。');
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('当前配置应为正整数 tokens。');
     contextOverrides[key] = limit;
+  }
+  const modelCapacities = {};
+  const strengthOverrides = {};
+  for (const [name, output] of [['modelCapacities', modelCapacities], ['strengthOverrides', strengthOverrides]]) {
+    const entries = value[name] ?? previous?.[name] ?? {};
+    if (!entries || typeof entries !== 'object' || Array.isArray(entries) || Object.keys(entries).length > 2000) throw new Error('模型能力配置无效。');
+    for (const [key, raw] of Object.entries(entries)) {
+      let identity; try { identity = JSON.parse(key); } catch { throw new Error('模型能力标识无效。'); }
+      if (!Array.isArray(identity) || identity.length !== 2 || !ids.has(identity[0]) || typeof identity[1] !== 'string' || !identity[1] || identity[1].length > 500) throw new Error('模型能力来源无效。');
+      if (name === 'modelCapacities') {
+        if (!Number.isSafeInteger(raw) || raw < 1) throw new Error('已知容量应为正整数 tokens。');
+        output[key] = raw;
+        continue;
+      }
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('思考档位配置无效。');
+      const fields = {};
+      for (const [field, levels] of Object.entries(raw)) {
+        if (!['reasoning', 'complexity', 'quality'].includes(field) || !Array.isArray(levels) || !levels.length || levels.length > 32 || levels.some(level => !validStrength(level))) throw new Error('思考与画质档位应填写英文档位列表。');
+        fields[field] = [...new Set(levels)];
+      }
+      if (Object.keys(fields).length) output[key] = fields;
+    }
   }
   const preferredProviderId = providers.some(provider => provider.id === value.preferredProviderId && provider.enabled)
     ? value.preferredProviderId : providers.find(provider => provider.enabled)?.id || providers[0]?.id || 'default';
@@ -110,7 +128,7 @@ export function normalizeSettings(value, previous, { allowEmpty = false } = {}) 
   }
   // Speed belongs to the native client's per-turn setting. Obsolete console
   // preferences are deliberately ignored, including when loading old files.
-  return { version: 1, providers, preferredProviderId, defaultImageModel, imageRouting, contextLimit, contextOverrides, imageStrengths };
+  return { version: 1, providers, preferredProviderId, defaultImageModel, imageRouting, contextOverrides, modelCapacities, strengthOverrides, imageStrengths };
 }
 export function readSettings(root, env = readEnvFile(path.join(root, 'data/.env'))) {
   const file = settingsPath(root);
@@ -119,7 +137,7 @@ export function readSettings(root, env = readEnvFile(path.join(root, 'data/.env'
     return normalizeSettings(value, undefined, { allowEmpty: emptyApiSettings(value) });
   }
   return normalizeSettings({ version: 1, providers: [{ id: 'default', name: '默认 API', baseUrl: env.BASE_URL || '', apiKey: env.API_KEY || '', enabled: true,
-    imageModel: env.IMAGE_MODEL, imageEditModel: env.IMAGE_EDIT_MODEL, imageEditFormat: env.IMAGE_EDIT_FORMAT }], contextLimit: DEFAULT_CONTEXT_LIMIT, contextOverrides: {}, preferredProviderId: 'default' }, undefined, { allowEmpty: true });
+    imageModel: env.IMAGE_MODEL, imageEditModel: env.IMAGE_EDIT_MODEL, imageEditFormat: env.IMAGE_EDIT_FORMAT }], contextOverrides: {}, preferredProviderId: 'default' }, undefined, { allowEmpty: true });
 }
 function emptyApiSettings(value) {
   return Array.isArray(value?.providers) && value.providers.every(provider => !provider.baseUrl && !provider.apiKey);

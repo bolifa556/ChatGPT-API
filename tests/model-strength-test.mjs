@@ -16,13 +16,22 @@ assert.deepEqual(modelStrengths(declared).complexity.levels, ['low', 'medium']);
 assert.equal(modelStrengths(declared).quality.highest, 'medium');
 assert.equal(modelStrengths({ ...current, complexity: false }).complexity.status, 'unsupported');
 assert.equal(modelStrengths({ id: 'custom', reasoning: true }).reasoning.status, 'unknown');
+assert.equal(modelStrengths({ id: 'custom', _probedStrengths: { reasoning: {
+  status: 'known', levels: ['none', 'low', 'high', 'ultra'], highest: 'ultra', source: 'probe',
+} } }).reasoning.status, 'unknown');
+assert.deepEqual(modelStrengths({ id: 'custom', _probedStrengths: { reasoning: {
+  status: 'known', levels: ['none', 'low', 'high', 'ultra'], highest: 'ultra', source: 'model-validation',
+} } }).reasoning.levels, ['low', 'high']);
+assert.deepEqual(modelStrengths({ id: 'custom', thinking: { levels: ['none', 'low', 'high', 'max'] } }).reasoning.levels, ['low', 'high', 'max']);
+assert.deepEqual(modelStrengths({ id: 'custom', reasoning_effort_levels: ['low', 'high', 'xhigh'] }).reasoning.levels, ['low', 'high', 'xhigh']);
+assert.deepEqual(modelStrengths({ id: 'custom', thinking_config: { enabled: { efforts: { low: {}, high: {}, max: {} } } } }).reasoning.levels, ['low', 'high', 'max']);
 assert.deepEqual(modelStrengths({ id: 'custom', supported_reasoning_levels: [{ effort: 'high' }, { effort: 'low' }] }).reasoning.levels, ['low', 'high']);
 assert.deepEqual(modelStrengths({ id: 'custom', parameters: { properties: { reasoning_effort: { enum: ['medium', 'high'] } } } }).reasoning.levels, ['medium', 'high']);
 const native = [{ slug: 'gpt-6-sol', supported_reasoning_levels: [{ effort: 'low' }, { effort: 'high' }] }];
 assert.equal(modelStrengths({ id: 'GPT/gpt-6-sol' }, native).reasoning.source, 'native-catalog');
 assert.equal(modelStrengths({ id: 'GPT/gpt-6-sol' }).reasoning.source, 'documentation');
 assert.equal(modelStrengths({ id: 'vllm/gpt-6-sol' }, native).reasoning.status, 'unknown');
-assert.equal(modelStrengths({ id: 'GPT/gpt-6-sol', reasoning: false }, native).reasoning.status, 'unsupported');
+assert.equal(modelStrengths({ id: 'GPT/gpt-6-sol', reasoning: false }, native).reasoning.source, 'native-catalog');
 assert.equal(modelStrengths({ id: 'custom', quality: { enum: ['balanced', 'detailed'] } }).quality.highest, null, 'Unknown ordering must not invent a maximum');
 
 const original = { prompt: 'Unchanged prompt', images: [{ image_url: 'data:image/png;base64,aW5lcnQ=' }], complexity: 'max', quality: 'auto' };
@@ -35,6 +44,8 @@ const older = applyImageStrengths(structuredClone(original), previous, {}, true)
 assert.equal(older.complexity, undefined); assert.equal(older.quality, 'max');
 const unknown = applyImageStrengths(structuredClone(original), { id: 'custom-image' }, {}, true);
 assert.equal(unknown.complexity, undefined); assert.equal(unknown.quality, 'auto');
+const edited = { id: 'custom-image', _strengthOverrides: { complexity: ['low', 'high'], quality: ['low', 'max'] } };
+assert.deepEqual(applyImageStrengths({}, edited, {}, true), { complexity: 'high', quality: 'max' });
 assert.equal(applyImageStrengths({ complexity: 'low', quality: 'high' }, current, { complexity: 'high', quality: 'max' }, false).complexity, 'low');
 assert.equal(applyImageStrengths({ quality: 'high' }, current, { quality: 'max' }, true).quality, 'high', 'An explicit native quality must take precedence over console defaults');
 assert.throws(() => applyImageStrengths({ complexity: 'max' }, current, {}, false), error => error.status === 400 && error.code === 'unsupported_image_strength');

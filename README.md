@@ -9,7 +9,7 @@
 
 **原生界面与快捷键 · 官方 / 混合 / 纯 API 三模式 · 同一对话无缝切模型 · 完整保留生图与本地工具**
 
-[![Version](https://img.shields.io/badge/Release-v3.2.5-blue.svg)](https://github.com/bolifa556/ChatGPT-API/releases/tag/v3.2.5)
+[![Version](https://img.shields.io/badge/Release-v3.2.6-blue.svg)](https://github.com/bolifa556/ChatGPT-API/releases/tag/v3.2.6)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-brightgreen.svg)](#快速开始)
 [![Client Files](https://img.shields.io/badge/Client%20Files-Unmodified-success.svg)](#你的客户端照常保留)
 
@@ -47,7 +47,7 @@
 - **同一个对话窗口，官方与 API 模型混着切**  
   登录了官方账号后，模型下拉菜单会把官方模型和你的自定义 API 模型列在一起。简单问题用便宜 API，复杂推理切旗舰模型，全程在同一个对话里无缝接力，不用为了换模型反复重开新窗口。（*注：涉及图片、特定附件或已被官方深度压缩的旧对话，切换时仍受目标模型本身的能力限制*）
 - **官方额度见底？切自己的 API 接着聊**  
-  到了月末或高峰期官方额度用完时（v3.2.5 已支持），不用干等恢复，直接在原对话里切到自己的 API 模型就能继续发消息。消耗的是你自己的 API 余额，不会改动或触碰官方账号本身的额度计算。
+  到了月末或高峰期官方额度用完时（v3.2.6 已支持），不用干等恢复，直接在原对话里切到自己的 API 模型就能继续发消息。消耗的是你自己的 API 余额，不会改动或触碰官方账号本身的额度计算。
 - **多达 32 个 API 来源集中管理**  
   手头有好几家服务商？控制台最多支持同时配置 32 个来源，随时单独命名、启用或停用。客户端模型列表会自动带上来源后缀，哪怕不同渠道有同名模型也分得清清楚楚，绝不串台。
 - **聊天记录与项目归属感完全不断裂**  
@@ -72,10 +72,10 @@
 
 | 平台 | 下载地址 | 安装说明 |
 | :--- | :--- | :--- |
-| **Windows x64** | [ChatGPT-API-Launcher-3.2.5-win-x64.zip](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.5/ChatGPT-API-Launcher-3.2.5-win-x64.zip) | 解压后双击运行 `安装.cmd`，按提示选好目录即可完成安装。 |
-| **macOS (Apple Silicon)** | [ChatGPT-API-Provider-3.2.5-macos-arm64.dmg](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.5/ChatGPT-API-Provider-3.2.5-macos-arm64.dmg) | 打开 DMG，把需要的启动入口和控制台 App 拖进“应用程序”。首次打开若遇系统弹窗拦截，请按 [macOS 说明](docs/macos-dmg-readme.md) 放行。 |
-| **Linux x64** | [ChatGPT-API-Provider-3.2.5-linux-x64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.5/ChatGPT-API-Provider-3.2.5-linux-x64.tar.gz) | 解压后，在桌面用户权限下运行 `./install.sh`。（详见 [Linux 说明](docs/linux-readme.md)） |
-| **Linux ARM64** | [ChatGPT-API-Provider-3.2.5-linux-arm64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.5/ChatGPT-API-Provider-3.2.5-linux-arm64.tar.gz) | 解压后同样直接运行 `./install.sh` 即可。 |
+| **Windows x64** | [ChatGPT-API-Launcher-3.2.6-win-x64.zip](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.6/ChatGPT-API-Launcher-3.2.6-win-x64.zip) | 解压后双击运行 `安装.cmd`，按提示选好目录即可完成安装。 |
+| **macOS (Apple Silicon)** | [ChatGPT-API-Provider-3.2.6-macos-arm64.dmg](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.6/ChatGPT-API-Provider-3.2.6-macos-arm64.dmg) | 打开 DMG，把需要的启动入口和控制台 App 拖进“应用程序”。首次打开若遇系统弹窗拦截，请按 [macOS 说明](docs/macos-dmg-readme.md) 放行。 |
+| **Linux x64** | [ChatGPT-API-Provider-3.2.6-linux-x64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.6/ChatGPT-API-Provider-3.2.6-linux-x64.tar.gz) | 解压后，在桌面用户权限下运行 `./install.sh`。（详见 [Linux 说明](docs/linux-readme.md)） |
+| **Linux ARM64** | [ChatGPT-API-Provider-3.2.6-linux-arm64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.6/ChatGPT-API-Provider-3.2.6-linux-arm64.tar.gz) | 解压后同样直接运行 `./install.sh` 即可。 |
 
 ### 2. 填写自己的 API
 
@@ -84,7 +84,7 @@
 装好之后，打开 **本地控制台**（比如 Windows 下双击安装目录里的 `控制台.vbs`）按下面四步走：
 
 1. 切到 **API 来源** 页面，新增一个来源，填好自定义名称、Base URL 和 API Key。
-2. 点击 **保存**，接着切到 **模型与上下文** 页面，点一下右上角的 **刷新模型目录**。
+2. 点击 **保存设置**，程序会自动获取模型目录。完成后切到 **模型与上下文** 页面查看，也可以随时手动刷新。
 3. 检查拉取出来的模型列表。如果你需要画图功能，确认列表里已经识别出图片模型（系统会自动帮你勾选一个默认生图模型，你也可以手动换别的）。
 4. **完全退出**当前正在运行的客户端，然后双击你需要的启动入口，即可开始聊天。
 
@@ -118,7 +118,7 @@ Windows 和 macOS 安装好后会有三个不同的启动入口。**注意：每
 只要你接入的渠道支持生图或视觉模型，就能直接在官方聊天框里让模型画图、看图说话，或者对着画好的图提修改意见。
 
 ### 自动识别生图模型，省去挑拣烦恼
-在控制台点击“刷新模型目录”后，程序会自动把识别出的生图模型归入 **模型与上下文** 列表，并顺手帮你勾选好一个默认项。想换其他模型画图时，去控制台改勾另一个默认项，保存并重开客户端即可。
+保存 API 来源或点击“刷新模型目录”后，程序会自动把识别出的生图模型归入 **模型与上下文** 列表，并顺手帮你勾选好一个默认项。想换其他模型画图时，去控制台改勾另一个默认项，保存并重开客户端即可。
 
 > [!NOTE]
 > 目前生图模型的切换必须在本地控制台里修改默认项。直接在聊天框里打字说“请用某某模型帮我画张图”，是无法可靠触发底层模型切换的。
@@ -148,9 +148,9 @@ Windows 和 macOS 安装好后会有三个不同的启动入口。**注意：每
 
 ### 控制台里都能干什么？
 - **打理 API 渠道**：添加、修改多达 32 个 API 来源的名称、地址与 Key，随时一键启用或停用某个渠道。
-- **拉取模型目录**：手动刷新并查看各个渠道当前能提供哪些可用模型。
+- **拉取模型目录**：保存 API 来源后自动获取模型，也可以手动刷新，查看各渠道当前提供的模型。
 - **设置画图参数**：指定默认生图模型，并调节它支持的画质与思考强度（若接口未返回相关能力信息，界面会如实标注“无法检测”）。
-- **微调上下文上限**：支持调整全局或单个模型的上下文窗口上限。系统默认上限设为 500,000 tokens（客户端界面内通常折算显示为约 475k）；你可以在 `4,096` 到 `2,000,000` 之间自由设定，不过实际生效值不会突破模型已知的容量上限。
+- **按模型调整上下文和思考强度**：每个模型分别显示已知容量、当前配置和可用思考档位，点击数值即可修改。容量无法确认时，已知容量与当前配置均设为 262K。当前配置由你决定，可以高于已知容量。右侧箭头显示客户端扣除预留空间后的数值，通常为配置的 95%。
 - **Key 掩码防窥**：保存后的 API Key 默认以密码圆点遮挡，需要核对时点一下旁边的小眼睛图标就能查看明文。
 
 ### 贴心的本地缓存与自动退出
@@ -235,7 +235,7 @@ flowchart TD
 <details>
 <summary><b>官方额度用完，还能用自己的 API 吗？</b></summary>
 
-> 完全可以。当前的 3.2.5 版本已经支持在 `chatgpt-api`（混合入口）下，当官方额度耗尽时直接在原对话切到自定义 API 模型继续发消息；或者你也可以彻底退出客户端，改从纯 API 入口进。当然，前提是你配置的 API 本身余额充足且服务正常（若遇到客户端权限锁死或特殊任务状态限制，则仍受客户端本身的规则约束）。
+> 完全可以。当前的 3.2.6 版本已经支持在 `chatgpt-api`（混合入口）下，当官方额度耗尽时直接在原对话切到自定义 API 模型继续发消息；或者你也可以彻底退出客户端，改从纯 API 入口进。当然，前提是你配置的 API 本身余额充足且服务正常（若遇到客户端权限锁死或特殊任务状态限制，则仍受客户端本身的规则约束）。
 
 </details>
 

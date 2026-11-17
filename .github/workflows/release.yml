@@ -114,6 +114,9 @@ jobs:
       - run: node tests/native-quota-startup-test.mjs
       - run: node tests/diagnostics-test.mjs
       - run: node tests/model-strength-test.mjs
+      - run: node tests/model-probe-test.mjs
+      - run: node tests/native-web-search-test.mjs
+      - run: node tests/native-web-search-router-test.mjs
       - run: node tests/console-sources-test.mjs
       - run: node tests/gateway-transport-test.mjs
       - run: node tests/responses-images-test.mjs

@@ -80,7 +80,7 @@ try {
   assert.equal(catalog.length, 4); assert(catalog.some(model => model.slug === models[0]));
   const alias = '@p_bbbbbbbb/' + models[0], chatAlias = '@p_bbbbbbbb/' + models[1];
   const entry = catalog.find(model => model.slug === alias); assert(entry.display_name.includes('Source B')); assert.equal(entry.context_window, 64000);
-  assert.equal(catalog.find(model => model.slug === models[0]).context_window, 100000);
+  assert.equal(catalog.find(model => model.slug === models[0]).context_window, 128000);
   checks.push('Sources with duplicate model names keep independent stable identities and actual capacity limits');
   const router = run([]); await until(() => fetch('http://127.0.0.1:' + port + '/healthz').then(response => response.ok).catch(() => false));
   assert.equal((await wsTurn(alias)).response.model, alias); assert.equal(records.at(-1).source, 'b'); assert.equal(records.at(-1).body.model, models[0]);
@@ -177,8 +177,10 @@ try {
   const preferredBeforeImage = state.settings.preferredProviderId;
   const defaultImage = { providerId: 'p_bbbbbbbb', modelId: 'qwen-image' };
   const strengthKey = overrideKey('p_bbbbbbbb', 'qwen-image');
+  const chatStrengthKey = overrideKey('p_bbbbbbbb', models[1]);
   state = await (await request('settings', { ...state.settings, defaultImageModel: defaultImage,
     imageStrengths: { [strengthKey]: { complexity: 'low', quality: 'low' } },
+    strengthOverrides: { [chatStrengthKey]: { reasoning: ['low', 'high'] } },
     fastModels: { [overrideKey('p_bbbbbbbb', models[0])]: true } })).json();
   assert.deepEqual(readSettings(fixture).imageStrengths[strengthKey], { complexity: 'low', quality: 'low' });
   assert.deepEqual(state.settings.defaultImageModel, defaultImage);
@@ -186,6 +188,9 @@ try {
   assert.equal(state.settings.preferredProviderId, preferredBeforeImage);
   assert.equal(readSettings(fixture).providers[0].apiKey, keys.a); assert.equal(readSettings(fixture).providers[1].apiKey, keys.b);
   await fetch('http://127.0.0.1:' + port + '/readyz');
+  const updatedMenu = JSON.parse(fs.readFileSync(path.join(fixture, 'data/cache/models-gateway.json'))).models;
+  assert.deepEqual(updatedMenu.find(model => model.slug === chatAlias).supported_reasoning_levels.map(item => item.effort), ['low', 'high']);
+  assert.deepEqual(updatedMenu.find(model => model.slug === models[1]).supported_reasoning_levels, []);
   const fastRequest = (model, tier) => fetch('http://127.0.0.1:' + port + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model, input: [], ...(tier == null ? {} : { service_tier: tier }) }) });
   let speedResponse = await fastRequest(alias, 'default'); await speedResponse.text();
   assert.equal(records.at(-1).body.service_tier, 'default', 'Obsolete console settings must not override the native speed choice');

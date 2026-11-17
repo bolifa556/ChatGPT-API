@@ -1,7 +1,8 @@
-// Capability discovery is read-only: use catalog declarations and exact,
-// documented model IDs. Never probe by generating text or images.
+// Catalog and cached probe results share the same capability representation.
 import { isGptModel } from './history-compat.mjs';
+export const PROBE_REASONING_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 export const strengthMetadataFields = ['supported_reasoning_levels', 'supported_reasoning_efforts', 'reasoning_efforts',
+  'reasoning_effort_levels', 'thinking', 'thinking_config',
   'supported_complexity_levels', 'complexity_levels', 'supported_quality_levels', 'quality_levels',
   'reasoning', 'complexity', 'quality', 'parameters', 'parameter_schema'];
 const ranks = { auto: -1, none: 0, off: 0, minimal: 1, low: 2, standard: 2, medium: 3, high: 4, hd: 4, xhigh: 5, max: 6, ultra: 7 };
@@ -14,7 +15,7 @@ export function canRequestFast(model) {
   return true;
 }
 const unknown = () => ({ status: 'unknown', levels: [], highest: null, source: '' });
-function enumeration(value, source) {
+export function strengthLevels(value, source) {
   if (value === false) return { status: 'unsupported', levels: [], highest: null, source };
   const values = Array.isArray(value) ? value : value?.enum ?? value?.levels ?? value?.supported_levels ?? value?.supported_efforts;
   if (!Array.isArray(values) || values.length > 32) return null;
@@ -25,15 +26,17 @@ function enumeration(value, source) {
   return { status: levels.length ? 'known' : 'unsupported', levels, highest: ordered ? levels.at(-1) || null : null, source };
 }
 function reported(model, kind) {
-  const keys = kind === 'reasoning' ? ['supported_reasoning_levels', 'supported_reasoning_efforts', 'reasoning_efforts']
+  const keys = kind === 'reasoning' ? ['supported_reasoning_levels', 'supported_reasoning_efforts', 'reasoning_efforts', 'reasoning_effort_levels']
     : ['supported_' + kind + '_levels', kind + '_levels'];
   const objects = [model, model?.model_info, model?.capabilities, model?.capabilities?.image_generation,
     model?.parameters, model?.parameters?.properties, model?.parameter_schema?.properties];
   for (const object of objects) {
     if (!object || typeof object !== 'object') continue;
+    const efforts = kind === 'reasoning' && object.thinking_config?.enabled?.efforts;
     for (const value of [...keys.map(key => object[key]), kind === 'reasoning' ? object.reasoning?.effort : undefined,
-      object[kind], ...(kind === 'reasoning' ? [object.reasoning_effort, object['reasoning.effort']] : [])]) {
-      const result = enumeration(value, 'catalog'); if (result) return result;
+      object[kind], ...(kind === 'reasoning' ? [object.reasoning_effort, object['reasoning.effort'], object.thinking,
+        efforts && typeof efforts === 'object' && !Array.isArray(efforts) ? Object.keys(efforts) : efforts] : [])]) {
+      const result = strengthLevels(value, 'catalog'); if (result) return result;
     }
   }
   return null;
@@ -48,29 +51,40 @@ function documentedImage(id, kind) {
   if (!previous && !v25 && !v26) return null;
   const values = kind === 'complexity' ? v26 ? ['low', 'medium', 'high'] : false
     : kind === 'quality' ? previous ? ['auto', 'low', 'medium', 'high'] : ['auto', 'low', 'medium', 'high', 'xhigh', 'max'] : undefined;
-  const result = enumeration(values, 'documentation');
+  const result = strengthLevels(values, 'documentation');
   return result && { ...result, sourceUrl: 'https://developers.openai.com/api/docs/guides/image-generation' };
 }
-export function modelStrengths(model, official = []) {
+export function modelStrengths(model, official = [], saved = model._probedStrengths || {}, overrides = model._strengthOverrides || {}) {
   const id = model._upstreamId || model.id || model.slug || '';
   const native = !/^vllm\//i.test(id) && /^gpt(?:-|\d)/i.test(id.split('/').at(-1))
     ? official.find(item => item.slug?.toLowerCase() === id.split('/').at(-1).toLowerCase()) : null;
   const declaredReasoning = reported(model, 'reasoning');
-  let reasoning = declaredReasoning || (native && reported(native, 'reasoning'));
-  if (reasoning && !declaredReasoning) reasoning = { ...reasoning, source: 'native-catalog' };
+  const nativeReasoning = native && reported(native, 'reasoning');
+  let reasoning = nativeReasoning ? { ...nativeReasoning, source: 'native-catalog' } : declaredReasoning;
   if (!reasoning && !/^vllm\//i.test(id)) {
     const leaf = id.split('/').at(-1).toLowerCase();
     const withNone = ['gpt-6-sol', 'gpt-6-luna', 'gpt-6.1-terra'].includes(leaf);
     if (withNone || ['gpt-6-astra', 'gpt-6.1-sol'].includes(leaf)) reasoning = {
-      ...enumeration([...(withNone ? ['none'] : []), 'low', 'medium', 'high', 'xhigh', 'max'], 'documentation'),
+      ...strengthLevels([...(withNone ? ['none'] : []), 'low', 'medium', 'high', 'xhigh', 'max'], 'documentation'),
       sourceUrl: 'https://developers.openai.com/api/docs/guides/reasoning',
     };
   }
-  return {
+  const result = {
     reasoning: reasoning || unknown(),
     complexity: reported(model, 'complexity') || documentedImage(id, 'complexity') || unknown(),
     quality: reported(model, 'quality') || documentedImage(id, 'quality') || unknown(),
   };
+  for (const field of ['reasoning', 'complexity', 'quality']) {
+    if (result[field].status === 'unknown' && saved[field]) result[field] = saved[field];
+    if (field === 'reasoning' && ['probe', 'probe-confirmed'].includes(result[field].source)) {
+      result[field] = unknown();
+    }
+    if (field === 'reasoning' && !isGptModel(id) && result[field].status === 'known') {
+      result[field] = strengthLevels(result[field].levels.filter(level => PROBE_REASONING_LEVELS.includes(level)), result[field].source);
+    }
+    if (overrides[field]) result[field] = strengthLevels(overrides[field], 'manual');
+  }
+  return result;
 }
 export function selectedStrength(capability, configured) {
   return capability?.status === 'known' ? capability.levels.includes(configured) ? configured : capability.highest : null;

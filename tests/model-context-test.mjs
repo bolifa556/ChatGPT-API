@@ -2,12 +2,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
-import { CONTEXT_CAP, reportedCapacity, tokenCount, contextKey, rememberContexts, applyContext } from '../src/model-context.mjs';
+import { DEFAULT_CONTEXT_WINDOW, reportedCapacity, tokenCount, contextKey, rememberContexts, applyContext } from '../src/model-context.mjs';
 
 const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'chatgpt-context-'));
 const file = path.join(fixture, 'context.json'), base = 'https://gateway.invalid/v1';
 try {
-  assert.equal(CONTEXT_CAP, 500000);
+  assert.equal(DEFAULT_CONTEXT_WINDOW, 262000);
   assert.equal(tokenCount('1M'), 1000000); assert.equal(tokenCount('256k'), 256000);
   for (const bad of [0, -1, Infinity, 'unlimited', {}, '128K tokens', 1.5]) assert.equal(tokenCount(bad), null);
   assert.equal(reportedCapacity({ context_length: 1000000, max_model_len: 32768 }), 32768);
@@ -20,7 +20,7 @@ try {
   const official = [{ slug: 'gpt-fixture', context_window: 272000, max_context_window: 1000000 }];
   const originalOfficial = structuredClone(official);
   let cache = rememberContexts({ file, base, models, official, known });
-  for (const [id, expected] of [['Vendor/small', 64000], ['Vendor/large', 500000], ['GPT/gpt-fixture', 500000], ['vllm/large', 32768]]) {
+  for (const [id, expected] of [['Vendor/small', 64000], ['Vendor/large', 1000000], ['GPT/gpt-fixture', 1000000], ['vllm/large', 32768]]) {
     const result = applyContext({ context_window: 272000, max_context_window: 872000, auto_compact_token_limit: 258400 }, cache.entries[contextKey(base, id)]);
     assert.equal(result.context_window, expected); assert.equal(result.max_context_window, expected);
     assert.equal(result.auto_compact_token_limit, null);
@@ -36,14 +36,18 @@ try {
   assert.equal(cache.entries[contextKey('https://other.invalid/v1', 'Vendor/small')].capacity, 16000);
   assert.equal(cache.entries[contextKey(base, 'Vendor/small')].capacity, 64000);
   cache = rememberContexts({ file, base, models: [{ id: 'vllm/unknown' }], known });
-  assert.equal(cache.entries[contextKey(base, 'vllm/unknown')].capacity, null);
+  assert.equal(cache.entries[contextKey(base, 'vllm/unknown')].capacity, 262000);
+  assert.equal(cache.entries[contextKey(base, 'vllm/unknown')].source, 'default-context-window');
   cache = rememberContexts({ file, base, models: [{ id: 'vllm/unknown', max_model_len: 8192 }] });
   assert.equal(cache.entries[contextKey(base, 'vllm/unknown')].capacity, 8192);
   const gptKnown = { models: { 'gpt-fixture': { tokens: 1000000, source: 'verified-specification' } } };
   const defaultCatalog = [{ slug: 'gpt-fixture', context_window: 272000 }];
   cache = rememberContexts({ file, base, models: [{ id: 'GPT/gpt-Fixture' }], official: defaultCatalog, known: gptKnown });
   assert.equal(cache.entries[contextKey(base, 'GPT/gpt-Fixture')].capacity, 1000000);
-  assert.equal(applyContext({ context_window: 272000, effective_context_window_percent: 95 }, cache.entries[contextKey(base, 'GPT/gpt-Fixture')]).context_window * 0.95, 475000);
+  assert.equal(applyContext({ context_window: 272000, effective_context_window_percent: 95 }, cache.entries[contextKey(base, 'GPT/gpt-Fixture')]).context_window * 0.95, 950000);
+  assert.equal(applyContext({}, { capacity: 64000 }, { override: 3000000 }).context_window, 3000000);
+  assert.equal(applyContext({ context_window: 128000 }, {}).context_window, 262000);
+  assert.equal(applyContext({}, { capacity: 64000 }, { capacity: 800000 }).context_window, 800000);
   const nativeKey = contextKey(base, 'GPT/gpt-fixture');
   cache.entries[nativeKey] = { capacity: 272000, source: 'native-model-catalog', checkedAt: 'old' };
   fs.writeFileSync(file, JSON.stringify(cache));
@@ -56,5 +60,5 @@ try {
   fs.writeFileSync(file, JSON.stringify(cache));
   cache = rememberContexts({ file, base, models: [{ id: 'GPT/gpt-fixture' }], official: defaultCatalog, known: gptKnown });
   assert.equal(cache.entries[nativeKey].capacity, 128000, 'Do not inflate a real deployment limit');
-  console.log(JSON.stringify({ passed: true, cap: CONTEXT_CAP, checks: ['actual deployment limits', 'one-time persistent capacities', 'new models only', 'separate URL namespaces', 'raw capacity retained', 'official metadata unchanged', 'native compaction defaults', 'unreported capacity is not fabricated'] }));
+  console.log(JSON.stringify({ passed: true, fallback: DEFAULT_CONTEXT_WINDOW, checks: ['actual deployment limits', 'one-time persistent capacities', 'new models only', 'separate URL namespaces', 'freely editable windows', 'official metadata unchanged', 'native compaction defaults', 'unreported capacity is not fabricated'] }));
 } finally { fs.rmSync(fixture, { recursive: true, force: true }); }

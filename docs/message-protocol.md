@@ -10,7 +10,7 @@
 
 ## 目标与边界
 
-客户端决定对话、工具执行、历史、模型切换和压缩。适配层只转换请求副本和响应协议，不生成用户/助手正文，不添加新的任务提示词，不替模型纠正代码，不改写客户端保存的历史，不另建聊天库。测试使用临时目录和原生 ephemeral 对话。
+客户端决定对话、工具执行、历史、模型切换和压缩。普通对话只转换请求副本和响应协议，不生成用户/助手正文，不添加新的任务提示词，不替模型纠正代码，不改写客户端保存的历史，不另建聊天库。独立搜索的兼容请求将原生 `commands` 编码为检索指令并保留原 `input`，由所选 API 执行搜索。测试使用临时目录和原生 ephemeral 对话。
 
 现有模型目录中的基础指令与自定义工具说明保留；本次没有增加提示词，并移除原先转换思考时添加的说明前缀。测试夹具中的提示词仅供验证，未加入实际请求处理。另一个任务的重连修复保持有效。
 
@@ -63,12 +63,17 @@
 | function_call_output / custom_tool_call_output | 保留 call_id 和原始结果，名称按工具定义统一转换。Chat 优先使用真实 call_id 或按名称匹配的唯一已有调用；只有名称的结果保留为具名函数结果 |
 | auto/none/required、指定工具、allowed_tools | 依目标协议转换工具选择，别名与定义一致；不替用户选择另一种工具 |
 | web_search 等上游扩展工具声明 | 保留声明，不因客户端默认声明了它就阻断普通请求；不模拟上游没有的工具能力 |
+| Chat 搜索扩展 | 保留 `enable_search`、`search_options`、`web_search_options`、`search_parameters`、搜索过滤参数及 `extra_body`。根据接口声明或已确认的直连 API 规范映射内置搜索，不根据 GPT／非 GPT 名称分配能力 |
 | text.format | Chat 映射为 response_format；json_schema 的 name/description/schema/strict 原样保留；不添加“请输出 JSON”提示词 |
 | reasoning.effort | 按原值传递；Chat 使用 reasoning_effort。不自动降档，不新增重试档位 |
 | max_output_tokens | Chat 优先按模型目录声明选择 max_completion_tokens / max_tokens，缺少声明时使用对应模型类型的默认字段 |
 | text.verbosity | Chat 映射 verbosity，保留原值 |
 | prompt_cache_key、prompt_cache_retention、prompt_cache_options、safety_identifier | Chat 保留同名参数和原值 |
 | service_tier | 请求原值传递，包括 Chat 路径；不因菜单未声明速度档位而删除用户已有设置 |
+
+独立原生搜索先将 `/alpha/search` 原始结构交给选定来源。接口明确不存在时，才在同一来源、同一模型使用 Responses 托管搜索或 Chat 内置搜索。原生结果完整转发，兼容结果保留上游正文、真实来源和引用；托管搜索的打开／查找结果需与目标操作一致。兼容分支目前处理文本搜索、打开和查找，其正文来自模型检索结果，原生接口可直接处理其余命令。
+
+已成功使用的协议按来源 URL／Key 指纹和模型写入现有 `data/cache/gateway-sources.json`，目录刷新保留匹配结果，URL 或 Key 变化后失效。启动只读取缓存，实际搜索遇到接口不兼容时重新协商。引用 URL 只保留在会话内的有界内存中。Chat 接口声明了搜索开关但未返回来源时保留原文，缺少位置的来源列表保留原数据，仅将实际存在的引用标记转换为客户端标注。
 | temperature、top_p、parallel_tool_calls 等对应选项 | 按目标接口的同义字段传递；非 GPT 路线原有 reasoning.context 清理保留 |
 | previous_response_id | 只交给拥有该状态的服务；跨服务续聊用已有完整输入替换外部 response ID，不插入“继续”消息 |
 

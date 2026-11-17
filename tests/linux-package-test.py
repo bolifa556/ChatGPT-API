@@ -25,6 +25,7 @@ def check(file):
             assert not set(parts) & {'data', '.git', '.github', 'tests', '.env', '__pycache__'}
             assert not member.name.endswith(('.exe', '.dll', '.ps1', '.vbs', '.cmd'))
         entries = {item['path']: item for item in manifest['files']}
+        assert {'src/native-web-search.mjs', 'src/search-compat.mjs'} <= entries.keys()
         actual = {item.name[len(prefix + '/payload/'):] for item in members if item.isfile() and item.name.startswith(prefix + '/payload/')}
         assert set(entries) == actual, 'Manifest does not match the complete payload'
         for relative, entry in entries.items():

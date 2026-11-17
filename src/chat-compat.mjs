@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { MAX_EVENT_BYTES } from './non-gpt-compat.mjs';
+import { applyChatSearch, searchParameters, searchResultFields, searchSources, searchCitationAnnotations } from './search-compat.mjs';
 
 const copy = value => structuredClone(value);
 const id = value => createHash('sha256').update(value).digest('hex').slice(0, 32);
@@ -57,7 +58,7 @@ function content(value) {
 }
 function parts(value) { return value == null ? [] : typeof value === 'string' ? [{ type: 'text', text: value }] : value; }
 
-export function chatRequest(payload, metadata) {
+export function chatRequest(payload, metadata, gateway) {
   if (payload.previous_response_id) throw unsupported('Chat continuation requires the complete input history.');
   const messages = [], system = [], calls = new Map();
   const aliyun = payload.model?.startsWith('阿里云订阅/');
@@ -109,7 +110,7 @@ export function chatRequest(payload, metadata) {
   }
   if (system.length) messages.unshift({ role: 'system', content: system.join('\n\n') });
   const result = { model: payload.model, messages };
-  for (const key of ['stream','temperature','top_p','frequency_penalty','presence_penalty','logit_bias','user','seed','metadata','service_tier','parallel_tool_calls','store','prompt_cache_key','prompt_cache_retention','prompt_cache_options','safety_identifier']) {
+  for (const key of ['stream','temperature','top_p','frequency_penalty','presence_penalty','logit_bias','user','seed','metadata','service_tier','parallel_tool_calls','store','prompt_cache_key','prompt_cache_retention','prompt_cache_options','safety_identifier', ...searchParameters]) {
     if (payload[key] !== undefined) result[key] = copy(payload[key]);
   }
   if (payload.max_output_tokens !== undefined) {
@@ -146,7 +147,7 @@ export function chatRequest(payload, metadata) {
     result.response_format = { type: 'json_schema', json_schema: schema };
   } else if (format?.type === 'json_object' || format?.type === 'text') result.response_format = { type: format.type };
   if (result.stream) result.stream_options = { include_usage: true };
-  return result;
+  return gateway ? applyChatSearch(result, gateway, payload.tools?.find(tool => ['web_search', 'web_search_preview'].includes(tool.type))) : result;
 }
 
 function usage(value) {
@@ -202,6 +203,22 @@ export class ChatEvents {
       { type: 'response.output_text.delta', output_index: index, item_id: item.id, content_index: 0, delta });
     return events;
   }
+  annotate(values) {
+    const events = [];
+    for (const original of values) {
+      const annotation = nativeAnnotation(original), key = JSON.stringify(annotation);
+      this.annotationKeys ||= new Set();
+      if (this.annotationKeys.has(key)) continue;
+      this.annotationKeys.add(key); (this.annotations ||= []).push(annotation);
+      if (this.message) {
+        const { index, item } = this.message;
+        item.content[0].annotations.push(copy(annotation));
+        events.push({ type: 'response.output_text.annotation.added', output_index: index, item_id: item.id,
+          content_index: 0, annotation_index: this.annotations.length - 1, annotation: copy(annotation) });
+      }
+    }
+    return events;
+  }
   convert(chunk) {
     if (this.finished) return [];
     if (chunk.error) throw Object.assign(new Error(chunk.error.message || 'Chat upstream failed.'), {
@@ -209,23 +226,16 @@ export class ChatEvents {
       upstreamError: copy(chunk.error), code: chunk.error.code || 'upstream_error' });
     const events = this.start(chunk);
     if (chunk.usage) this.usage = usage(chunk.usage);
+    for (const field of searchResultFields) if (chunk[field] !== undefined) this.response[field] = copy(chunk[field]);
+    const sources = searchSources(chunk);
     for (const choice of chunk.choices || []) {
       if (choice.index && choice.index !== 0) throw unsupported('Multiple Chat choices cannot be represented as one Responses output.');
       const delta = choice.delta || {};
+      sources.push(...searchSources(delta));
+      for (const field of searchResultFields) if (delta[field] !== undefined) this.response[field] = copy(delta[field]);
       events.push(...this.text('reasoning', delta.reasoning_content ?? delta.reasoning));
       events.push(...this.text('message', delta.content));
-      for (const original of delta.annotations || []) {
-        const annotation = nativeAnnotation(original), key = JSON.stringify(annotation);
-        this.annotationKeys ||= new Set();
-        if (this.annotationKeys.has(key)) continue;
-        this.annotationKeys.add(key); (this.annotations ||= []).push(annotation);
-        if (this.message) {
-          const { index, item } = this.message;
-          item.content[0].annotations.push(copy(annotation));
-          events.push({ type: 'response.output_text.annotation.added', output_index: index, item_id: item.id,
-            content_index: 0, annotation_index: this.annotations.length - 1, annotation: copy(annotation) });
-        }
-      }
+      events.push(...this.annotate(delta.annotations || []));
       if (delta.refusal) {
         this.refusal = (this.refusal || '') + delta.refusal;
       }
@@ -243,6 +253,10 @@ export class ChatEvents {
       }
       if (choice.finish_reason) this.finishReason = choice.finish_reason;
     }
+    if (sources.length) {
+      this.searchSources ||= new Map();
+      for (const source of sources) this.searchSources.set(source.url, { ...this.searchSources.get(source.url), ...source });
+    }
     return events;
   }
   finish() {
@@ -250,6 +264,9 @@ export class ChatEvents {
     if (!this.response || !this.finishReason) throw Object.assign(new Error('Chat stream ended without a finish_reason.'), { status: 502, code: 'incomplete_upstream_response' });
     this.finished = true;
     const events = [], complete = ['stop','tool_calls'].includes(this.finishReason);
+    if (this.message && this.searchSources) {
+      events.push(...this.annotate(searchCitationAnnotations([...this.searchSources.values()], this.message.item.content[0].text)));
+    }
     for (const kind of ['reasoning','message']) {
       if (!this[kind]) continue;
       const { index, item } = this[kind];
