@@ -107,7 +107,7 @@ try {
     $recoverySession = Register-LauncherRecovery $packageDir $configPath
     Apply-LauncherConfig $packageDir $configPath $authMode $shimBase $baseUrl $Mode
     $launchPhase = '兼容历史对话'
-    $compatOptions = if ($authMode -eq 'gateway') { @('--desktop') } else { @() }
+    $compatOptions = if ($authMode -eq 'gateway') { @('--desktop') } else { @('--desktop-repair') }
     $null = & $nodePath (Join-Path $packageDir 'src\repair-thread-providers.mjs') 'begin' (Get-CodexHome) $packageDir @compatOptions 2> (Join-Path $packageDir 'data\logs\provider-repair-stderr.log')
     if ($LASTEXITCODE -ne 0) { throw '对话兼容准备未完成，请查看 data\logs\provider-repair-stderr.log。' }
     if($Mode -ne 'official' -and -not $prepared.gateway.ready){

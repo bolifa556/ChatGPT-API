@@ -255,12 +255,17 @@ function Restore-LauncherConfig([string]$packageDir, [string]$configPath) {
     if ($state -and $state.active) {
         if ([IO.Path]::GetFullPath($state.configPath) -ne [IO.Path]::GetFullPath($configPath)) { throw '切换记录属于另一个配置目录，已停止自动恢复。' }
         $current = if (Test-Path -LiteralPath $configPath) { (Read-LauncherText $configPath) } else { '' }
-        if ($state.entryMode -eq 'apionly') {
-            $state | Add-Member -NotePropertyName lastApiOnlyModel -NotePropertyValue (Get-RootString $current 'model') -Force
-            $state | Add-Member -NotePropertyName lastApiOnlyEffort -NotePropertyValue (Get-RootString $current 'model_reasoning_effort') -Force
-        } elseif ($state.entryMode -ne 'official') {
-            $state.lastApiModel = Get-RootString $current 'model'
-            $state.lastApiEffort = Get-RootString $current 'model_reasoning_effort'
+        if ($state.entryMode -ne 'official') {
+            $modelKey, $effortKey = if ($state.entryMode -eq 'apionly') { 'lastApiOnlyModel', 'lastApiOnlyEffort' } else { 'lastApiModel', 'lastApiEffort' }
+            $model = Get-RootString $current 'model'
+            $effort = Get-RootString $current 'model_reasoning_effort'
+            $remembered = $state.$modelKey
+            $modelChanged = $model -cne (Get-RootString $state.applied 'model')
+            $effortChanged = $effort -cne (Get-RootString $state.applied 'model_reasoning_effort')
+            if ($model -and ($modelChanged -or ($effortChanged -and (-not $remembered -or $remembered -ceq $model)))) {
+                $state | Add-Member -NotePropertyName $modelKey -NotePropertyValue $model -Force
+                $state | Add-Member -NotePropertyName $effortKey -NotePropertyValue $effort -Force
+            }
         }
         $body = [regex]::Replace($current, '(?m)^[ \t]*#[^\r\n]*', '').Trim()
         $damaged = $body -and $body -notmatch '(?m)^[^\r\n#]*=|^[ \t]*\['
@@ -339,7 +344,9 @@ function Apply-LauncherConfig([string]$packageDir, [string]$configPath, [string]
         $content = Set-RootLine $content 'model_context_window' $null
         $content = Set-RootLine $content 'model_auto_compact_token_limit' $null
     }
-    $state = [ordered]@{ version = 2; active = $true; mode = $mode; entryMode = $entryMode; configPath = $configPath; originalExisted = $originalExisted; original = $original; applied = $content; startedAt = [DateTime]::UtcNow.ToString('o'); lastApiModel = $(if ($entryMode -eq 'api') { $selected } else { $previous.lastApiModel }); lastApiEffort = $(if ($entryMode -eq 'api') { Get-RootString $original 'model_reasoning_effort' } else { $previous.lastApiEffort }); lastApiOnlyModel = $(if ($entryMode -eq 'apionly') { $selected } else { $previous.lastApiOnlyModel }); lastApiOnlyEffort = $(if ($entryMode -eq 'apionly') { Get-RootString $original 'model_reasoning_effort' } else { $previous.lastApiOnlyEffort }) }
+    $rememberedModel = if ($savedModel) { $savedModel } else { $selected }
+    $rememberedEffort = if ($savedModel) { $savedEffort } else { Get-RootString $content 'model_reasoning_effort' }
+    $state = [ordered]@{ version = 2; active = $true; mode = $mode; entryMode = $entryMode; configPath = $configPath; originalExisted = $originalExisted; original = $original; applied = $content; startedAt = [DateTime]::UtcNow.ToString('o'); lastApiModel = $(if ($entryMode -eq 'api') { $rememberedModel } else { $previous.lastApiModel }); lastApiEffort = $(if ($entryMode -eq 'api') { $rememberedEffort } else { $previous.lastApiEffort }); lastApiOnlyModel = $(if ($entryMode -eq 'apionly') { $rememberedModel } else { $previous.lastApiOnlyModel }); lastApiOnlyEffort = $(if ($entryMode -eq 'apionly') { $rememberedEffort } else { $previous.lastApiOnlyEffort }) }
     # Journal first, so a crash while switching can be recovered by either entry.
     Write-LauncherFile (Get-LauncherDataPath $packageDir 'launcher-state.json') ($state | ConvertTo-Json -Depth 8)
     Write-LauncherFile $configPath $content

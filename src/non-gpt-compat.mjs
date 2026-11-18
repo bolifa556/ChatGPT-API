@@ -1,6 +1,6 @@
 // Desktop wire compatibility. This module never executes model-generated input.
 import { createHash } from 'node:crypto';
-import { reasoningAsContext, mergeTools } from './history-compat.mjs';
+import { portableReasoning, mergeTools } from './history-compat.mjs';
 
 export const MAX_EVENT_BYTES = 16 * 1024 * 1024;
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -107,12 +107,11 @@ export class NonGptAdapter {
             this.stats.reasoningPreserved++;
             return [item];
           }
-          // A role-less reasoning block becomes an extra system message in some
-          // Responses->Chat converters. Preserve all readable text as assistant
-          // context; encrypted bytes cannot be interpreted by a different vendor.
+          // Foreign summaries keep their reasoning role and block boundaries.
+          // Only the source-specific ID and encrypted bytes are discarded.
           if (item.id) removedIds.add(item.id);
-          const context = reasoningAsContext(item);
-          if (context) { this.stats.reasoningConverted++; return [context]; }
+          const reasoning = portableReasoning(item);
+          if (reasoning) { this.stats.reasoningConverted++; return [reasoning]; }
           this.stats.reasoningSkipped++;
         } else return [item];
         if (item.id) removedIds.add(item.id);
@@ -167,7 +166,7 @@ export class NonGptAdapter {
       throw Object.assign(new Error('Upstream custom tool arguments must be a JSON object with a string input field.'), { status: 502, code: 'invalid_upstream_tool_arguments' });
     }
   }
-  item(original, { partial = false } = {}) {
+  item(original, { partial = false, unfinished = false } = {}) {
     if (!original || typeof original !== 'object') return original;
     let item = { ...original };
     if (item.type === 'reasoning') item.summary ??= [];
@@ -177,7 +176,7 @@ export class NonGptAdapter {
     const meta = this.mapping.get(item.name);
     // An unfinished wrapper retains its raw function-call form. Its arguments
     // cannot yet be decoded into a complete native custom-tool input.
-    if (meta && item.type === 'function_call' && !(meta.custom && item.status === 'incomplete')) {
+    if (meta && item.type === 'function_call' && !(meta.custom && (unfinished || ['incomplete', 'failed', 'cancelled'].includes(item.status)))) {
       item.name = meta.name;
       if (meta.namespace) item.namespace = meta.namespace;
       if (meta.custom) { item.type = 'custom_tool_call'; item.input = partial && !item.arguments ? '' : this.raw(item.arguments); delete item.arguments; }
@@ -190,13 +189,15 @@ export class NonGptAdapter {
     return item;
   }
   response(original) {
-    return Array.isArray(original?.output) ? { ...original, output: original.output.map(x => this.item(x)) } : original;
+    return Array.isArray(original?.output) ? { ...original, output: original.output.map(x => this.item(x, {
+      unfinished: ['incomplete','failed','cancelled'].includes(original.status) && x?.status !== 'completed',
+    })) } : original;
   }
 }
 
 export class NonGptEvents {
   constructor(adapter) {
-    this.adapter = adapter; this.calls = new Map(); this.itemIds = new Map(); this.sequence = 0; this.terminal = false;
+    this.adapter = adapter; this.calls = new Map(); this.itemIds = new Map(); this.doneItems = new Set(); this.sequence = 0; this.terminal = false;
   }
   item(original, index, options) {
     const item = this.adapter.item(original, options);
@@ -241,6 +242,9 @@ export class NonGptEvents {
   }
   finishItem(index, original) {
     const call = this.call(index, original);
+    // A Responses endpoint can close the item before reporting its token
+    // limit. A partial wrapper is not a completed native tool invocation.
+    if (original?.status && original.status !== 'completed') return { item: this.adapter.item({ ...call.item, arguments: call.arguments }, { unfinished: true }), events: [] };
     if (!call.item.name || !call.item.call_id) throw Object.assign(new Error('Upstream tool call is missing its name or call_id.'), { status: 502, code: 'invalid_upstream_tool_call' });
     const item = this.item({ ...call.item, arguments: call.arguments }, index);
     if (call.itemDone) return { item, events: [] };
@@ -269,17 +273,31 @@ export class NonGptEvents {
       return [...added, { ...event, delta }];
     } else if (kind === 'response.function_call_arguments.done') {
       const call = this.call(idx, { id: event.item_id, name: event.name, arguments: event.arguments });
-      return [...this.start(idx, call), ...this.argumentsDone(idx, call)];
+      return [...this.start(idx, call), ...(this.adapter.mapping.get(call.item.name)?.custom ? [] : this.argumentsDone(idx, call))];
     } else if (kind === 'response.output_item.done') {
       if (event.item?.type === 'function_call' || this.calls.has(idx)) return this.finishItem(idx, event.item).events;
       event.item = this.item(event.item, idx);
+      this.doneItems.add(idx);
     } else if (event.response) {
       const response = event.response, extra = [];
       if (Array.isArray(response.output)) event.response = { ...response, output: response.output.map((item, index) => {
         if (kind === 'response.completed' && item.type === 'function_call') {
           const result = this.finishItem(index, item); extra.push(...result.events); return result.item;
         }
-        return this.item(item, index, { partial: !this.terminal });
+        if (kind === 'response.incomplete' && item.type === 'function_call' && item.status !== 'completed') return this.adapter.item(item, { unfinished: true });
+        const started = this.itemIds.has(index);
+        const native = this.item(item, index, { partial: !this.terminal });
+        if (kind === 'response.completed' && ['message', 'reasoning'].includes(native.type) && !this.doneItems.has(index)) {
+          // Some streaming gateways supply the answer only in the final
+          // response.output. The desktop renders completed item events.
+          if (!started) {
+            const opening = native.type === 'message' ? { ...native, status: 'in_progress', content: [] } : { type: 'reasoning', id: native.id, summary: [] };
+            extra.push({ type: 'response.output_item.added', output_index: index, item: opening });
+          }
+          extra.push({ type: 'response.output_item.done', output_index: index, item: native });
+          this.doneItems.add(index);
+        }
+        return native;
       }) };
       return [...extra, event];
     }
@@ -287,6 +305,7 @@ export class NonGptEvents {
   }
   convert(event) {
     return this.events(event).map(out => ({ ...out,
+      ...(event.stream_id !== undefined && out.stream_id === undefined ? { stream_id: event.stream_id } : {}),
       ...(out.item_id && this.itemIds.has(out.output_index) ? { item_id: this.itemIds.get(out.output_index) } :
         this.adapter.ids.has(out.item_id) ? { item_id: this.adapter.ids.get(out.item_id) } : {}),
       sequence_number: this.sequence++ }));

@@ -1,13 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { overlayDesktopState, restoreDesktopState, recoverMissingDesktopState } from '../src/desktop-state.mjs';
+import { overlayDesktopState, restoreDesktopState, recoverMissingDesktopState, recoverCurrentDesktopState } from '../src/desktop-state.mjs';
 import { DatabaseSync } from 'node:sqlite';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 fs.mkdirSync(path.join(root, 'data/testing'), { recursive: true });
 const fixture = fs.mkdtempSync(path.join(root, 'data/testing/account-isolation-'));
+process.on('exit', () => fs.rmSync(fixture, { recursive: true, force: true }));
 const home = path.join(fixture, 'home'); fs.mkdirSync(home);
 const ctx = { root: fixture, home }, file = path.join(home, '.codex-global-state.json');
 const snapshot = { atoms: { 'saved-mode': 'work', 'onboarding-completed': true }, globals: { 'local-projects': { project: { name: 'Original' } }, 'project-order': ['project'] } };
@@ -139,4 +141,105 @@ fs.writeFileSync(file, overlay);
 restoreDesktopState(ctx);
 assert.deepEqual(JSON.parse(fs.readFileSync(file)), baseline);
 
-console.log(JSON.stringify({ passed: true, checks: ['API-only project and onboarding state without account credentials', 'normal and interrupted restore without native scratch files', 'native preference edits retained in their original account scope', 'three repeated launches retain native preferences', 'explicit native account switches retain their own workspace', 'missing settings recover exact native snapshot memberships only when project IDs still exist'] }));
+const ownerKey = 'electron-renderer-content-owner';
+const owner = createHash('sha256').update(JSON.stringify(['fixture-user', 'fixture-account'])).digest('hex');
+const ownerAtoms = 'electron-owner-atoms:' + owner;
+const guestAtoms = 'electron-owner-atoms:signed-out';
+const checkpoint = 'electron-owner-value:app-server-projects-migration-by-host:' + owner;
+const host = 'local:' + home;
+const permission = 'permission-selection-by-host-id:local', recent = 'composer-recent-model-configurations-v1';
+const scoped = { [ownerKey]: owner, [ownerAtoms]: { [permission]: { mode: 'ask' }, [recent]: [{ model: 'current' }],
+  'agent-mode-by-host-id': { local: 'default', remote: 'full-access' }, 'composer-drafts-v1': { secret: 'never copy' } },
+  [checkpoint]: { [host]: { projectsMigrated: true, threadAssignmentsMigrated: false, threadAssignmentsReadMigrated: true } },
+  'local-projects': {}, 'projectless-thread-ids': ['detached'], unrelated: 'keep' };
+const historical = { ...saved,
+  'electron-persisted-atom-state': { 'chatgpt-work-models-v1/fixture-user/fixture-account': {}, [permission]: { mode: 'full-access' },
+    [recent]: [{ model: 'older' }], 'onboarding-completed': true },
+  'local-projects': { ...saved['local-projects'], removed: { id: 'removed', name: 'Deleted project' } },
+  'app-server-project-id-by-legacy-project-id-by-host': { [host]: { legacy: 'native-project', removed: 'nonexistent' } },
+  'project-order': ['legacy', 'removed'],
+  'sidebar-project-thread-orders': { legacy: { threadIds: ['present', 'deleted', 'reassigned'] } },
+  'thread-project-assignments': Object.fromEntries(['present', 'detached', 'deleted', 'reassigned'].map(id => [id, { projectId: 'legacy', projectKind: 'local' }])) };
+const threads = new DatabaseSync(path.join(home, 'state_5.sqlite'));
+threads.exec("CREATE TABLE threads(id TEXT PRIMARY KEY, project_id TEXT); INSERT INTO threads VALUES ('present', NULL), ('detached', NULL), ('reassigned', 'new-project')");
+threads.close();
+
+// Upgrade while a legacy overlay is active. Its journal supplies the native
+// migration input without ever replacing the newer account or preference data.
+fs.writeFileSync(file, JSON.stringify(scoped));
+fs.writeFileSync(journal, JSON.stringify({ version: 2, home: fs.realpathSync(home), originalText: JSON.stringify(historical) }));
+restoreDesktopState(ctx);
+const repaired = JSON.parse(fs.readFileSync(file));
+assert.equal(repaired[ownerKey], owner);
+assert.equal(repaired['electron-account-renderer-state-v1'], undefined);
+assert.deepEqual(repaired['thread-project-assignments'], { present: historical['thread-project-assignments'].present });
+assert.deepEqual(repaired[checkpoint][host].pendingThreadAssignmentIds, ['present']);
+assert.deepEqual(repaired['project-order'], ['legacy']);
+assert.deepEqual(repaired['sidebar-project-thread-orders'], { legacy: { threadIds: ['present'] } });
+assert.deepEqual(repaired[ownerAtoms], { ...scoped[ownerAtoms], 'onboarding-completed': true });
+assert.equal(repaired.unrelated, 'keep');
+assert(!fs.existsSync(journal));
+const unchangedThreads = new DatabaseSync(path.join(home, 'state_5.sqlite'), { readOnly: true });
+assert.equal(unchangedThreads.prepare('SELECT project_id FROM threads WHERE id = ?').get('present').project_id, null,
+  'Only the native migration may write thread project IDs');
+unchangedThreads.close();
+
+// The mixed entry recovers the same data from a verified native snapshot.
+const rejectedSnapshot = { ...historical, 'electron-persisted-atom-state': {
+  'chatgpt-work-models-v1/different-user/fixture-account': {} } };
+fs.writeFileSync(file, JSON.stringify(scoped));
+fs.writeFileSync(nativeSnapshot, JSON.stringify(rejectedSnapshot));
+assert.deepEqual(recoverCurrentDesktopState(ctx), { recovered: false });
+fs.writeFileSync(nativeSnapshot, JSON.stringify(historical));
+assert.deepEqual(recoverCurrentDesktopState(ctx), { recovered: true, projects: 1, assignments: 1 });
+assert.deepEqual(recoverCurrentDesktopState(ctx), { recovered: false });
+fs.writeFileSync(file, JSON.stringify({ ...scoped, 'thread-project-assignments': {} }));
+assert.deepEqual(recoverCurrentDesktopState(ctx), { recovered: false }, 'An explicit empty assignment map remains empty');
+
+// The client selects the signed-out view on API-only startup. Only known UI
+// defaults are seeded, and the client's own preference edits survive recovery.
+const presets = { ...repaired, [guestAtoms]: { [permission]: { mode: 'locked' } } };
+fs.writeFileSync(file, JSON.stringify(presets));
+assert.equal(overlayDesktopState(ctx).applied, true);
+const launched = JSON.parse(fs.readFileSync(file));
+assert.equal(launched[ownerKey], owner);
+assert.deepEqual(launched[guestAtoms], { [permission]: { mode: 'locked' }, [recent]: repaired[ownerAtoms][recent], 'onboarding-completed': true });
+launched[ownerKey] = 'signed-out';
+launched[guestAtoms][recent] = [{ model: 'user selected' }];
+launched.unrelated = 'client wrote this';
+fs.writeFileSync(file + '.bak', JSON.stringify(launched));
+fs.writeFileSync(file, 'interrupted native state write');
+restoreDesktopState(ctx);
+const recoveredGuest = JSON.parse(fs.readFileSync(file));
+assert.equal(recoveredGuest[ownerKey], 'signed-out', 'The native client is responsible for choosing the active account');
+assert.equal(recoveredGuest.unrelated, launched.unrelated);
+assert.deepEqual(recoveredGuest[guestAtoms], { [permission]: { mode: 'locked' }, [recent]: [{ model: 'user selected' }] });
+assert.deepEqual(recoveredGuest[ownerAtoms], repaired[ownerAtoms]);
+assert.deepEqual(JSON.parse(fs.readFileSync(file + '.bak')), recoveredGuest);
+assert(!fs.existsSync(journal));
+
+const globalDb = path.join(home, '.codex-global-state.sqlite');
+const store = new DatabaseSync(globalDb);
+store.exec('PRAGMA user_version=1; CREATE TABLE settings (scope TEXT, key TEXT, value TEXT, PRIMARY KEY(scope,key)) WITHOUT ROWID');
+const put = store.prepare('INSERT INTO settings VALUES (?, ?, ?)');
+for (const [key, value] of Object.entries(scoped)) put.run('global', key, JSON.stringify(key === ownerAtoms ? {} : value));
+for (const [key, value] of Object.entries(repaired[ownerAtoms])) put.run(ownerAtoms, key, JSON.stringify(value));
+store.close();
+const jsonBefore = fs.readFileSync(file);
+assert.equal(recoverCurrentDesktopState(ctx).assignments, 1);
+assert.equal(overlayDesktopState(ctx).applied, true);
+const openDb = new DatabaseSync(globalDb);
+const read = openDb.prepare('SELECT value FROM settings WHERE scope = ? AND key = ?');
+assert.deepEqual(JSON.parse(read.get('global', 'thread-project-assignments').value), repaired['thread-project-assignments']);
+assert.deepEqual(JSON.parse(read.get(guestAtoms, recent).value), repaired[ownerAtoms][recent]);
+assert.deepEqual(JSON.parse(read.get(guestAtoms, 'agent-mode-by-host-id').value), { local: 'default' });
+openDb.close();
+restoreDesktopState(ctx);
+const afterDb = new DatabaseSync(globalDb, { readOnly: true });
+assert.equal(afterDb.prepare('SELECT count(*) AS n FROM settings WHERE scope = ?').get(guestAtoms).n, 0);
+assert(afterDb.prepare('SELECT value FROM settings WHERE scope = ? AND key = ?').get(ownerAtoms, permission));
+afterDb.close();
+assert.deepEqual(fs.readFileSync(file), jsonBefore, 'An active native SQLite store must not write stale JSON');
+
+console.log(JSON.stringify({ passed: true, checks: ['legacy desktop preferences and interrupted recovery', 'owner-scoped JSON and SQLite',
+  'native project migration input and account verification', 'signed-out preference isolation and retained user edits'] }));

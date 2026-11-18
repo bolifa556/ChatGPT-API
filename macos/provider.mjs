@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { processIdentity, alive, runningClients, requireClosedClient, clientExecutable, nativeCli, officialProxy, startNativeClient } from './platform.mjs';
 import { hasChatGPTLogin, nativeVersion } from './native.mjs';
 import { repairThreadProviders, restoreThreadProviders } from '../src/repair-thread-providers.mjs';
-import { overlayDesktopState, restoreDesktopState } from '../src/desktop-state.mjs';
+import { overlayDesktopState, recoverCurrentDesktopState, restoreDesktopState } from '../src/desktop-state.mjs';
 import { registerRecovery, recordRecoveryClient, unregisterRecovery, recoverPending } from '../src/recovery.mjs';
 import { prepareWithRecovery, updateEnv, restoreRootLine } from '../src/gateway-recovery.mjs';
 import { syncLegacySettings, userApiSettings, initializeDeferredSettings, requireApiConfiguration, atomicPrivate, normalizeBaseUrl } from '../src/settings.mjs';
@@ -207,7 +207,7 @@ export function applyConfig(ctx, selection = { entryMode: 'apionly', mode: 'gate
   if (!signedIn) Object.assign(values, { forced_login_method: null });
   if (!officialOnly) Object.assign(values, { model_context_window: null, model_auto_compact_token_limit: null });
   for (const [key, value] of Object.entries(values)) text = setRoot(text, key, value === null ? '' : key + ' = ' + JSON.stringify(value) + '\n');
-  if (remembered?.effort) text = setRoot(text, 'model_reasoning_effort', 'model_reasoning_effort = ' + JSON.stringify(remembered.effort) + '\n');
+  if (remembered?.model === selected && remembered?.effort) text = setRoot(text, 'model_reasoning_effort', 'model_reasoning_effort = ' + JSON.stringify(remembered.effort) + '\n');
   const file = statePath(ctx, 'config'), prior = readJson(file);
   if (prior && prior.configPath !== ctx.config) throw new Error('This installation is bound to another CODEX_HOME.');
   const saved = { configPath: ctx.config, configExisted: prior ? prior.configExisted !== false : configExisted, original: prior?.original ?? original, roots: { ...Object.fromEntries(rootKeys.map(key => [key, getRoot(original, key)])), ...prior?.roots },
@@ -224,7 +224,12 @@ export function restoreConfig(ctx) {
   const ownsProvider = ['openai', providerId, 'chatgpt_api_mixed', 'smr'].includes(rootString(text, 'model_provider'));
   if (saved.entryMode) {
     const memories = readJson(statePath(ctx, 'entry-models'), {});
-    atomic(statePath(ctx, 'entry-models'), { ...memories, [saved.entryMode]: { model: rootString(text, 'model'), effort: rootString(text, 'model_reasoning_effort') } });
+    const previous = memories[saved.entryMode];
+    const model = rootString(text, 'model'), effort = rootString(text, 'model_reasoning_effort');
+    if (model && (!previous?.model || model !== rootString(saved.applied, 'model') ||
+        model === previous.model && effort !== rootString(saved.applied, 'model_reasoning_effort'))) {
+      atomic(statePath(ctx, 'entry-models'), { ...memories, [saved.entryMode]: { model, effort } });
+    }
   }
   const exactOriginal = typeof saved.original === 'string'
     && Object.entries(saved.roots).every(([key, value]) => getRoot(saved.original, key) === value)
@@ -294,6 +299,7 @@ export async function launchEntry(ctx, entryMode, args = [], options = {}) {
       await prepareWithRecovery(() => ensureRouter(ctx, true, selection), entryMode === 'official' ? null : options.recoverGateway);
       recoverySession = await registerRecovery(ctx, 'macos', options.recovery);
       if (selection.mode === 'gateway') overlayDesktopState(ctx);
+      else recoverCurrentDesktopState(ctx);
       const applied = applyConfig(ctx, selection);
       sessionId = readJson(statePath(ctx, 'config')).sessionId;
       await repairThreadProviders({ ...ctx, provider: applied.provider });

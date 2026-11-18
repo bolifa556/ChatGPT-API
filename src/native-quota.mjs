@@ -9,13 +9,45 @@ import { setTimeout as delay } from 'node:timers/promises';
 import http from 'node:http';
 import net from 'node:net';
 import { pathToFileURL } from 'node:url';
+import { runInNewContext } from 'node:vm';
 import WebSocket from 'ws';
 import { atomicPrivate } from './settings.mjs';
 import { errorDetails, describeError } from './diagnostics.mjs';
 
 const quotaGuard = /(?<![\w$])([A-Za-z_$][\w$]*)="local"===([A-Za-z_$][\w$]*)&&([A-Za-z_$][\w$]*)\|\|\(0,([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)/g;
-const quotaAssetRevision = 4;
+const quotaAssetRevision = 5;
 const escaped = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function scopeContextWindow(source, key) {
+  if (!source.includes('"tokenUsageInfo"')) return { text: source, count: 0 };
+  const identifier = '[A-Za-z_$][\\w$]*';
+  const atoms = new RegExp('(' + identifier + ')=\\(0,' + identifier + '\\.tv\\)\\("tokenUsageInfo"\\)', 'g');
+  const modelSelector = new RegExp('(' + identifier + ')=\\(0,(' + identifier + ')\\.i1\\)\\((' + identifier + ')\\.u,\\((' + identifier + '),\\{get:(' + identifier + ')\\}\\)=>\\5\\(' + identifier + ',\\4\\)\\?\\.model\\?\\?null\\)', 'g');
+  let text = source, count = 0;
+  for (const atom of [...source.matchAll(atoms)].reverse()) {
+    const before = source.slice(Math.max(0, atom.index - 2400), atom.index);
+    const model = [...before.matchAll(modelSelector)].at(-1);
+    if (!model || before.slice(model.index + model[0].length).includes(';')) continue;
+    const [, selected, hooks, scope, thread, get] = model;
+    const read = get + '(' + atom[1] + ',{hostId:' + get + '(';
+    const prefix = ',(' + identifier + ')=\\(0,' + escaped(hooks) + '\\.i1\\)\\(' + escaped(scope) + '\\.u,\\(' + escaped(thread) + ',\\{get:' + escaped(get) + '\\}\\)=>';
+    const original = new RegExp('^' + prefix + 'null==' + escaped(thread) + '\\?null:' + escaped(read) + '(' + identifier + ')\\.qX,' + escaped(thread) + '\\),threadId:' + escaped(thread) + '\\}\\)\\)');
+    const offset = atom.index + atom[0].length, match = source.slice(offset).match(original);
+    if (!match) continue;
+    const host = get + '(' + match[2] + '.qX,' + thread + ')';
+    const readUsage = get + '(' + atom[1] + ',{hostId:' + host + ',threadId:' + thread + '})';
+    const body = [
+      '{if(null==' + thread + ')return null;',
+      'const __chatgptApiUsage=' + readUsage + ';',
+      'const __chatgptApiWindow="local"===' + host + '?globalThis[' + JSON.stringify(key) + ']?.contextWindows?.[' + get + '(' + selected + ',' + thread + ')]:null;',
+      'return __chatgptApiUsage&&Number.isFinite(__chatgptApiWindow)&&__chatgptApiWindow>0&&__chatgptApiUsage.modelContextWindow!==__chatgptApiWindow',
+      '?{...__chatgptApiUsage,modelContextWindow:__chatgptApiWindow}:__chatgptApiUsage})',
+    ].join('');
+    const head = match[0].slice(0, match[0].indexOf('=>') + 2);
+    text = text.slice(0, offset) + head + body + text.slice(offset + match[0].length);
+    count++;
+  }
+  return { text, count };
+}
 function scopeComposerSubmission(source, key) {
   if (!source.includes('activeCollaborationMode:') && !source.includes('n("eLmE")')) return { text: source, count: 0, legacyCount: 0 };
   const identifier = '[A-Za-z_$][\\w$]*';
@@ -74,8 +106,8 @@ function scopeComposerSubmission(source, key) {
   return { text, count, legacyCount };
 }
 export function scopeNativeQuota(source, key) {
-  if (!source.includes('sendBlocked:') && !source.includes('serviceTierAccess:') && !source.includes('submitDisabled:') && !source.includes('submitDisabledReasons:')) {
-    return { text: source, count: 0, quotaCount: 0, fastCount: 0, submitCount: 0, legacySubmitCount: 0 };
+  if (!source.includes('sendBlocked:') && !source.includes('serviceTierAccess:') && !source.includes('submitDisabled:') && !source.includes('submitDisabledReasons:') && !source.includes('"tokenUsageInfo"')) {
+    return { text: source, count: 0, quotaCount: 0, fastCount: 0, submitCount: 0, legacySubmitCount: 0, contextCount: 0 };
   }
   let quotaCount = 0, fastCount = 0;
   let text = source.replace(quotaGuard, (match, output, host, _blocked, _module, _method, _limits, model, offset) => {
@@ -94,7 +126,8 @@ export function scopeNativeQuota(source, key) {
     return output + '=(' + match.slice(output.length + 1) + '||("local"===' + host + '&&globalThis[' + JSON.stringify(key) + ']?.models?.size>0))';
   });
   const submission = scopeComposerSubmission(text, key);
-  return { text: submission.text, count: quotaCount + fastCount + submission.count, quotaCount, fastCount, submitCount: submission.count, legacySubmitCount: submission.legacyCount };
+  const context = scopeContextWindow(submission.text, key);
+  return { text: context.text, count: quotaCount + fastCount + submission.count + context.count, quotaCount, fastCount, submitCount: submission.count, legacySubmitCount: submission.legacyCount, contextCount: context.count };
 }
 function readAsset(fd, entry, buffer = Buffer.allocUnsafe(entry.size)) {
   const bytes = buffer.subarray(0, entry.size);
@@ -103,7 +136,10 @@ function readAsset(fd, entry, buffer = Buffer.allocUnsafe(entry.size)) {
 }
 
 function readAssetSources(fd, entries) {
-  return entries.map(entry => ({ ...entry, source: readAsset(fd, entry).toString() }));
+  return entries.map(entry => {
+    const source = readAsset(fd, entry).toString();
+    return { ...entry, source: entry.factory ? 'export const __webpack_modules__={' + source + '};' : source };
+  });
 }
 
 export function nativeQuotaAssets(archive, cacheFile = '', includeSource = true) {
@@ -137,11 +173,26 @@ export function nativeQuotaAssets(archive, cacheFile = '', includeSource = true)
         const fast = contents.includes('serviceTierAccess:') && contents.includes('authMethod==="amazonBedrock"');
         const composer = (contents.includes('submitDisabledReasons:') || contents.includes('submitDisabled:'))
           && (contents.includes('"reserve-limit"') || contents.includes('n("eLmE")'));
-        if (!quota && !fast && !composer) continue;
+        const context = contents.includes('"tokenUsageInfo"');
+        if (!quota && !fast && !composer && !context) continue;
         const source = contents.toString(), adapted = scopeNativeQuota(source, 'quota_probe');
         if (adapted.count || adapted.legacySubmitCount) {
-          entries.push({ ...location, count: adapted.count, submitCount: adapted.submitCount,
-            legacySubmitCount: adapted.legacySubmitCount, supportedFormat: source.includes('export const __webpack_modules__=') });
+          const supportedFormat = source.includes('export const __webpack_modules__=');
+          if (adapted.contextCount && supportedFormat) {
+            // The context selector lives in a large shared chunk. Register its
+            // factories without running them, and retain only matching ranges.
+            const definitions = source.replaceAll('export const ', 'const ');
+            const modules = runInNewContext(definitions + '\n__webpack_modules__', Object.create(null), { timeout: 1000 });
+            for (const factory of Object.values(modules)) {
+              const text = Function.prototype.toString.call(factory), scoped = scopeNativeQuota(text, 'quota_probe');
+              if (!scoped.count && !scoped.legacySubmitCount) continue;
+              const bytes = Buffer.from(text), offset = contents.indexOf(bytes);
+              if (offset < 0) throw new Error('Native module source range is unavailable.');
+              entries.push({ ...location, offset: location.offset + offset, size: bytes.length, factory: true,
+                count: scoped.count, submitCount: scoped.submitCount, legacySubmitCount: scoped.legacySubmitCount, supportedFormat });
+            }
+          } else entries.push({ ...location, count: adapted.count, submitCount: adapted.submitCount,
+            legacySubmitCount: adapted.legacySubmitCount, supportedFormat });
         }
       }
     }
@@ -155,7 +206,7 @@ export function gatewayQuotaModels(catalog, mode = 'mixed') {
   const official = new Set(mode === 'gateway' ? [] : (catalog.official || []).map(model => model.slug));
   return (catalog.gatewayIds || []).filter(model => !official.has(model));
 }
-export function quotaBootstrap(assets, models, key, binding) {
+export function quotaBootstrap(assets, models, key, binding, contextWindows = {}) {
   const modules = assets.map(asset => {
     const adapted = scopeNativeQuota(asset.source, key);
     const source = adapted.text.replace('export const __rspack_esm_ids=', 'const __rspack_esm_ids=')
@@ -171,7 +222,7 @@ export function quotaBootstrap(assets, models, key, binding) {
       '}catch(error){failed(error,asset)}}';
   }).join('\n');
   return '(()=>{if(typeof location!=="undefined"&&(location.protocol!=="app:"||location.host!=="-"||self!==top))return;const key=' + JSON.stringify(key) + ';if(globalThis[key])return;' +
-    'const state=globalThis[key]={models:new Set(' + JSON.stringify(models) + '),pending:' + assets.length + ',installed:0,error:null};' +
+    'const state=globalThis[key]={models:new Set(' + JSON.stringify(models) + '),contextWindows:' + JSON.stringify(contextWindows) + ',pending:' + assets.length + ',installed:0,error:null};' +
     'const notify=(initial=false)=>{const fn=globalThis[' + JSON.stringify(binding) + '];if(typeof fn==="function")fn(JSON.stringify({pending:state.pending,installed:state.installed,error:state.error,failedAsset:state.failedAsset,initial}))};' +
     'const failed=(error,asset)=>{if(!state.error){state.error=String(error);state.failedAsset=asset}state.pending--;notify()};notify(true);' +
     modules + '\n})()';
@@ -269,7 +320,7 @@ function showQuotaWarning() {
   next();
 }
 
-async function installQuota({ child, port, models, cache, archive, assets, timeoutMs, status, report }) {
+async function installQuota({ child, port, models, contexts, cache, archive, assets, timeoutMs, status, report }) {
   const disconnected = new AbortController(), { signal } = disconnected;
   const clientExited = () => disconnected.abort(new Error('Native application exited.'));
   child.once('exit', clientExited);
@@ -299,8 +350,9 @@ async function installQuota({ child, port, models, cache, archive, assets, timeo
     pipe = nativePipe(child, socket, timeoutMs, disconnected);
     const sessions = new Set(), key = '__chatgpt_api_quota_' + crypto.randomBytes(8).toString('hex'), binding = key + '_notify';
     let latest = models();
+    let latestContexts = contexts(latest);
     const writeModels = (id, ids) => pipe.send('Runtime.evaluate', {
-      expression: 'if(globalThis[' + JSON.stringify(key) + '])globalThis[' + JSON.stringify(key) + '].models=new Set(' + JSON.stringify(ids) + ')',
+      expression: '{const state=globalThis[' + JSON.stringify(key) + '];if(state){state.models=new Set(' + JSON.stringify(ids) + ');state.contextWindows=' + JSON.stringify(latestContexts) + '}}',
     }, id);
     const seeds = new Map();
     let resolveReady;
@@ -347,7 +399,7 @@ async function installQuota({ child, port, models, cache, archive, assets, timeo
           // this document, then let the CDP write release its temporary script.
           const fd = fs.openSync(archive, 'r');
           let source;
-          try { source = quotaBootstrap(readAssetSources(fd, assets), ids, key, binding); }
+          try { source = quotaBootstrap(readAssetSources(fd, assets), ids, key, binding, latestContexts); }
           finally { fs.closeSync(fd); }
           return pipe.send('Page.addScriptToEvaluateOnNewDocument', { source, runImmediately: true }, id);
         })
@@ -362,9 +414,10 @@ async function installQuota({ child, port, models, cache, archive, assets, timeo
       if (name && String(name) !== path.basename(cache)) return;
       clearTimeout(refresh);
       refresh = setTimeout(() => {
-        let ids; try { ids = models(); } catch { return; }
-        if (ids.length === latest.length && ids.every((id, index) => id === latest[index])) return;
+        let ids, windows; try { ids = models(); windows = contexts(ids); } catch { return; }
+        if (ids.length === latest.length && ids.every((id, index) => id === latest[index]) && JSON.stringify(windows) === JSON.stringify(latestContexts)) return;
         latest = ids;
+        latestContexts = windows;
         for (const session of sessions) writeModels(session, ids).catch(error => failed(error, session));
       }, 100);
     });
@@ -406,6 +459,14 @@ export async function startQuotaCompatibleClient({ executable, archive, root, ho
   let routeMode = 'mixed';
   try { routeMode = JSON.parse(fs.readFileSync(path.join(root, 'data/state/route-state.json'), 'utf8')).mode; } catch {}
   const models = () => gatewayQuotaModels(JSON.parse(fs.readFileSync(cache, 'utf8')), routeMode);
+  const contexts = ids => {
+    try {
+      const allowed = new Set(ids);
+      const catalog = JSON.parse(fs.readFileSync(path.join(root, 'data/cache/models-smr.json'), 'utf8')).models;
+      return Object.fromEntries(catalog.filter(model => allowed.has(model.slug) && model.context_window > 0)
+        .map(model => [model.slug, Math.floor(model.context_window * (model.effective_context_window_percent ?? 95) / 100)]));
+    } catch { return {}; }
+  };
   let assets, port, setupError;
   report();
   try {
@@ -447,7 +508,7 @@ export async function startQuotaCompatibleClient({ executable, archive, root, ho
     report();
   } else {
     status.phase = 'connecting'; report();
-    void installQuota({ child, port, models, cache, archive, assets, timeoutMs: startupTimeoutMs, status, report });
+    void installQuota({ child, port, models, contexts, cache, archive, assets, timeoutMs: startupTimeoutMs, status, report });
   }
   return child;
 }

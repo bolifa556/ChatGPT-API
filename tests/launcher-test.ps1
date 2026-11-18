@@ -217,6 +217,15 @@ Assert ((Read-LauncherState $fixture).lastApiOnlyModel -eq 'Other/model') 'API-o
 Apply-LauncherConfig $fixture $config 'gateway' 'http://127.0.0.1:8102/v1' 'https://example.invalid/v1' 'apionly'
 Assert ((Get-RootString ([IO.File]::ReadAllText($config)) 'model') -eq 'Other/model') 'API-only did not restore its independent model preference.'
 Restore-LauncherConfig $fixture $config
+Write-Utf8File $catalog '{"models":[{"slug":"Example/model"}]}'
+Apply-LauncherConfig $fixture $config 'gateway' 'http://127.0.0.1:8102/v1' '' 'apionly'
+Assert ((Get-RootString ([IO.File]::ReadAllText($config)) 'model') -eq 'Example/model') 'Expected a temporary available model.'
+Restore-LauncherConfig $fixture $config
+Assert ((Read-LauncherState $fixture).lastApiOnlyModel -eq 'Other/model') 'A temporary fallback replaced the remembered selection.'
+Write-Utf8File $catalog '{"models":[{"slug":"Example/model"},{"slug":"Other/model"}]}'
+Apply-LauncherConfig $fixture $config 'gateway' 'http://127.0.0.1:8102/v1' '' 'apionly'
+Assert ((Get-RootString ([IO.File]::ReadAllText($config)) 'model') -eq 'Other/model') 'The remembered selection was not reused when it returned.'
+Restore-LauncherConfig $fixture $config
 Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes($auth)) -ceq [Convert]::ToBase64String($authBefore)) 'Entry switching changed saved official credentials.'
 Write-Utf8File (Get-LauncherDataPath $fixture 'route-state.json') '{"entryMode":"apionly","mode":"gateway"}'
 $inactiveSelection = Get-LauncherRouterSelection $fixture

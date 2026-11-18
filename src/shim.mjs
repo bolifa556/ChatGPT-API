@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
 import { HttpsProxyAgent } from 'https-proxy-agent';
-import { normalizeGptHistory, normalizeOfficialHistory, isGptModel, ResponseOutput } from './history-compat.mjs';
+import { normalizeGptHistory, normalizeOfficialHistory, isGptModel, ResponseOutput, responseMessagePhases, ResponsePhases } from './history-compat.mjs';
 import { NonGptAdapter, NonGptEvents, validateNonGptCompaction } from './non-gpt-compat.mjs';
 import { usesChat, chatRequest, chatResponse, ChatEvents, chatEndpointUnavailable } from './chat-compat.mjs';
 import { decodedStream, ssePackets, encodeSse, isSseControl } from './sse.mjs';
@@ -361,6 +361,7 @@ function parseRequest(text) {
 async function* convertedEvents(stream, conversion, images) {
   const events = conversion.adapter ? new NonGptEvents(conversion.adapter) : null;
   const chat = conversion.chat ? new ChatEvents(conversion.model) : null;
+  const phases = new ResponsePhases();
   let terminal = false;
   // Responses events can contain base64 images. Match the buffered Responses
   // body limit; Chat events and accumulated tool arguments keep their own limit.
@@ -371,14 +372,18 @@ async function* convertedEvents(stream, conversion, images) {
     const data = !chat && !packet.data.type && packet.event ? { ...packet.data, type: packet.event } : packet.data;
     for (const event of chat ? chat.convert(data) : [data]) {
       if (['response.completed','response.incomplete','response.failed','error'].includes(event.type)) terminal = true;
-      for (const converted of events ? events.convert(event) : [event]) yield* images ? images.convert(converted) : [converted];
+      for (const converted of events ? events.convert(event) : [event]) {
+        for (const phased of phases.convert(converted)) yield* images ? images.convert(phased) : [phased];
+      }
     }
     // A Responses terminal event is complete even if the peer keeps HTTP open.
     // Chat completion is emitted by finish() after its usage/[DONE] packets.
     if (terminal) break;
   }
   if (chat) for (const event of chat.finish()) {
-    for (const converted of events.convert(event)) yield* images ? images.convert(converted) : [converted];
+    for (const converted of events.convert(event)) {
+      for (const phased of phases.convert(converted)) yield* images ? images.convert(phased) : [phased];
+    }
   }
   if (events) events.finish();
   else if (!terminal) throw Object.assign(new Error('Upstream stream ended before a terminal response event.'), { status: 502, code: 'incomplete_upstream_response' });
@@ -562,7 +567,8 @@ async function handleHttp(req, res) {
         chunks.length = 0;
         const converted = conversion.chat ? chatResponse(data, gateway.model) : data;
         const native = conversion.adapter ? conversion.adapter.response(converted) : converted;
-        const response = images ? images.response(native) : native;
+        const phased = gateway ? responseMessagePhases(native) : native;
+        const response = images ? images.response(phased) : phased;
         if (gateway && gateway.model !== model && response.model === gateway.model) response.model = model;
         res.writeHead(upstream.statusCode, outgoing);
         firstByteMs ??= Date.now() - started;

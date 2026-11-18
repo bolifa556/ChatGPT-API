@@ -45,6 +45,13 @@ try {
   assert(!/^model_context_window\s*=/m.test(config)); assert(!/^model_auto_compact_token_limit\s*=/m.test(config));
   atomic(ctx.config, config.replace('zh-CN', 'en-US'));
   restoreConfig(ctx); assert.equal(fs.readFileSync(ctx.config, 'utf8').trimEnd(), baseline.replace('zh-CN', 'en-US').trimEnd());
+  const modelCache = path.join(ctx.data, 'cache/models-gateway.json');
+  atomic(modelCache, { models: [{ slug: 'GPT/model' }] });
+  assert.equal(applyConfig(ctx).model, 'GPT/model');
+  restoreConfig(ctx);
+  atomic(modelCache, { models: [{ slug: 'GPT/model' }, { slug: 'Vendor/model' }] });
+  assert.equal(applyConfig(ctx).model, 'Vendor/model', 'Temporary catalog omissions do not erase the previous model');
+  restoreConfig(ctx);
   assert.equal(authHash(), authBefore);
   assert.equal(settingsChecked({ BASE_URL: 'http://example.invalid/', API_KEY: key }).BASE_URL, 'http://example.invalid/v1');
   assert.equal(parseSystemProxy('<dictionary> {\n HTTPSEnable : 1\n HTTPSProxy : 127.0.0.1\n HTTPSPort : 7890\n}'), 'http://127.0.0.1:7890');

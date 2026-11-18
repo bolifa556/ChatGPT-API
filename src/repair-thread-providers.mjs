@@ -345,9 +345,9 @@ export async function repairThreadProviders({ home, root, provider = 'chatgpt_ap
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   const [command, home, root, flags] = process.argv.slice(2);
   try {
-    if (command === 'begin' && flags === '--desktop') {
-      const { overlayDesktopState } = await import('./desktop-state.mjs');
-      overlayDesktopState({ home, root });
+    if (command === 'begin' && ['--desktop', '--desktop-repair'].includes(flags)) {
+      const { overlayDesktopState, recoverCurrentDesktopState } = await import('./desktop-state.mjs');
+      (flags === '--desktop' ? overlayDesktopState : recoverCurrentDesktopState)({ home, root });
     }
     const result = command === 'restore' ? await restoreThreadProviders({ home, root })
       : command === 'begin' ? await repairThreadProviders({ home, root }) : (() => { throw new Error('Expected begin/restore, CODEX_HOME and adapter root.'); })();

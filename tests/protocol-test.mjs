@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { ResponseOutput } from '../src/history-compat.mjs';
+import { ResponseOutput, portableReasoning, ResponsePhases, responseMessagePhases } from '../src/history-compat.mjs';
 import { NonGptAdapter, NonGptEvents } from '../src/non-gpt-compat.mjs';
 import { usesChat, chatRequest, chatResponse, ChatEvents } from '../src/chat-compat.mjs';
 
@@ -44,9 +44,34 @@ assert.equal(aliyun.messages[0].content, 'Existing instructions\n\n<model_switch
 assert.equal(aliyun.messages.filter(message => message.role === 'system').length, 1);
 assert.equal(chatRequest({ model, input: [{ role: 'user', content: [{ type: 'input_image', image_url: 'data:image/png;base64,fixture', detail: 'high' }] }] }).messages[0].content[0].image_url.url, 'data:image/png;base64,fixture');
 const switched = new NonGptAdapter({ ...original, model: '阿里云订阅/glm-5.3' }, { preserveReasoning: true }).request();
-assert(!switched.input.some(item => item.type === 'reasoning'));
+assert.deepEqual(switched.input.find(item => item.type === 'reasoning'), { type: 'reasoning', summary: thought.summary });
 assert(new NonGptAdapter({ ...original, model }, { preserveReasoning: true }).request().input.some(item => item.type === 'reasoning'));
 checks.push('Same-model reasoning is preserved exactly; cross-model compatibility remains distinct; immutable roles, native updates, tool schema, content and structured output map to Chat');
+
+const oldTitles = { type: 'reasoning', id: 'rs_official', encrypted_content: 'source-private', summary: [
+  { type: 'summary_text', text: '**Checking the latest skill root**' },
+  { type: 'summary_text', text: '**Checking finalization signature**' }
+] };
+const history = { model: 'Qoder/qwen4-max', input: [
+  { role: 'user', content: 'Earlier request' },
+  { type: 'message', role: 'assistant', phase: 'final_answer', content: 'Earlier answer' },
+  oldTitles, { type: 'message', role: 'assistant', phase: 'commentary', content: 'Reading the requested file' },
+  { type: 'message', role: 'assistant', phase: 'final_answer', content: 'Finished' }
+] };
+const historyBefore = structuredClone(history);
+for (const releaseOriginal of [false, true]) {
+  const wire = new NonGptAdapter(history, { preserveReasoning: true }).request({ releaseOriginal });
+  assert.deepEqual(wire.input[2], portableReasoning(oldTitles));
+  const messages = chatRequest(wire).messages;
+  assert.equal(messages[1].content, 'Earlier answer');
+  assert.equal(messages[1].reasoning_content, undefined);
+  assert.equal(messages[2].reasoning_content, oldTitles.summary.map(part => part.text).join('\n\n'));
+  assert.equal(messages[2].content, 'Reading the requested file');
+  assert.equal(messages[3].content, 'Finished');
+  assert(!messages.some(message => String(message.content).includes('**Checking')));
+  assert.deepEqual(history, historyBefore);
+}
+checks.push('Foreign reasoning retains its channel and separate summary blocks; Chat reasoning attaches to the following assistant message and consecutive replies retain their boundaries');
 
 for (const value of ['', raw]) {
   const data = new NonGptAdapter({ tools, input: [{ type: 'custom_tool_call', namespace: 'functions', name: 'exec', call_id: 'c', input: value }] }).request();
@@ -173,4 +198,84 @@ const finalOnly = new ResponseOutput();
 finalOnly.observe({ type: 'response.output_item.done', output_index: 0, item: first });
 assert.deepEqual(finalOnly.finish([second]).output, [second]);
 checks.push('Lite output collection preserves native item ordering, phase and encryption, deduplicates terminal output and detects unfinished items');
+
+const plainMessage = { id: 'msg_phase', type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'Original text', annotations: [] }] };
+const appCall = { id: 'fc_phase', type: 'function_call', call_id: 'call_phase', name: 'sum', arguments: '{"a":1,"b":2}', status: 'completed' };
+for (const tool of [false, true]) for (const lite of [false, true]) {
+  const phases = new ResponsePhases(), results = [];
+  results.push(...phases.convert({ type: 'response.output_item.added', sequence_number: 0, output_index: 0, item: { ...plainMessage, status: 'in_progress' } }));
+  const delta = { type: 'response.output_text.delta', sequence_number: 1, output_index: 0, item_id: plainMessage.id, content_index: 0, delta: 'Original text' };
+  assert.deepEqual(phases.convert(delta), [delta], 'Text waited for the final phase');
+  assert.deepEqual(phases.convert({ type: 'response.output_item.done', sequence_number: 2, output_index: 0, item: plainMessage }), []);
+  results.push(...phases.convert({ type: 'response.output_item.added', sequence_number: 3, output_index: 1, item: tool ? appCall : { type: 'reasoning', id: 'rs_late', summary: [] } }));
+  const terminal = { id: 'resp_phase', status: 'completed', output: lite ? [] : tool ? [plainMessage, appCall] : [plainMessage] };
+  results.push(...phases.convert({ type: 'response.completed', sequence_number: 4, response: terminal }));
+  const done = results.find(event => event.type === 'response.output_item.done');
+  assert.equal(done.item.phase, tool ? 'commentary' : 'final_answer');
+  assert.deepEqual(done.item.content, plainMessage.content);
+  const sequences = results.map(event => event.sequence_number);
+  assert(sequences.every((value, index) => index === 0 || value > sequences[index - 1]));
+  if (!lite) assert.equal(results.at(-1).response.output[0].phase, done.item.phase);
+  assert.equal(Object.hasOwn(results.at(-1).response, 'usage'), false);
+}
+const nativePhases = { status: 'completed', output: [{ ...plainMessage, phase: 'commentary' }, appCall] };
+assert.equal(responseMessagePhases(nativePhases), nativePhases);
+assert.equal(new ResponsePhases().convert({ type: 'response.output_item.done', output_index: 0, item: nativePhases.output[0] })[0].item, nativePhases.output[0]);
+const phaseFailure = new ResponsePhases();
+phaseFailure.convert({ type: 'response.output_item.done', output_index: 0, item: plainMessage });
+const failed = phaseFailure.convert({ type: 'error', error: { code: 'source_error', message: 'Original error' } });
+assert.equal(failed[0].item.phase, 'commentary');
+assert.equal(failed.at(-1).error.code, 'source_error');
+const latePhase = new ResponsePhases();
+latePhase.convert({ type: 'response.output_item.done', output_index: 0, item: plainMessage });
+const declared = latePhase.convert({ type: 'response.completed', response: { status: 'completed', output: [{ ...plainMessage, phase: 'commentary' }] } });
+assert.equal(declared[0].item.phase, 'commentary');
+assert.equal(declared.at(-1).response.output[0].phase, 'commentary');
+const ordered = new ResponsePhases();
+ordered.convert({type:'response.output_item.done',output_index:0,item:plainMessage});
+const nextMessage = ordered.convert({type:'response.output_item.added',output_index:1,item:{...plainMessage,id:'msg_next',phase:'final_answer'}});
+assert.deepEqual(nextMessage.map(e=>[e.type,e.item.phase]),[['response.output_item.done','commentary'],['response.output_item.added','final_answer']]);
+assert.equal(plainMessage.phase, undefined);
+assert.equal(responseMessagePhases({ status: 'completed', output: [{ type: 'web_search_call' }, plainMessage] }).output[1].phase, 'final_answer');
+assert.equal(chatResponse({ id: 'explicit_phase', choices: [{ finish_reason: 'stop', message: { phase: 'commentary', content: 'Original commentary' } }] }, model).output[0].phase, 'commentary');
+checks.push('Missing gateway phases resolve from tool and stop events across JSON, SSE and Lite; text streams immediately, explicit phases and usage remain intact, and delayed done events retain monotonic sequence numbers');
+// Desktop consumers complete items from item events, including when a gateway
+// sends text only in response.output. Never repeat a previously finished item.
+for (const already of ['none','added','done']) {
+  const format = new NonGptEvents(new NonGptAdapter({ model })), emitted = [];
+  if (already !== 'none') emitted.push(...format.convert({ type: 'response.output_item.added', output_index: 0, item: { ...plainMessage, status: 'in_progress', content: [] } }));
+  if (already === 'done') emitted.push(...format.convert({ type: 'response.output_item.done', output_index: 0, item: plainMessage }));
+  emitted.push(...format.convert({ type: 'response.completed', response: { status: 'completed', output: [plainMessage] } }));
+  assert.equal(emitted.filter(e => e.type === 'response.output_item.added').length, 1);
+  const done = emitted.filter(e => e.type === 'response.output_item.done');
+  assert.equal(done.length, 1); assert.deepEqual(done[0].item, plainMessage);
+  assert.deepEqual(emitted.at(-1).response.output, [plainMessage]);
+}
+for (const partial of ['{"input":"unfinished', JSON.stringify({ input: 'complete-looking but truncated' })]) {
+  const wire = new NonGptEvents(adapter), emitted = [];
+  const tool = { type: 'function_call', id: 'fc_unfinished', call_id: 'c', name, status: 'incomplete', arguments: partial };
+  for (const e of [
+    { type:'response.output_item.added', output_index:0, item:{ ...tool, arguments:'', status:'in_progress' } },
+    { type:'response.function_call_arguments.delta', output_index:0, item_id:tool.id, delta:partial },
+    { type:'response.function_call_arguments.done', output_index:0, item_id:tool.id, arguments:partial },
+    { type:'response.output_item.done', output_index:0, item:tool },
+    { type:'response.incomplete', response:{ status:'incomplete', incomplete_details:{reason:'max_output_tokens'}, output:[tool] } },
+  ]) emitted.push(...wire.convert(e));
+  assert(!emitted.some(e=>['response.custom_tool_call_input.done','response.output_item.done'].includes(e.type)));
+  assert.deepEqual(emitted.at(-1).response.output, [tool]);
+  assert.equal(emitted.at(-1).response.incomplete_details.reason, 'max_output_tokens');
+}
+const blocks = new ChatEvents(model), visible = [];
+for (const delta of [{ reasoning_content:'First thought' }, { content:'Progress' }, { reasoning_content:'Second thought' },
+  { content:[{type:'text',text:'Answer '},{type:'text',text:'two'},{type:'refusal',refusal:'Unavailable'}] }]) {
+  visible.push(...blocks.convert({id:'chat_blocks',choices:[{delta}]}));
+}
+blocks.convert({id:'chat_blocks',choices:[{delta:{},finish_reason:'stop'}]}); visible.push(...blocks.finish());
+assert.deepEqual(visible.filter(e=>e.type==='response.output_item.done').map(e=>[e.item.type,e.item.phase]),
+  [['reasoning',undefined],['message','commentary'],['reasoning',undefined],['message','final_answer']]);
+const finalBlock = visible.at(-1).response.output.at(-1);
+assert.deepEqual(finalBlock.content.map(p=>[p.type,p.text??p.refusal]),[['output_text','Answer '],['output_text','two'],['refusal','Unavailable']]);
+assert.deepEqual(visible.filter(e=>e.type==='response.content_part.done'&&e.output_index===3).map(e=>e.content_index),[0,1,2]);
+assert(visible.findIndex(e=>e.type==='response.output_item.done') < visible.findIndex(e=>e.item?.type==='message'));
+checks.push('Terminal-only Responses text displays once; unfinished Responses tools never run; Chat text blocks, reasoning transitions and refusal events keep their original order');
 console.log(JSON.stringify({ passed: true, checks }, null, 2));

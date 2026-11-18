@@ -93,14 +93,24 @@ function events(body, url, send) {
     assert(toolOutputs.includes(phase.marker),'Actual terminal tool result not present in native continuation');
     if(phase.mcp)assert(toolOutputs.includes('MCP_FIXTURE_ECHO'),'Actual MCP result not present in native continuation');
     if(phase.question)assert(toolOutputs.includes('NATIVE_ANSWER'),'Native question answer not present in continuation');
-    item={type:'message',id:'msg_'+serial,role:'assistant',phase:'final_answer',status:'completed',content:[{type:'output_text',text:'NATIVE_OK '+phase.marker,annotations:[]}]};
+    item={type:'message',id:'msg_'+serial,role:'assistant',...(body.model===official.slug?{phase:'final_answer'}:{}),status:'completed',content:[{type:'output_text',text:'NATIVE_OK '+phase.marker,annotations:[]}]};
   }
   // Include a gateway-owned reasoning item to exercise persisted mixed history.
+  if (phase.terminalOnly && item.type === 'message' && !url.endsWith('/chat/completions')) {
+    emit({type:'response.completed',response:{...base,status:'completed',output:[item],usage:{input_tokens:200,output_tokens:20,total_tokens:220}}});
+    return;
+  }
   if(body.model!==official.slug){
     const reasoning={type:'reasoning',id:'msg_thought_'+serial,summary:[{type:'summary_text',text:'  SAME_ORIGINAL_THOUGHT\n'}]};
     emit({type:'response.output_item.added',output_index:0,item:reasoning});emit({type:'response.output_item.done',output_index:0,item:reasoning});
   }
-  const index=body.model===official.slug?0:1;
+  let index=body.model===official.slug?0:1;
+  if(body.model!==official.slug&&item.type!=='message'){
+    const progress={type:'message',id:'msg_progress_'+serial,role:'assistant',status:'completed',content:[{type:'output_text',text:'NATIVE_WORKING '+phase.marker,annotations:[]}]};
+    emit({type:'response.output_item.added',output_index:index,item:{...progress,status:'in_progress'}});
+    emit({type:'response.output_item.done',output_index:index,item:progress});
+    index++;
+  }
   emit({type:'response.output_item.added',output_index:index,item:{...item,status:'in_progress'}});
   emit({type:'response.output_item.done',output_index:index,item});
   emit({type:'response.completed',response:{...base,status:'completed',output:[],usage:{input_tokens:200,output_tokens:20,total_tokens:220}}});
@@ -126,7 +136,7 @@ const server=http.createServer(async(req,res)=>{
       const items=[];events(body,req.url,e=>{if(e.type==='response.output_item.done')items.push(e.item);});
       if(phase.interrupt)return;
       const call=items.find(i=>i.type==='function_call'),message=items.find(i=>i.type==='message');
-      const chunk={id:'chat_'+serial,created:1,model:body.model,choices:[{index:0,delta:{reasoning_content:'  SAME_ORIGINAL_THOUGHT\n',...(call?{tool_calls:[{index:0,id:call.call_id,type:'function',function:{name:call.name,arguments:call.arguments}}]}:{content:message.content[0].text})}}]};
+      const chunk={id:'chat_'+serial,created:1,model:body.model,choices:[{index:0,delta:{reasoning_content:'  SAME_ORIGINAL_THOUGHT\n',...(message?{content:message.content[0].text}:{}),...(call?{tool_calls:[{index:0,id:call.call_id,type:'function',function:{name:call.name,arguments:call.arguments}}]}:{})}}]};
       res.write('data: '+JSON.stringify(chunk)+'\n\n');res.write('data: '+JSON.stringify({...chunk,choices:[{index:0,delta:{},finish_reason:call?'tool_calls':'stop'}]})+'\n\n');
     }else events(body,req.url,e=>res.write('data: '+JSON.stringify(e)+'\n\n'));
     if(!phase.interrupt)res.end();
@@ -144,6 +154,7 @@ async function startClient(){
   pending=new Map();notifications=[];rpcId=0;
   const cli=process.env.CODEX_CLI_PATH||path.join(process.env.LOCALAPPDATA,'OpenAI/Codex/bin/faa963e871dd422c/codex.exe');
   client=spawn(cli,['app-server','--stdio'],{cwd,env:{...process.env,CODEX_HOME:home,OPENAI_API_KEY:'inert-native'},windowsHide:true,stdio:['pipe','pipe','pipe']});children.push(client);client.stderr.resume();
+  await once(client,'spawn');
   lines=readline.createInterface({input:client.stdout});lines.on('line',text=>{let v;try{v=JSON.parse(text);}catch{return;}
     if(v.id!==undefined&&!v.method){const p=pending.get(v.id);if(p){pending.delete(v.id);clearTimeout(p.timer);v.error?p.reject(Error(v.error.message)):p.resolve(v.result);}}
     else if(v.id!==undefined&&v.method==='item/tool/requestUserInput'){
@@ -165,8 +176,8 @@ async function startClient(){
 async function stopClient(){
   if(!client)return;const stopped=client;client=null;
   if(!stopped.stdin.destroyed)stopped.stdin.end();
-  await new Promise(resolve=>{if(stopped.exitCode!==null){resolve();return;}const timer=setTimeout(()=>stopped.kill(),3000);stopped.once('exit',()=>{clearTimeout(timer);resolve();});});
-  lines.close();for(const p of pending.values())clearTimeout(p.timer);pending.clear();
+  await new Promise(resolve=>{if(!stopped.pid||stopped.exitCode!==null){resolve();return;}const timer=setTimeout(()=>stopped.kill(),3000);stopped.once('exit',()=>{clearTimeout(timer);resolve();});});
+  lines?.close();for(const p of pending.values())clearTimeout(p.timer);pending.clear();
 }
 async function doTurn(threadId,model,options){
   phase={requests:0,...options};const offset=notifications.length,recordOffset=records.length;
@@ -188,6 +199,9 @@ async function doTurn(threadId,model,options){
   }
   if(!phase.interrupt && !phase.truncated){
     assert.equal(fs.readFileSync(phase.file,'utf8').trim(),phase.marker);assert(phase.requests>1,'Native tool execution did not continue the model');
+    const messages=notifications.slice(offset).filter(event=>event.method==='item/completed'&&event.params.item.type==='agentMessage').map(event=>event.params.item);
+    assert(messages.some(item=>item.text==='NATIVE_OK '+phase.marker&&item.phase==='final_answer'),'Native final reply was not classified as a final answer');
+    if(model!==official.slug)assert(messages.some(item=>item.text==='NATIVE_WORKING '+phase.marker&&item.phase==='commentary'),'Native tool progress was not classified as commentary');
     assert(notifications.slice(offset).some(n=>n.method==='item/completed'&&n.params.item.type==='commandExecution'&&n.params.item.exitCode===0),'No successful native terminal execution');
     if(phase.media){
       const media=[];const visit=value=>{if(!value||typeof value!=='object')return;if(['input_image','image_url','input_audio'].includes(value.type))media.push(value);for(const child of Object.values(value))visit(child);};
@@ -267,6 +281,7 @@ try{
         if(extended){
           row.steps.push(await doTurn(threadId,model,{marker,file,interrupt:true,steer:true}));
           row.steps.push(await doTurn(threadId,model,{marker,file,media:true,plan:true,mcp:true,question:true}));
+          if(!model.startsWith('词元计划/'))row.steps.push(await doTurn(threadId,model,{marker,file,terminalOnly:true}));
         }
         const other=models.find(id=>id!==model);
         row.steps.push(await doTurn(threadId,other,{marker,file}));

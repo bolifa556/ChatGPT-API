@@ -80,8 +80,13 @@ export function chatRequest(payload, metadata, gateway) {
   for (const item of input) {
     if (item.type === 'reasoning') {
       const blocks = item.content?.length ? item.content : item.summary || [];
-      const text = blocks.map(part => part.text || '').join('');
-      if (text) { const message = assistant(); message.reasoning_content = (message.reasoning_content || '') + text; }
+      const text = blocks.map(part => part.text || '').join('\n\n');
+      if (text) {
+        const previous = messages.at(-1);
+        if (previous?.role === 'assistant' && (previous.content !== null || previous.tool_calls)) messages.push({ role: 'assistant', content: null });
+        const message = assistant();
+        message.reasoning_content = [message.reasoning_content, text].filter(Boolean).join('\n\n');
+      }
     } else if (item.type === 'function_call') {
       const message = assistant();
       (message.tool_calls ||= []).push({ id: item.call_id, type: 'function', function: { name: item.name, arguments: item.arguments } });
@@ -103,8 +108,9 @@ export function chatRequest(payload, metadata, gateway) {
       } else throw unsupported('A Chat tool result requires its original call_id or function name.');
     } else if (item.type === 'message' || (!item.type && item.role)) {
       if (item.role === 'assistant') {
-        const message = assistant(), next = content(item.content);
-        message.content = message.content === null ? next : [...parts(message.content), ...parts(next)];
+        const previous = messages.at(-1);
+        if (previous?.role === 'assistant' && (previous.content !== null || previous.tool_calls)) messages.push({ role: 'assistant', content: null });
+        assistant().content = content(item.content);
       } else append(item.role, item.content);
     } else throw unsupported('This Chat endpoint cannot represent history item: ' + item.type);
   }
@@ -185,23 +191,50 @@ export class ChatEvents {
       ...(chunk.service_tier !== undefined ? { service_tier: copy(chunk.service_tier) } : {}) };
     return [{ type: 'response.created', response: copy(this.response) }, { type: 'response.in_progress', response: copy(this.response) }];
   }
-  text(kind, delta) {
+  text(kind, delta, newPart = false) {
     if (typeof delta !== 'string' || !delta) return [];
-    const events = [];
-    if (!this[kind]) {
-      const index = this.items.length, itemId = (kind === 'reasoning' ? 'rs_' : 'msg_') + id(this.response.id + '/' + index);
-      const item = kind === 'reasoning' ? { type: 'reasoning', id: itemId, summary: [{ type: 'summary_text', text: '' }] } :
-        { type: 'message', id: itemId, role: 'assistant', status: 'in_progress', content: [{ type: 'output_text', text: '', annotations: copy(this.annotations || []) }] };
-      this[kind] = { index, item }; this.items.push(item);
+    const thought = kind === 'reasoning', bucket = thought ? 'reasoning' : 'message';
+    const events = this.closeText(thought ? 'message' : 'reasoning', true, 'commentary');
+    if (!this[bucket]) {
+      const index = this.items.length, itemId = (thought ? 'rs_' : 'msg_') + id(this.response.id + '/' + index);
+      const item = thought ? { type: 'reasoning', id: itemId, summary: [] } :
+        { type: 'message', id: itemId, role: 'assistant', phase: this.phase ?? 'commentary', status: 'in_progress', content: [] };
+      this[bucket] = { index, item, phase: this.phase }; this.items.push(item);
       events.push({ type: 'response.output_item.added', output_index: index, item: copy(item) });
-      events.push(kind === 'reasoning' ? { type: 'response.reasoning_summary_part.added', output_index: index, item_id: itemId, summary_index: 0, part: copy(item.summary[0]) } :
-        { type: 'response.content_part.added', output_index: index, item_id: itemId, content_index: 0, part: copy(item.content[0]) });
     }
-    const { index, item } = this[kind];
-    (kind === 'reasoning' ? item.summary : item.content)[0].text += delta;
-    events.push(kind === 'reasoning' ? { type: 'response.reasoning_summary_text.delta', output_index: index, item_id: item.id, summary_index: 0, delta } :
-      { type: 'response.output_text.delta', output_index: index, item_id: item.id, content_index: 0, delta });
+    const { index, item } = this[bucket], list = thought ? item.summary : item.content;
+    const type = thought ? 'summary_text' : kind === 'refusal' ? 'refusal' : 'output_text';
+    if (newPart || list.at(-1)?.type !== type) {
+      if (list.length) events.push(...this.endPart(this[bucket]));
+      const part = type === 'refusal' ? { type, refusal: '' } : { type, text: '', ...(thought ? {} : { annotations: this.annotations || [] }) };
+      if (type === 'output_text') this.annotations = [];
+      list.push(part);
+      events.push({ type: thought ? 'response.reasoning_summary_part.added' : 'response.content_part.added', output_index: index, item_id: item.id,
+        [thought ? 'summary_index' : 'content_index']: list.length - 1, part: copy(part) });
+    }
+    list.at(-1)[type === 'refusal' ? 'refusal' : 'text'] += delta;
+    events.push({ type: 'response.' + (thought ? 'reasoning_summary_text' : type) + '.delta', output_index: index, item_id: item.id,
+      [thought ? 'summary_index' : 'content_index']: list.length - 1, delta });
     return events;
+  }
+  endPart({ index, item }) {
+    const thought = item.type === 'reasoning', list = thought ? item.summary : item.content, part = list.at(-1);
+    if (!part) return [];
+    const base = { output_index: index, item_id: item.id, [thought ? 'summary_index' : 'content_index']: list.length - 1 };
+    const key = part.type === 'refusal' ? 'refusal' : 'text';
+    return [{ ...base, type: 'response.' + (thought ? 'reasoning_summary_text' : part.type) + '.done', [key]: part[key] },
+      { ...base, type: thought ? 'response.reasoning_summary_part.done' : 'response.content_part.done', part: copy(part) }];
+  }
+  closeText(kind, complete = true, phase) {
+    const open = this[kind]; if (!open) return [];
+    const { index, item } = open;
+    if (kind === 'message') {
+      item.status = complete ? 'completed' : 'incomplete';
+      item.phase = open.phase ?? phase;
+      this.annotations = []; this.annotationKeys?.clear();
+    }
+    this[kind] = null;
+    return [...this.endPart(open), { type: 'response.output_item.done', output_index: index, item: copy(item) }];
   }
   annotate(values) {
     const events = [];
@@ -209,13 +242,15 @@ export class ChatEvents {
       const annotation = nativeAnnotation(original), key = JSON.stringify(annotation);
       this.annotationKeys ||= new Set();
       if (this.annotationKeys.has(key)) continue;
-      this.annotationKeys.add(key); (this.annotations ||= []).push(annotation);
-      if (this.message) {
+      this.annotationKeys.add(key);
+      const at = this.message?.item.content.findLastIndex(part => part.type === 'output_text') ?? -1;
+      if (at >= 0) {
         const { index, item } = this.message;
-        item.content[0].annotations.push(copy(annotation));
+        const annotations = item.content[at].annotations;
+        annotations.push(annotation);
         events.push({ type: 'response.output_text.annotation.added', output_index: index, item_id: item.id,
-          content_index: 0, annotation_index: this.annotations.length - 1, annotation: copy(annotation) });
-      }
+          content_index: at, annotation_index: annotations.length - 1, annotation: copy(annotation) });
+      } else (this.annotations ||= []).push(annotation);
     }
     return events;
   }
@@ -231,14 +266,25 @@ export class ChatEvents {
     for (const choice of chunk.choices || []) {
       if (choice.index && choice.index !== 0) throw unsupported('Multiple Chat choices cannot be represented as one Responses output.');
       const delta = choice.delta || {};
+      if (delta.phase !== undefined) {
+        if (this.message?.phase != null && this.message.phase !== delta.phase) events.push(...this.closeText('message', true, 'commentary'));
+        this.phase = delta.phase;
+        if (this.message) this.message.phase = delta.phase;
+      }
       sources.push(...searchSources(delta));
       for (const field of searchResultFields) if (delta[field] !== undefined) this.response[field] = copy(delta[field]);
       events.push(...this.text('reasoning', delta.reasoning_content ?? delta.reasoning));
-      events.push(...this.text('message', delta.content));
+      if (Array.isArray(delta.content)) {
+        for (const [position, part] of delta.content.entries()) {
+          if (['text', 'output_text'].includes(part?.type) && typeof part.text === 'string') {
+            events.push(...this.text('message', part.text, position > 0), ...this.annotate(part.annotations || []));
+          } else if (part?.type === 'refusal' && typeof part.refusal === 'string') events.push(...this.text('refusal', part.refusal, position > 0));
+          else throw Object.assign(new Error('Unsupported Chat response content block: ' + part?.type), { status: 502, code: 'unsupported_chat_response_content' });
+        }
+      } else events.push(...this.text('message', delta.content));
       events.push(...this.annotate(delta.annotations || []));
-      if (delta.refusal) {
-        this.refusal = (this.refusal || '') + delta.refusal;
-      }
+      events.push(...this.text('refusal', delta.refusal));
+      if (delta.tool_calls?.length) events.push(...this.closeText('reasoning'));
       for (const part of delta.tool_calls || []) {
         const index = part.index ?? 0;
         if (!this.calls.has(index)) this.calls.set(index, { id: '', name: '', arguments: '' });
@@ -264,31 +310,9 @@ export class ChatEvents {
     if (!this.response || !this.finishReason) throw Object.assign(new Error('Chat stream ended without a finish_reason.'), { status: 502, code: 'incomplete_upstream_response' });
     this.finished = true;
     const events = [], complete = ['stop','tool_calls'].includes(this.finishReason);
-    if (this.message && this.searchSources) {
-      events.push(...this.annotate(searchCitationAnnotations([...this.searchSources.values()], this.message.item.content[0].text)));
-    }
-    for (const kind of ['reasoning','message']) {
-      if (!this[kind]) continue;
-      const { index, item } = this[kind];
-      if (kind === 'message') item.status = complete ? 'completed' : 'incomplete';
-      const part = (kind === 'reasoning' ? item.summary : item.content)[0];
-      if (kind === 'reasoning') events.push(
-        { type: 'response.reasoning_summary_text.done', output_index: index, item_id: item.id, summary_index: 0, text: part.text },
-        { type: 'response.reasoning_summary_part.done', output_index: index, item_id: item.id, summary_index: 0, part: copy(part) });
-      else events.push(
-        { type: 'response.output_text.done', output_index: index, item_id: item.id, content_index: 0, text: part.text },
-        { type: 'response.content_part.done', output_index: index, item_id: item.id, content_index: 0, part: copy(part) });
-      events.push({ type: 'response.output_item.done', output_index: index, item: copy(item) });
-    }
-    if (this.refusal) {
-      const index = this.items.length;
-      const item = { type: 'message', id: 'msg_' + id(this.response.id + '/' + index), role: 'assistant', status: 'completed', content: [{ type: 'refusal', refusal: this.refusal }] };
-      this.items.push(item);
-      events.push({ type: 'response.output_item.added', output_index: index, item: { ...copy(item), status: 'in_progress' } },
-        { type: 'response.refusal.delta', output_index: index, item_id: item.id, content_index: 0, delta: this.refusal },
-        { type: 'response.refusal.done', output_index: index, item_id: item.id, content_index: 0, refusal: this.refusal },
-        { type: 'response.output_item.done', output_index: index, item: copy(item) });
-    }
+    const lastText = this.message?.item.content.findLast(part => part.type === 'output_text');
+    if (lastText && this.searchSources) events.push(...this.annotate(searchCitationAnnotations([...this.searchSources.values()], lastText.text)));
+    events.push(...this.closeText('reasoning'), ...this.closeText('message', complete, this.calls.size ? 'commentary' : 'final_answer'));
     for (const [, call] of [...this.calls].sort(([a], [b]) => a - b)) {
       if (!call.id || !call.name) throw Object.assign(new Error('Chat tool call is missing its id or name.'), { status: 502, code: 'invalid_upstream_tool_call' });
       const index = this.items.length;

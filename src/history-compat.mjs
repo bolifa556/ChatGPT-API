@@ -27,9 +27,14 @@ export function readableReasoning(item) {
   for (const key of ['text', 'reasoning']) if (typeof item[key] === 'string') texts.push(item[key]);
   return texts.join('');
 }
-export function reasoningAsContext(item) {
-  const text = readableReasoning(item);
-  return text ? { type: 'message', role: 'assistant', content: [{ type: 'output_text', text, annotations: [] }] } : null;
+export function portableReasoning(item) {
+  const summary = [];
+  for (const block of [...(item.summary || []), ...(item.content || [])]) {
+    if (typeof block?.text !== 'string') throw Object.assign(new Error('Foreign reasoning contains a non-text block that cannot be converted losslessly.'), { status: 400, code: 'unsupported_reasoning_history' });
+    summary.push({ type: 'summary_text', text: block.text });
+  }
+  for (const key of ['text', 'reasoning']) if (typeof item[key] === 'string') summary.push({ type: 'summary_text', text: item[key] });
+  return summary.length ? { type: 'reasoning', summary } : null;
 }
 
 // Native tool carriers are part of incremental Responses history. Moving them
@@ -66,13 +71,8 @@ export function normalizeGptHistory(payload, { preserveToolCarriers = false } = 
       // exact existing text as a portable summary, without adding a chat message.
       if (id) removed.add(id);
       changed = true;
-      const summary = [];
-      for (const block of [...(item.summary || []), ...(item.content || [])]) {
-        if (typeof block?.text !== 'string') throw Object.assign(new Error('Foreign reasoning contains a non-text block that cannot be converted losslessly.'), { status: 400, code: 'unsupported_reasoning_history' });
-        summary.push({ type: 'summary_text', text: block.text });
-      }
-      for (const key of ['text', 'reasoning']) if (typeof item[key] === 'string') summary.push({ type: 'summary_text', text: item[key] });
-      if (summary.length) { stats.foreignReasoningConverted++; return [{ type: 'reasoning', summary }]; }
+      const reasoning = portableReasoning(item);
+      if (reasoning) { stats.foreignReasoningConverted++; return [reasoning]; }
       stats.foreignReasoningSkipped++; return [];
     }
     if (prefix && typeof id === 'string' && !validId) {
@@ -99,6 +99,59 @@ export function normalizeGptHistory(payload, { preserveToolCarriers = false } = 
 
 export function isGptModel(model) {
   return typeof model === 'string' && (/^gpt\//i.test(model) || /^gpt(?:-|\d)/i.test(model.split('/').at(-1)));
+}
+
+export function responseMessagePhases(response, { calls = false, lastMessage = -1 } = {}) {
+  if (!Array.isArray(response?.output) || !response.output.length) return response;
+  calls ||= response.output.some(item => ['function_call', 'custom_tool_call'].includes(item.type));
+  lastMessage = Math.max(lastMessage, response.output.findLastIndex(item => item.type === 'message'));
+  const final = !calls && !['in_progress', 'failed'].includes(response.status);
+  let changed = false;
+  const output = response.output.map((item, index) => {
+    if (item.type !== 'message' || item.phase != null) return item;
+    changed = true;
+    return { ...item, phase: final && index === lastMessage ? 'final_answer' : 'commentary' };
+  });
+  return changed ? { ...response, output } : response;
+}
+
+// A gateway may omit native message phases. Text streams immediately, while
+// only an unclassified message's done event waits for the tool/stop decision.
+export class ResponsePhases {
+  constructor() { this.messages = new Map(); this.lastMessage = -1; this.calls = false; this.sequence = 0; }
+  convert(event) {
+    const message = event.item?.type === 'message', index = event.output_index;
+    if (message && Number.isInteger(index)) this.lastMessage = Math.max(this.lastMessage, index);
+    if (['function_call', 'custom_tool_call'].includes(event.item?.type)) this.calls = true;
+    const output = event.response?.output || [];
+    this.calls ||= output.some(item => ['function_call', 'custom_tool_call'].includes(item.type));
+    this.lastMessage = Math.max(this.lastMessage, output.findLastIndex(item => item.type === 'message'));
+    let events = [event];
+    if (message && event.item.phase == null) {
+      if (event.type === 'response.output_item.added') events = [{ ...event, item: { ...event.item, phase: 'commentary' } }];
+      if (event.type === 'response.output_item.done') { this.messages.set(index, event); events = []; }
+    } else if (message && event.type === 'response.output_item.done') this.messages.delete(index);
+    const completed = ['response.completed', 'response.incomplete'].includes(event.type);
+    const failed = ['response.failed', 'error'].includes(event.type);
+    if (completed || failed || this.calls || message && this.messages.size) {
+      const pending = [];
+      for (const [position, original] of this.messages) {
+        if (!completed && !failed && !this.calls && !(position < index)) continue;
+        const declared = output.find(item => item.id === original.item.id)?.phase;
+        const phase = declared ?? (completed && !this.calls && position === this.lastMessage ? 'final_answer' : 'commentary');
+        pending.push({ ...original, item: { ...original.item, phase } });
+        this.messages.delete(position);
+      }
+      events = [...pending, ...events];
+      if (event.response) events = events.map(out => out.response ? { ...out,
+        response: responseMessagePhases(out.response, { calls: this.calls, lastMessage: this.lastMessage }) } : out);
+    }
+    return events.map(out => {
+      const sequence = Math.max(this.sequence, Number.isInteger(out.sequence_number) ? out.sequence_number : 0);
+      this.sequence = sequence + 1;
+      return Number.isInteger(out.sequence_number) && out.sequence_number !== sequence ? { ...out, sequence_number: sequence } : out;
+    });
+  }
 }
 
 // Responses Lite may leave response.output empty. Keep the original completed

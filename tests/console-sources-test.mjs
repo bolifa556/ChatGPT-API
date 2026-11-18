@@ -117,11 +117,13 @@ try {
   await sharedTurn({ model: chatAlias, previous_response_id: thoughtFromB.id, input: [{ role: 'user', content: 'Continue on source B' }] });
   assert(records.at(-1).body.messages.some(message => message.reasoning_content === 'reasoning from source b'));
   await sharedTurn({ model: models[1], previous_response_id: thoughtFromB.id, input: [{ role: 'user', content: 'Continue on source A' }] });
-  assert(!records.at(-1).body.messages.some(message => message.reasoning_content), 'Same-name API sources were treated as one reasoning source');
+  assert(records.at(-1).body.messages.some(message => message.reasoning_content === 'reasoning from source b'));
+  assert(!JSON.stringify(records.at(-1).body).includes(thoughtFromB.output.find(item => item.type === 'reasoning').id), 'The source-specific reasoning identity reached another API');
+  assert(!records.at(-1).body.messages.some(message => String(message.content).includes('reasoning from source b')), 'Readable reasoning became ordinary assistant text');
   assert(JSON.stringify(records.at(-1).body.messages).includes('reasoning from source b'));
   shared.close();
   checks.push('A single WebSocket preserves original history across same-name API sources and Responses-to-Chat switching without foreign response IDs');
-  checks.push('Private reasoning fields stay with their source; readable text survives switching between two APIs with the same model ID');
+  checks.push('Source-specific reasoning identities stay isolated; readable summaries retain their reasoning channel across APIs with the same model ID');
   const before = modelRequests; await delay(100); await fetch('http://127.0.0.1:' + port + '/healthz'); assert.equal(modelRequests, before);
   checks.push('Health reads and runtime idle time never trigger periodic model discovery');
   consoleServer = await startConsole({ root: fixture, open: false });

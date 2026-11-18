@@ -8,6 +8,8 @@ const key = '__quota_test_' + Date.now();
 const source = 'export const __rspack_esm_ids=[];export const __webpack_modules__={gate(e,t,n){const{host:w,blocked:E,model:g,limits:T}=n,tk={is:(limits)=>limits.blocked};let u;u="local"===w&&E||(0,tk.is)(T,g);e.result={rateLimitWarningThreshold:50,sendBlocked:u}}};';
 const namedSubmitSource = 'var C=n("eLmE"),P=n("a6kU");let nF=host,n6={settings:{model}},nK=(0,i._U)(C.F9,nF),of=(0,i.Ul)("local"===nF&&P.U);let other=otherBlock&&"permission-blocked",reserve=nK&&"reserve-limit",usage=of&&"usage-limit";let disabled=[other,reserve,usage].filter(Boolean).join(",");return{activeCollaborationMode:n6,submitDisabledReasons:disabled};';
 const namedModule = 'export const __rspack_esm_ids=[];export const __webpack_modules__={composer(e,t,n){' + namedSubmitSource + '}};';
+const contextSource = 'let selected=(0,hooks.i1)(scope.u,(thread,{get:read})=>read(settings,thread)?.model??null),usage=(0,store.tv)("tokenUsageInfo"),selector=(0,hooks.i1)(scope.u,(thread,{get:read})=>null==thread?null:read(usage,{hostId:read(hosts.qX,thread),threadId:thread}));return selector;';
+const contextModule = 'export const __rspack_esm_ids=[];export const __webpack_modules__={context(e,t,n){' + contextSource + '}};';
 const catalog = { official: [{ slug: 'official' }], gatewayIds: ['Gateway/model', 'official'] };
 const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'native-ui-index-'));
 const archive = path.join(fixture, 'app.asar'), index = path.join(fixture, 'index.json');
@@ -38,6 +40,11 @@ try {
   const refreshed = nativeQuotaAssets(archive, index);
   assert.equal(refreshed.length, 2, 'An old matcher cache hid a newly supported send-button module');
   assert(refreshed.some(asset => asset.submitCount === 1));
+  writeArchive({ 'quota.js': source, 'context.js': contextModule });
+  const contextAssets = nativeQuotaAssets(archive, index);
+  assert.equal(contextAssets.length, 2, 'The context selector was omitted from the runtime compatibility index');
+  assert(contextAssets.some(asset => asset.factory && asset.source.startsWith('export const __webpack_modules__={')));
+  assert.deepEqual(nativeQuotaAssets(archive, index), contextAssets, 'Cached module ranges changed the context bootstrap source');
   writeArchive(namedModule.replace('usage=of&&"usage-limit"', 'usage=of&&"changed-quota-reason"'));
   const unmatched = nativeQuotaAssets(archive, index);
   assert.equal(unmatched[0].legacySubmitCount, 1, 'An unmatched send gate disappeared from compatibility validation');
@@ -108,5 +115,29 @@ try {
   const output = {};
   native.__webpack_modules__.gate(output, {}, { host: 'local', model: 'New/model', blocked: true, limits: { blocked: true } });
   assert.equal(output.result.sendBlocked, false);
+  globalThis[key].contextWindows = { 'Gateway/model': 950000, 'Other/model': 248900 };
+  const adaptedContext = scopeNativeQuota(contextSource, key);
+  assert.equal(adaptedContext.contextCount, 1);
+  const selected = new Function('hooks', 'scope', 'store', 'hosts', 'settings', adaptedContext.text)(
+    { i1: (_scope, read) => read }, { u: 'scope' }, { tv: () => 'usage' }, { qX: 'host' }, 'settings');
+  const usage = { modelContextWindow: 475000, last: { totalTokens: 12345 }, total: { totalTokens: 98765 } };
+  const snapshot = structuredClone(usage);
+  for (const host of ['local', 'remote']) for (const model of ['Gateway/model', 'Other/model', 'official', 'unknown']) {
+    function get(atom, thread) {
+      if (typeof atom === 'function') return atom(thread, { get });
+      if (atom === 'settings') return { model };
+      if (atom === 'host') return host;
+      assert.equal(atom, 'usage');
+      assert.deepEqual(thread, { hostId: host, threadId: 'thread' });
+      return usage;
+    }
+    const actual = selected('thread', { get }), window = host === 'local' && globalThis[key].contextWindows[model];
+    assert.equal(actual.modelContextWindow, window || usage.modelContextWindow);
+    assert.equal(actual.last, usage.last);
+    assert.equal(actual.total, usage.total);
+    if (!window) assert.equal(actual, usage);
+    assert.deepEqual(usage, snapshot);
+    assert.equal(selected(null, { get }), null);
+  }
 } finally { delete globalThis[key]; }
-console.log(JSON.stringify({ passed: true, checks: ['Native Boolean and named-reason submit gates scope both exhausted-subscription flags to the selected model', 'Official models, remote hosts, unknown models and other native blockers retain their original decisions', 'Model switching updates submit eligibility and catalog changes update the in-memory scope', 'Matcher upgrades invalidate old asset indexes; unadapted quota gates remain visible to validation'] }));
+console.log(JSON.stringify({ passed: true, checks: ['Native Boolean and named-reason submit gates scope both exhausted-subscription flags to the selected model', 'Official models, remote hosts, unknown models and other native blockers retain their original decisions', 'Model switching updates submit eligibility and catalog changes update the in-memory scope', 'Matcher upgrades invalidate old asset indexes; unadapted quota gates remain visible to validation', 'API model context windows follow the current model independently of missing upstream usage, preserving actual token counts and native records'] }));

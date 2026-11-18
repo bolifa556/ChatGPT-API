@@ -5,6 +5,8 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { atomicPrivate } from './settings.mjs';
+import { readDesktopJson as readDesktopState, scopedDesktopStore, recoverScopedProjects,
+  overlayScopedDesktop, restoreScopedDesktop } from './desktop-state-scoped.mjs';
 
 const scopeKey = 'electron-account-renderer-state-v1';
 const atomsKey = 'electron-persisted-atom-state';
@@ -25,15 +27,6 @@ function accountScope(state) {
 }
 function knownDesktopState(state) {
   return isRecord(state) && (!Object.hasOwn(state, scopeKey) || accountScope(state) !== null);
-}
-function readDesktopState(file) {
-  try {
-    const text = fs.readFileSync(file, 'utf8');
-    return { text, state: JSON.parse(text) };
-  } catch (error) {
-    if (!['ENOENT', 'EACCES', 'EPERM', 'EBUSY'].includes(error.code) && !(error instanceof SyntaxError)) throw error;
-    return null;
-  }
 }
 function assign(target, key, value) { if (value === undefined) delete target[key]; else target[key] = value; }
 function snapshot(state) {
@@ -88,12 +81,28 @@ export function recoverMissingDesktopState({ root, home }) {
   }
   return { recovered: false };
 }
+export function recoverCurrentDesktopState(ctx) {
+  const store = scopedDesktopStore(ctx.home);
+  if (!store) return { recovered: false };
+  const prior = readDesktopState(journalFile(ctx.root))?.state;
+  return recoverScopedProjects(ctx, store, prior?.version < 3 && prior.home === fs.realpathSync(ctx.home) ? prior : undefined);
+}
 export function restoreDesktopState({ root, home }) {
   const journal = journalFile(root);
   if (!fs.existsSync(journal)) return;
   const saved = JSON.parse(fs.readFileSync(journal, 'utf8'));
   if (saved.home !== fs.realpathSync(home)) throw new Error('Desktop preference recovery belongs to another native home.');
   const file = path.join(home, '.codex-global-state.json');
+  const store = scopedDesktopStore(home);
+  if (store !== undefined || saved.version === 3) {
+    if (!store) return { pending: true };
+    if (saved.version === 3) return restoreScopedDesktop({ home }, store, saved, journal);
+    // A client upgrade can happen before an old overlay has been restored.
+    // Its snapshot may supply missing project data, but cannot replace the new store.
+    if (recoverScopedProjects({ home }, store, saved).recovered) fs.unlinkSync(journal);
+    else return { pending: true };
+    return;
+  }
   if (saved.version === 2) {
     let current;
     try { current = JSON.parse(fs.readFileSync(file, 'utf8')); }
@@ -183,21 +192,30 @@ export function restoreDesktopState({ root, home }) {
 export function overlayDesktopState({ root, home }) {
   const journal = journalFile(root);
   const file = path.join(home, '.codex-global-state.json');
+  const document = readDesktopState(file);
+  const store = scopedDesktopStore(home, document);
   if (fs.existsSync(journal)) {
     const saved = JSON.parse(fs.readFileSync(journal, 'utf8'));
     if (saved.home !== fs.realpathSync(home)) throw new Error('Desktop preference recovery belongs to another native home.');
-    const current = readDesktopState(file);
-    if (current && !knownDesktopState(current.state)) return { applied: false, pending: true };
+    if (store !== undefined || saved.version === 3) {
+      return store && saved.version === 3 ? { applied: true, reused: true } : { applied: false, pending: true };
+    }
+    if (document && !knownDesktopState(document.state)) return { applied: false, pending: true };
     return { applied: true, reused: true };
   }
+  if (store !== undefined) {
+    if (!store) return { applied: false };
+    recoverScopedProjects({ home }, store);
+    return overlayScopedDesktop({ home }, store, journal);
+  }
   recoverMissingDesktopState({ root, home });
-  const document = readDesktopState(file), current = document?.state, scope = accountScope(current);
+  const recovered = readDesktopState(file), current = recovered?.state, scope = accountScope(current);
   if (!scope) return { applied: false };
   // The native client keeps inactive snapshots in account-switch order. Prefer
   // the current owner, otherwise its most recently saved desktop state.
   const sourceId = scope.owner || Object.keys(scope.inactive || {}).at(-1);
   const source = scope.owner ? snapshot(current) : scope.inactive?.[sourceId];
-  const saved = { version: 2, home: fs.realpathSync(home), originalText: document.text, scope, sourceId };
+  const saved = { version: 2, home: fs.realpathSync(home), originalText: recovered.text, scope, sourceId };
   if (fs.existsSync(file + '.bak')) saved.backupText = fs.readFileSync(file + '.bak', 'utf8');
   if (source?.globals && source?.atoms) {
     for (const [key, value] of Object.entries(source.globals)) current[key] = value;

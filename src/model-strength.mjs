@@ -63,6 +63,10 @@ export function modelStrengths(model, official = [], saved = model._probedStreng
   let reasoning = nativeReasoning ? { ...nativeReasoning, source: 'native-catalog' } : declaredReasoning;
   if (!reasoning && !/^vllm\//i.test(id)) {
     const leaf = id.split('/').at(-1).toLowerCase();
+    if (['gpt-6.2-astra', 'gpt-6.2-sol'].includes(leaf)) reasoning = {
+      ...strengthLevels(['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], 'documentation'),
+      sourceUrl: 'https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json',
+    };
     const withNone = ['gpt-6-sol', 'gpt-6-luna', 'gpt-6.1-terra'].includes(leaf);
     if (withNone || ['gpt-6-astra', 'gpt-6.1-sol'].includes(leaf)) reasoning = {
       ...strengthLevels([...(withNone ? ['none'] : []), 'low', 'medium', 'high', 'xhigh', 'max'], 'documentation'),
