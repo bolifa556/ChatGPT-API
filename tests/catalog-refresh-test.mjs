@@ -26,8 +26,9 @@ const latest = { ...template, slug: 'gpt-6.1-sol', display_name: 'GPT-6.1-Sol', 
 delete latest.base_instructions;
 let currentTemplate = old;
 const gatewayIds = ['Vendor/model', 'GPT/gpt-6.1-sol', 'GPT/gpt-6-sol', 'GPT/gpt-catalog-unknown'];
+const gatewayRequests = [];
 let gatewayMetadata = {};
-let extra = [], modelStatus = 200, delayOld = false, oldStarted;
+let extra = [], modelStatus = 200, pauseOld;
 const routeFile = path.join(fixture, 'data/state/route-state.json');
 const menu = () => JSON.parse(fs.readFileSync(path.join(fixture, 'data/cache/models-smr.json'), 'utf8')).models;
 const state = version => fs.writeFileSync(routeFile, JSON.stringify({ mode: 'mixed', officialProxy: '', clientVersion: version }));
@@ -37,14 +38,16 @@ fs.writeFileSync(path.join(home, 'models_cache.json'), JSON.stringify({ client_v
 const nativeCacheBefore = fs.readFileSync(path.join(home, 'models_cache.json'), 'utf8');
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
-  if (url.pathname === '/v1/models') {
+  if (['/v1/models', '/secondary/v1/models'].includes(url.pathname)) {
     assert.equal(req.headers.authorization, 'Bearer inert-gateway-key');
-    res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ data: gatewayIds.map(id => ({ id, ...gatewayMetadata[id] })) })); return;
+    gatewayRequests.push(url.pathname);
+    const ids = url.pathname === '/v1/models' ? gatewayIds : ['Vendor/secondary'];
+    res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ data: ids.map(id => ({ id, ...gatewayMetadata[id] })) })); return;
   }
   assert.equal(url.pathname, '/backend-api/codex/models');
   const version = url.searchParams.get('client_version');
   records.push({ url: req.url, version, authorization: req.headers.authorization, account: req.headers['chatgpt-account-id'], marker: req.headers['x-native-fixture'] });
-  if (delayOld && version === '0.159.0') { oldStarted?.(); await delay(180); }
+  if (pauseOld && version === '0.159.0') { pauseOld.started(); await pauseOld.resume; }
   res.setHeader('content-type', 'application/json'); res.setHeader('etag', '"fixture-catalog"');
   if (req.headers['if-none-match'] === '"fixture-catalog"') { res.writeHead(304); res.end(); return; }
   if (modelStatus !== 200) { res.writeHead(modelStatus); res.end(JSON.stringify({ error: { code: 'fixture_unavailable' } })); return; }
@@ -60,11 +63,18 @@ const base = 'http://127.0.0.1:' + port;
 fs.writeFileSync(path.join(fixture, 'data/.env'), `BASE_URL=${upstream}/v1\nAPI_KEY=inert-gateway-key\nSHIM_PORT=${port}\nOFFICIAL_BASE=${upstream}/backend-api/codex\n`);
 function child(args = []) {
   const processChild = spawn(process.execPath, [path.join(root, 'src/shim.mjs'), ...args], { env: { ...process.env, CODEX_HOME: home, CHATGPT_API_ROOT: fixture }, windowsHide: true, stdio: ['ignore','pipe','pipe'] });
-  children.push(processChild); processChild.errorText = ''; processChild.stderr.on('data', data => processChild.errorText += data); processChild.stdout.resume(); return processChild;
+  children.push(processChild); processChild.errorText = ''; processChild.output = '';
+  processChild.stderr.on('data', data => processChild.errorText += data);
+  processChild.stdout.on('data', data => processChild.output += data);
+  return processChild;
+}
+async function prepare(...args) {
+  const prep = child(['--prepare', ...args]);
+  assert.equal((await once(prep, 'close'))[0], 0, prep.errorText);
+  return JSON.parse(prep.output);
 }
 try {
-  state('0.159.0'); const prepare = child(['--prepare']);
-  assert.equal((await once(prepare, 'exit'))[0], 0, prepare.errorText);
+  state('0.159.0'); await prepare();
   assert.deepEqual(menu().slice(0, 2), [latest, old]);
   assert.equal(records.at(-1).version, '0.159.0');
   assert.equal(fs.readFileSync(path.join(home, 'models_cache.json'), 'utf8'), nativeCacheBefore);
@@ -125,22 +135,27 @@ try {
   assert.equal(noVersion.official.ready, false); assert.match(noVersion.official.error, /version is unavailable/);
   assert.equal(records.length, priorCount); assert(menu().some(model => model.slug === latest.slug));
   checks.push('Unknown current version retains cached models but never requests a hardcoded or stale version');
-  state('0.159.0'); delayOld = true;
+  state('0.159.0');
+  let oldStarted, releaseOld;
   const waiting = new Promise(resolve => oldStarted = resolve);
+  pauseOld = { started: oldStarted, resume: new Promise(resolve => releaseOld = resolve) };
   const periodic = fetch(base + '/readyz').then(response => response.json());
   await waiting;
   const nativeHeaders = { authorization: 'Bearer inert-native-refreshed', 'chatgpt-account-id': 'native-account', 'x-native-fixture': 'preserve-header' };
   const nativeQuery = '/v1/models?client_version=0.160.0&native_capability=preserve-query';
-  const nativeResponse = await fetch(base + nativeQuery, { headers: nativeHeaders });
-  assert.equal(nativeResponse.status, 200); assert.equal(nativeResponse.headers.get('etag'), '"fixture-catalog"');
-  const nativeData = await nativeResponse.json(); await periodic; delayOld = false;
+  let nativeData;
+  try {
+    const nativeResponse = await fetch(base + nativeQuery, { headers: nativeHeaders, signal: AbortSignal.timeout(2000) });
+    assert.equal(nativeResponse.status, 200); assert.equal(nativeResponse.headers.get('etag'), '"fixture-catalog"');
+    nativeData = await nativeResponse.json();
+  } finally { releaseOld(); await periodic; pauseOld = null; }
   assert.deepEqual(nativeData, { models: [latest, old, ...extra], fixture_response_metadata: { original: true, version: '0.160.0' } });
   const forwarded = records.findLast(record => record.version === '0.160.0');
   assert.equal(forwarded.url, '/backend-api/codex/models?client_version=0.160.0&native_capability=preserve-query');
   assert.equal(forwarded.authorization, nativeHeaders.authorization); assert.equal(forwarded.account, 'native-account'); assert.equal(forwarded.marker, 'preserve-header');
   assert.equal(JSON.parse(fs.readFileSync(path.join(fixture, 'data/cache/catalog-state.json'))).officialClientVersion, '0.160.0');
   await (await fetch(base + '/readyz')).json(); assert.equal(records.at(-1).version, '0.160.0');
-  checks.push('Native model-list query, refreshed auth, full body and ETag pass through; concurrent refresh cannot revert its version');
+  checks.push('Native model-list responds without waiting for the background refresh; query, auth, body and ETag pass through, and the older refresh cannot overwrite it');
   const unchanged = await fetch(base + nativeQuery, { headers: { ...nativeHeaders, 'if-none-match': '"fixture-catalog"' } });
   assert.equal(unchanged.status, 304); assert.equal(await unchanged.text(), '');
   modelStatus = 503; const unavailable = await fetch(base + nativeQuery, { headers: nativeHeaders });
@@ -171,11 +186,35 @@ try {
   assert.equal(nonGpt.tool_mode, 'code_mode_only');
   assert(menu().every(model => model.base_instructions || model.model_messages?.instructions_template));
   checks.push('Non-GPT and unmatched GPT models preserve every updated native instruction field, including future fields and variables');
+  const settings = path.join(fixture, 'data/providers.json');
+  const profile = { baseUrl: upstream + '/v1', apiKey: 'inert-gateway-key', enabled: true };
+  fs.writeFileSync(settings, JSON.stringify({ version: 1, providers: [
+    { ...profile, id: 'default', name: 'Primary' },
+    { ...profile, id: 'p_secondary', name: 'Secondary', baseUrl: upstream + '/secondary/v1' },
+  ] }));
+  await prepare();
+  const complete = menu().map(model => model.slug);
+  assert(complete.includes('@p_secondary/Vendor/secondary'));
+  const gatewayCallsBefore = gatewayRequests.length, officialCallsBefore = records.length;
+  assert.equal((await prepare('--cached')).refreshOnStart, true);
+  assert.equal(gatewayRequests.length, gatewayCallsBefore);
+  assert.equal(records.length, officialCallsBefore);
+  assert.deepEqual(menu().map(model => model.slug), complete);
+  checks.push('A complete fresh menu is ready for the first client read without any network wait');
+  const sourcesFile = path.join(fixture, 'data/cache/gateway-sources.json');
+  const cachedSources = JSON.parse(fs.readFileSync(sourcesFile, 'utf8'));
+  cachedSources.sources.find(source => source.id === 'p_secondary').checkedAt = new Date(Date.now() - 25 * 3600_000).toISOString();
+  fs.writeFileSync(sourcesFile, JSON.stringify(cachedSources));
+  assert.equal((await prepare('--cached')).refreshOnStart, false, 'A cache missing an enabled source is not ready');
+  assert(gatewayRequests.slice(gatewayCallsBefore).includes('/secondary/v1/models'));
+  assert.deepEqual(menu().map(model => model.slug), complete);
+  checks.push('A missing or expired enabled source is discovered before the first menu read');
+  fs.unlinkSync(settings);
+
   fs.unlinkSync(path.join(home, 'auth.json'));
   fs.unlinkSync(path.join(home, 'models_cache.json'));
   fs.writeFileSync(routeFile, JSON.stringify({ mode: 'gateway', officialProxy: '', clientVersion: '0.162.0' }));
-  const officialCalls = records.length, apiOnly = child(['--prepare']);
-  assert.equal((await once(apiOnly, 'exit'))[0], 0, apiOnly.errorText);
+  const officialCalls = records.length; await prepare();
   assert.equal(records.length, officialCalls);
   assert.deepEqual(new Set(menu().map(model => model.slug)), new Set(gatewayIds));
   assert(menu().filter(model => model.slug.startsWith('GPT/')).every(model => model.service_tiers[0]?.id === 'priority' && model.additional_speed_tiers.includes('fast') && model.default_service_tier === null));

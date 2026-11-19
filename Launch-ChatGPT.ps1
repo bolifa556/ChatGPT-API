@@ -107,8 +107,8 @@ try {
     $recoverySession = Register-LauncherRecovery $packageDir $configPath
     Apply-LauncherConfig $packageDir $configPath $authMode $shimBase $baseUrl $Mode
     $launchPhase = '兼容历史对话'
-    $compatOptions = if ($authMode -eq 'gateway') { @('--desktop') } else { @('--desktop-repair') }
-    $null = & $nodePath (Join-Path $packageDir 'src\repair-thread-providers.mjs') 'begin' (Get-CodexHome) $packageDir @compatOptions 2> (Join-Path $packageDir 'data\logs\provider-repair-stderr.log')
+    $desktopOption = if ($authMode -eq 'gateway') { '--desktop' } else { '--desktop-repair' }
+    $null = & $nodePath (Join-Path $packageDir 'src\repair-thread-providers.mjs') 'begin' (Get-CodexHome) $packageDir $desktopOption 2> (Join-Path $packageDir 'data\logs\provider-repair-stderr.log')
     if ($LASTEXITCODE -ne 0) { throw '对话兼容准备未完成，请查看 data\logs\provider-repair-stderr.log。' }
     if($Mode -ne 'official' -and -not $prepared.gateway.ready){
         $notice = if ($authMode -eq 'mixed') { '网关目前不可用。有效缓存中的网关模型请求可能失败；已登录的官方模型仍使用官方通道。' } else { '网关目前不可用。此入口只使用网关模型，请检查网关连接。' }

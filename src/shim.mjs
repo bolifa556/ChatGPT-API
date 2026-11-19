@@ -145,13 +145,17 @@ async function refreshCatalog() {
         if (mode !== 'mixed') { status.official = { ready: false, enabled: false }; return; }
         const a = auth();
         if (!a.token) { status.official = { ready: false, error: 'No saved ChatGPT sign-in' }; return; }
+        const startingCatalog = catalog.official;
         try {
           const version = currentClientVersion();
           if (!version) throw new Error('Native client version is unavailable; reopen the launcher after native client initialization.');
           const headers = { authorization: 'Bearer ' + a.token, ...(a.accountId ? { 'chatgpt-account-id': a.accountId } : {}) };
           const data = await fetchJson(officialBase + '/models?client_version=' + encodeURIComponent(version), headers, officialDispatcher);
-          acceptOfficialCatalog(data, version);
-        } catch (e) { status.official = { ready: false, error: describeError(e), failure: errorDetails(e), cached: catalog.official.length > 0 }; }
+          // A native model-list request can finish while this refresh is in flight.
+          if (catalog.official === startingCatalog) acceptOfficialCatalog(data, version);
+        } catch (e) {
+          if (catalog.official === startingCatalog) status.official = { ready: false, error: describeError(e), failure: errorDetails(e), cached: catalog.official.length > 0 };
+        }
       })(),
     ]);
     saveCatalog();
@@ -408,9 +412,6 @@ async function forwardOfficialCatalog(req, res, url) {
     const clientVersion = url.searchParams.get('client_version');
     if (upstream.statusCode === 200) {
       try {
-        // An in-flight startup or manual refresh must finish before this newer native
-        // result becomes the canonical routing/menu catalog.
-        if (refreshInFlight) await refreshInFlight.catch(e => log('catalog refresh ' + e.message));
         const data = JSON.parse(decodeBody(body, upstream.headers['content-encoding'] || '').toString('utf8'));
         acceptOfficialCatalog(data, clientVersion);
         observedClientVersion = clientVersion;
@@ -596,8 +597,9 @@ async function handleHttp(req, res) {
 const savedCatalog = loadCatalog();
 if (process.argv.includes('--prepare')) {
   try {
-    const deferred = process.argv.includes('--cached') &&
-      (!gatewayEnabled || savedCatalog.configurationId === sources.revision && catalog.gatewayIds.length && Date.now() - Date.parse(catalog.gatewayAt) < CACHE_MAX_AGE) &&
+    const gatewayCacheComplete = savedCatalog.configurationId === sources.revision &&
+      catalog.gatewayIds.length > 0 && sources.sources.length === sources.profiles().length;
+    const deferred = process.argv.includes('--cached') && (!gatewayEnabled || gatewayCacheComplete) &&
       (mode !== 'mixed' || catalog.official.length);
     if (deferred) {
       status = { gateway: { ...savedCatalog.status?.gateway, ready: gatewayEnabled && catalog.gatewayIds.length > 0, cached: true },
