@@ -217,11 +217,14 @@ function writeDesktopCatalog() {
     // An explicit upstream declaration (including an empty list) takes precedence.
     const declaredSpeed = upstream && ['service_tiers', 'additional_speed_tiers'].some(key => Object.hasOwn(upstream, key));
     const requestFast = canRequestFast(upstream || { id }) && !declaredSpeed;
+    const requestUltrafast = requestFast && leaf.toLowerCase() === 'gpt-6.2-sol';
     model.default_service_tier = gpt ? upstream?.default_service_tier ?? null : null;
-    model.service_tiers = gpt ? structuredClone(upstream?.service_tiers ?? (requestFast
-      ? [{ id: 'priority', name: 'Fast', description: 'Request priority processing; availability and usage depend on the gateway.' }] : []))
-      : [];
-    model.additional_speed_tiers = gpt ? structuredClone(upstream?.additional_speed_tiers ?? (requestFast ? ['fast'] : [])) : [];
+    const speedTiers = requestFast ? [{ id: 'priority', name: 'Fast', description: requestUltrafast ? '2x speed, increased usage'
+      : 'Request priority processing; availability and usage depend on the gateway.' }] : [];
+    if (requestUltrafast) speedTiers.push({ id: 'ultrafast', name: 'Ultrafast', description: 'The fastest available responses for latency-sensitive work.' });
+    model.service_tiers = gpt ? structuredClone(upstream?.service_tiers ?? speedTiers) : [];
+    model.additional_speed_tiers = gpt ? structuredClone(upstream?.additional_speed_tiers ??
+      (requestUltrafast ? ['fast', 'ultrafast'] : requestFast ? ['fast'] : [])) : [];
     // Let the native client assemble all instruction sections for every model.
     // Only the wire/tool capabilities required by the converter differ.
     if (!gpt) Object.assign(model, { use_responses_lite: false, tool_mode: 'code_mode_only', shell_type: 'unified_exec', apply_patch_tool_type: 'freeform' });
@@ -367,26 +370,52 @@ async function gatewayImageReferences(payload, incoming, signal) {
   // Never use a saved ChatGPT login to resolve them in this mode.
   if (mode !== 'mixed' || !Array.isArray(payload.input)) return payload;
   const needsUrl = part => part?.type === 'input_image' && part.file_id && !part.image_url;
-  const hasFile = parts => Array.isArray(parts) && parts.some(needsUrl);
-  if (!payload.input.some(item => hasFile(item?.content) || hasFile(item?.output))) return payload;
-  const converted = structuredClone(payload), links = new Map();
+  let files;
+  for (const item of payload.input) for (const parts of [item?.content, item?.output]) {
+    if (!Array.isArray(parts)) continue;
+    for (const part of parts) {
+      if (!needsUrl(part)) continue;
+      files ??= new Map();
+      files.set(part.file_id, null);
+    }
+  }
+  if (!files) return payload;
   // Match the installed client's read-only file-download-link endpoint. A file
   // ID owned by ChatGPT is not a file ID at another provider. Resolve only the
   // outgoing image reference; the canonical history keeps the original ID.
   const fileBase = officialBase.replace(/\/codex$/, '');
-  for (const item of converted.input) for (const parts of [item?.content, item?.output]) {
-    if (!Array.isArray(parts)) continue;
-    for (const part of parts) {
-      if (!needsUrl(part)) continue;
-      if (!links.has(part.file_id)) {
-        const result = await fetchJson(fileBase + '/files/download/' + encodeURIComponent(part.file_id), headersFor(incoming, 'official'), officialDispatcher, 12000, signal);
+  const headers = headersFor(incoming, 'official');
+  const controller = new AbortController();
+  const lookupSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+  const ids = [...files.keys()];
+  try {
+    // The links are independent. Bound concurrent reads for image-heavy histories.
+    for (let offset = 0; offset < ids.length; offset += 4) {
+      await Promise.all(ids.slice(offset, offset + 4).map(async id => {
+        const result = await fetchJson(fileBase + '/files/download/' + encodeURIComponent(id), headers, officialDispatcher, 12000, lookupSignal);
         if (typeof result.download_url !== 'string' || !/^https?:\/\//.test(result.download_url)) throw Object.assign(new Error('The native file service did not provide a usable image download URL.'), { status: 502, code: 'image_reference_unavailable' });
-        links.set(part.file_id, result.download_url);
-      }
-      part.image_url = links.get(part.file_id); delete part.file_id;
+        files.set(id, result.download_url);
+      }));
     }
+  } catch (error) {
+    controller.abort();
+    throw error;
   }
-  return converted;
+  const input = payload.input.map(item => {
+    let converted = item;
+    for (const key of ['content', 'output']) {
+      const parts = item?.[key];
+      if (!Array.isArray(parts) || !parts.some(needsUrl)) continue;
+      if (converted === item) converted = { ...item };
+      converted[key] = parts.map(part => {
+        if (!needsUrl(part)) return part;
+        const { file_id, ...image } = part;
+        return { ...image, image_url: files.get(file_id) };
+      });
+    }
+    return converted;
+  });
+  return { ...payload, input };
 }
 function hasOfficialAuth(incoming) {
   const token = String(incoming.authorization || '').replace(/^Bearer\s+/i, '');
@@ -1017,7 +1046,10 @@ if (process.argv.includes('--prepare')) {
                   socket.terminate();
                 }
                 terminal = response === incoming ? data : response;
-              } else await send(response === incoming ? data : response, true);
+              } else {
+                const write = send(response === incoming ? data : response, true);
+                if (write) await write;
+              }
             }
             if (terminal) break;
           }

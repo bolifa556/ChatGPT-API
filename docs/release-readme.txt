@@ -1,4 +1,4 @@
-ChatGPT API 3.2.8 — Windows x64
+ChatGPT API 3.2.9 — Windows x64
 
 安装
 1. 安装官方 ChatGPT/Codex 桌面客户端。
@@ -30,7 +30,7 @@ chatgpt-apionly：始终使用 API，模型与图片请求不回退官方。
 
 功能与限制
 聊天请求保留原生指令、工具、历史及输出。联网搜索优先转发原生搜索协议，兼容处理时将原始搜索命令转为当前模型可用的搜索请求。
-支持 Responses/Chat、流式响应、response.interrupt 与 Fast 档位传递。
+支持 Responses/Chat、流式响应、response.interrupt 与 Fast 档位传递。自定义 GPT-6.2 Sol 可在客户端选择 Ultrafast，实际速度由 API 来源决定。
 模型生成、压缩、生图不设置适配层响应等待上限；不增加网络重试或修改代理/TUN。
 模型、原生客户端或工具缺少的能力不会补齐。要求官方身份的浏览器/在线工具不能用 API Key 替代账号。
 混合模式按当前模型区分额度。官方额度用尽后，选择自定义 API 模型即可在原对话继续发送，使用该来源自身的额度。

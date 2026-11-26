@@ -41,11 +41,18 @@ try {
   for(const name of ['model-template.json','reasoning-levels.json'])fs.copyFileSync(path.join(root,'assets',name),path.join(fixture,'assets',name));
   fs.writeFileSync(path.join(fixture,'home/auth.json'),JSON.stringify({tokens:{access_token:'native-fixture',account_id:'fixture'}}));
   fs.writeFileSync(path.join(fixture,'home/models_cache.json'),JSON.stringify({models:[officialModel]}));
+  const parallelLinks = new Map();
   const official=http.createServer(async(req,res)=>{
     if(req.url.startsWith('/backend-api/codex/models'))return respond(res,{models:[officialModel]});
     if(req.url.startsWith('/backend-api/files/download/')){
       const record={id:decodeURIComponent(req.url.split('/').at(-1)),closed:false,auth:req.headers.authorization};downloads.push(record);
       res.on('close',()=>record.closed=true);
+      if(record.id.startsWith('parallel_')){
+        parallelLinks.set(record.id,res);
+        // Each read can complete only after the other read has started.
+        if(parallelLinks.size===2)for(const [id,response] of parallelLinks)respond(response,{download_url:link+'?id='+id});
+        return;
+      }
       if(record.id.startsWith('slow_'))return;
       if(record.id==='file_no_link')return respond(res,{status:'unavailable'});
       return respond(res,{status:'success',download_url:link});
@@ -97,6 +104,13 @@ try {
     assert.deepEqual(records.at(-1).body.input[0],original[0]);assert(!JSON.stringify(records.at(-1).body).includes(link));c.ws.close();
   }
   checks.push('Gateway → official continuation restores original file IDs from canonical history for all three protocol routes');
+  const distinct=[...imageInput('parallel_first'),...imageInput('parallel_second'),...imageInput('parallel_first')];
+  const startDownloads=downloads.length;
+  assert.equal((await post(models[0],distinct)).status,200);
+  assert.deepEqual(downloads.slice(startDownloads).map(record=>record.id).sort(),['parallel_first','parallel_second']);
+  assert.deepEqual(records.at(-1).body.input.map(item=>item.content[0].image_url),
+    ['parallel_first','parallel_second','parallel_first'].map(id=>link+'?id='+id));
+  checks.push('Independent image links resolve concurrently without reordering or duplicating references');
   const noLinkCount=records.length;const unavailable=await post(models[2],imageInput('file_no_link'));
   assert.equal(unavailable.status,502);assert.equal(unavailable.body.error.code,'image_reference_unavailable');assert.equal(records.length,noLinkCount);
   checks.push('Missing download URL fails explicitly before model dispatch');

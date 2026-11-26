@@ -9,7 +9,7 @@
 
 **原生界面与快捷键 · 官方 / 混合 / 纯 API 三模式 · 同一对话无缝切模型 · 完整保留生图与本地工具**
 
-[![Version](https://img.shields.io/badge/Release-v3.2.8-blue.svg)](https://github.com/bolifa556/ChatGPT-API/releases/tag/v3.2.8)
+[![Version](https://img.shields.io/badge/Release-v3.2.9-blue.svg)](https://github.com/bolifa556/ChatGPT-API/releases/tag/v3.2.9)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-brightgreen.svg)](#快速开始)
 [![Client Files](https://img.shields.io/badge/Client%20Files-Unmodified-success.svg)](#你的客户端照常保留)
 
@@ -55,7 +55,7 @@
 - **原生本地工具与思考过程（Reasoning）照常工作**  
   客户端自带的本地文件读写、终端调用等工具依然可用，服务商返回的模型思考链（Reasoning / Thinking）也能在界面上原生折叠展示。当然，具体能调起哪些工具，最终取决于客户端状态、系统权限以及你选的模型本身支不支持。
 - **聊天、画图、上下文参数一处搞定**  
-  在本地控制台就能统一调配 API 渠道、默认生图模型、画质、图片思考强度以及上下文窗口上限。对于支持的服务商，GPT 系列模型还能直接点亮客户端里的 Fast（小闪电）加速开关。
+  在本地控制台就能统一调配 API 渠道、默认生图模型、画质、图片思考强度以及上下文窗口上限。支持的 GPT 模型可以通过输入栏的小闪电选择 Fast，自定义 GPT‑6.2 Sol 还可选择 Ultrafast。实际速度取决于 API 来源是否支持该档位。
 - **开箱即用，告别繁琐的环境配置**  
   全平台安装包均已内置独立的轻量级 Node 运行时，不需要你在电脑上折腾开发环境。装好填上 URL 和 Key 就能跑；甚至安装时可以先跳过配置，进桌面后再慢慢填。
 
@@ -72,10 +72,10 @@
 
 | 平台 | 下载地址 | 安装说明 |
 | :--- | :--- | :--- |
-| **Windows x64** | [ChatGPT-API-Launcher-3.2.8-win-x64.zip](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.8/ChatGPT-API-Launcher-3.2.8-win-x64.zip) | 解压后双击运行 `安装.cmd`，按提示选好目录即可完成安装。 |
-| **macOS (Apple Silicon)** | [ChatGPT-API-Provider-3.2.8-macos-arm64.dmg](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.8/ChatGPT-API-Provider-3.2.8-macos-arm64.dmg) | 打开 DMG，把需要的启动入口和控制台 App 拖进“应用程序”。首次打开若遇系统弹窗拦截，请按 [macOS 说明](docs/macos-dmg-readme.md) 放行。 |
-| **Linux x64** | [ChatGPT-API-Provider-3.2.8-linux-x64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.8/ChatGPT-API-Provider-3.2.8-linux-x64.tar.gz) | 解压后，在桌面用户权限下运行 `./install.sh`。（详见 [Linux 说明](docs/linux-readme.md)） |
-| **Linux ARM64** | [ChatGPT-API-Provider-3.2.8-linux-arm64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.8/ChatGPT-API-Provider-3.2.8-linux-arm64.tar.gz) | 解压后同样直接运行 `./install.sh` 即可。 |
+| **Windows x64** | [ChatGPT-API-Launcher-3.2.9-win-x64.zip](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.9/ChatGPT-API-Launcher-3.2.9-win-x64.zip) | 解压后双击运行 `安装.cmd`，按提示选好目录即可完成安装。 |
+| **macOS (Apple Silicon)** | [ChatGPT-API-Provider-3.2.9-macos-arm64.dmg](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.9/ChatGPT-API-Provider-3.2.9-macos-arm64.dmg) | 打开 DMG，把需要的启动入口和控制台 App 拖进“应用程序”。首次打开若遇系统弹窗拦截，请按 [macOS 说明](docs/macos-dmg-readme.md) 放行。 |
+| **Linux x64** | [ChatGPT-API-Provider-3.2.9-linux-x64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.9/ChatGPT-API-Provider-3.2.9-linux-x64.tar.gz) | 解压后，在桌面用户权限下运行 `./install.sh`。（详见 [Linux 说明](docs/linux-readme.md)） |
+| **Linux ARM64** | [ChatGPT-API-Provider-3.2.9-linux-arm64.tar.gz](https://github.com/bolifa556/ChatGPT-API/releases/download/v3.2.9/ChatGPT-API-Provider-3.2.9-linux-arm64.tar.gz) | 解压后同样直接运行 `./install.sh` 即可。 |
 
 ### 2. 填写自己的 API
 

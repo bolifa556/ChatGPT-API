@@ -25,7 +25,7 @@ for (const file of ['model-template.json', 'reasoning-levels.json', 'model-conte
 fs.writeFileSync(path.join(fixture, 'macos/provider.mjs'), "process.stdout.write('inert-gateway\\n');\n");
 const official = { ...JSON.parse(fs.readFileSync(path.join(root, 'assets/model-template.json'))).models[0],
   slug: 'gpt-6-sol', visibility: 'list', service_tiers: [{ id: 'priority', name: 'Fast', description: 'Fixture native tier' }], additional_speed_tiers: ['fast'] };
-const gatewayModels = ['GPT/gpt-6-sol', 'Vendor/model'];
+const gatewayModels = ['GPT/gpt-6.2-sol', 'Vendor/model'];
 const requests = [], checks = [], menus = [];
 let serial = 0, router, client, lines, pending, notes, rpcId, routerBase, compacting = false;
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -89,6 +89,8 @@ async function startClient() {
   await rpc('initialize', { clientInfo: { name: 'native-provider-binding-test', version: '1' }, capabilities: { experimentalApi: true } }); send({ method: 'initialized', params: {} });
   const config = (await rpc('config/read', { includeLayers: false })).config;
   const menu = await rpc('model/list', { includeHidden: true });
+  const customSol = menu.data.find(model => model.model === gatewayModels[0]);
+  if (customSol) assert.deepEqual(customSol.serviceTiers.map(tier => tier.id), ['priority', 'ultrafast']);
   const capabilities = await rpc('modelProvider/capabilities/read');
   const identity = await rpc('getAuthStatus', { includeToken: false, refreshToken: false });
   if (!identity.requiresOpenaiAuth) {
@@ -166,9 +168,9 @@ async function entry(entryMode, mode, seedProvider = null) {
   }
   await startClient();
 }
-async function turn(threadId, model, marker, fast = false) {
+async function turn(threadId, model, marker, serviceTier = null) {
   const offset = requests.length, start = notes.length;
-  const { turn } = await rpc('turn/start', { threadId, model, effort: 'low', serviceTier: fast ? 'priority' : null, input: [{ type: 'text', text: marker }] });
+  const { turn } = await rpc('turn/start', { threadId, model, effort: 'low', serviceTier, input: [{ type: 'text', text: marker }] });
   let result;
   for (let i = 0; i < 250; i++) { result = notes.slice(start).find(value => value.method === 'turn/completed' && value.params.turn.id === turn.id); if (result) break; await delay(50); }
   assert.equal(result?.params.turn.status, 'completed', JSON.stringify(result?.params.turn.error));
@@ -177,7 +179,7 @@ async function turn(threadId, model, marker, fast = false) {
   assert.equal(record.url.startsWith('/backend-api'), model === official.slug);
   assert.equal(record.headers.authorization, model === official.slug ? 'Bearer inert-native' : 'Bearer inert-gateway');
   if (model !== official.slug) assert.equal(record.headers['chatgpt-account-id'], undefined);
-  if (fast) assert.equal(record.body.service_tier, 'priority');
+  if (serviceTier) assert.equal(record.body.service_tier, serviceTier);
   return record;
 }
 async function compact(threadId, remote) {
@@ -205,7 +207,7 @@ try {
   assert.equal(menus.at(-1).identity.requiresOpenaiAuth, false);
   assert.equal(menus.at(-1).identity.authMethod, null);
   const started = await rpc('thread/start', { model: gatewayModels[0], cwd, approvalPolicy: 'never', sandbox: 'read-only' }); threadId = started.thread.id;
-  await turn(threadId, gatewayModels[0], 'ORIGINAL_API_CONTEXT', true);
+  await turn(threadId, gatewayModels[0], 'ORIGINAL_API_CONTEXT', 'priority');
   const fixtureIdToken = ['e30', Buffer.from(JSON.stringify({ email: 'fixture@example.invalid', exp: Math.floor(Date.now() / 1000) + 3600,
     'https://api.openai.com/auth': { chatgpt_account_id: 'fixture-account', chatgpt_user_id: 'fixture-user', chatgpt_plan_type: 'plus' } })).toString('base64url'), 'inert'].join('.');
   fs.writeFileSync(path.join(home, 'auth.json'), JSON.stringify({ auth_mode: 'chatgpt', OPENAI_API_KEY: null, last_refresh: new Date().toISOString(),
@@ -215,10 +217,11 @@ try {
   const exhausted = await rpc('account/rateLimits/read');
   assert.equal(exhausted.rateLimits.primary.usedPercent, 100);
   const resumed = await rpc('thread/resume', { threadId, excludeTurns: true }); assert.equal(resumed.thread.id, threadId); assert.equal(resumed.modelProvider, 'chatgpt_api_launcher');
-  const first = await turn(threadId, official.slug, 'OFFICIAL_CONTEXT', true); assert(JSON.stringify(first.body).includes('ORIGINAL_API_CONTEXT'));
+  const first = await turn(threadId, official.slug, 'OFFICIAL_CONTEXT', 'priority'); assert(JSON.stringify(first.body).includes('ORIGINAL_API_CONTEXT'));
   const next = await turn(threadId, gatewayModels[1], 'CUSTOM_CONTEXT'); assert(JSON.stringify(next.body).includes('ORIGINAL_API_CONTEXT')); assert(JSON.stringify(next.body).includes('OFFICIAL_CONTEXT'));
+  await turn(threadId, gatewayModels[0], 'MIXED_ULTRAFAST', 'ultrafast');
   checks.push('An exhausted subscription reported by native account/rateLimits does not prevent gateway turns in the same mixed-provider conversation');
-  await turn(threadId, official.slug, 'OFFICIAL_RETURN_CONTEXT', true);
+  await turn(threadId, official.slug, 'OFFICIAL_RETURN_CONTEXT', 'priority');
   checks.push('API-only chat resumes in signed-in mixed entry and switches official → non-GPT → official with original context');
   await entry('apionly', 'gateway');
   assert.equal(menus.at(-1).models.length, 2);
@@ -226,8 +229,9 @@ try {
   assert.equal(menus.at(-1).identity.authMethod, null);
   assert.equal(menus.at(-1).identity.authToken, null);
   const back = await rpc('thread/resume', { threadId, excludeTurns: true }); assert.equal(back.modelProvider, 'chatgpt_api_launcher');
-  const last = await turn(threadId, gatewayModels[0], 'API_RETURN_CONTEXT', true); assert(JSON.stringify(last.body).includes('OFFICIAL_RETURN_CONTEXT')); assert.equal(last.body.service_tier, 'priority');
-  checks.push('The same chat returns to API-only; model directory excludes official entries and keeps GPT Fast requests');
+  const last = await turn(threadId, gatewayModels[0], 'API_RETURN_CONTEXT', 'priority'); assert(JSON.stringify(last.body).includes('OFFICIAL_RETURN_CONTEXT')); assert.equal(last.body.service_tier, 'priority');
+  await turn(threadId, gatewayModels[0], 'API_ONLY_ULTRAFAST', 'ultrafast');
+  checks.push('The native model menu and requests support both Fast and Ultrafast for custom GPT-6.2 Sol in mixed and API-only entries');
   checks.push('API-only ignores saved ChatGPT identity without changing the original credentials');
   await compact(threadId, false); checks.push('API provider uses native text compaction; no adapter-written prompt');
   finalHistory = await rpc('thread/turns/list', { threadId, limit: 20 });
@@ -240,12 +244,12 @@ try {
   assert.equal(officialResume.thread.id, threadId); assert.equal(officialResume.modelProvider, 'chatgpt_api_launcher');
   assert.equal(requests.length, before, 'Resume sent inference');
   assert.deepEqual(await rpc('thread/turns/list', { threadId, limit: 20 }), finalHistory);
-  await turn(threadId, official.slug, 'OFFICIAL_COMPATIBLE_CONTEXT', true);
+  await turn(threadId, official.slug, 'OFFICIAL_COMPATIBLE_CONTEXT', 'priority');
   await compact(threadId, true);
   assert(requests.slice(before).every(record => record.url.startsWith('/backend-api')), 'Official compatibility sent a gateway request');
   checks.push('Official entry resumes the same API chat with unchanged history, an official-only menu, native remote compaction and no gateway inference');
   const native = await rpc('thread/start', { model: official.slug, cwd, approvalPolicy: 'never', sandbox: 'read-only' });
-  await turn(native.thread.id, official.slug, 'NATIVE_OFFICIAL_CONTEXT', true);
+  await turn(native.thread.id, official.slug, 'NATIVE_OFFICIAL_CONTEXT', 'priority');
   await compact(native.thread.id, true); checks.push('Official entry retains OpenAI authentication, Fast requests and native remote compaction');
   await entry('api', 'mixed');
   await rpc('thread/resume', { threadId, excludeTurns: true });
@@ -282,7 +286,7 @@ try {
   // native process; no default switching, manual settings or forks are involved.
   for (const model of gatewayModels) {
     await Promise.all(legacyThreads.map(async old => {
-      const record = await turn(old.id, model, 'AUTO_' + old.provider + '_' + old.id + '_' + model, model === gatewayModels[0]);
+      const record = await turn(old.id, model, 'AUTO_' + old.provider + '_' + old.id + '_' + model, model === gatewayModels[0] ? 'priority' : null);
       assert(JSON.stringify(record.body).includes('LEGACY_' + old.provider));
     }));
   }
@@ -292,8 +296,8 @@ try {
   await entry('api', 'mixed');
   for (const old of legacyThreads) {
     const same = await rpc('thread/resume', { threadId: old.id, excludeTurns: true }); assert.equal(same.thread.id, old.id);
-    await turn(old.id, official.slug, 'AUTO_OFFICIAL_' + old.provider, true);
-    await turn(old.id, gatewayModels[0], 'AUTO_GATEWAY_' + old.provider, true);
+    await turn(old.id, official.slug, 'AUTO_OFFICIAL_' + old.provider, 'priority');
+    await turn(old.id, gatewayModels[0], 'AUTO_GATEWAY_' + old.provider, 'priority');
   }
   checks.push('One mixed launch alternates every original provider conversation between official and gateway models with no extra chats');
   await entry('official', 'mixed');

@@ -25,7 +25,12 @@ const latest = { ...template, slug: 'gpt-6.1-sol', display_name: 'GPT-6.1-Sol', 
   model_messages: nativeMessages, fixture_metadata: { keep: true } };
 delete latest.base_instructions;
 let currentTemplate = old;
-const gatewayIds = ['Vendor/model', 'GPT/gpt-6.1-sol', 'GPT/gpt-6-sol', 'GPT/gpt-catalog-unknown'];
+const sol = 'GPT/gpt-6.2-sol';
+const gatewayIds = ['Vendor/model', 'GPT/gpt-6.1-sol', 'GPT/gpt-6-sol', sol, 'GPT/gpt-catalog-unknown'];
+const solTiers = [
+  { id: 'priority', name: 'Fast', description: '2x speed, increased usage' },
+  { id: 'ultrafast', name: 'Ultrafast', description: 'The fastest available responses for latency-sensitive work.' },
+];
 const gatewayRequests = [];
 let gatewayMetadata = {};
 let extra = [], modelStatus = 200, pauseOld;
@@ -92,6 +97,12 @@ try {
   checks.push('Modern GPT aliases retain the complete native instructions object; legacy aliases retain base instructions in both menu files');
   for (const gatewayModel of gatewayMenu) {
     const gpt = gatewayModel.slug.startsWith('GPT/');
+    if (gatewayModel.slug === sol) {
+      assert.deepEqual(gatewayModel.service_tiers, solTiers);
+      assert.deepEqual(gatewayModel.additional_speed_tiers, ['fast', 'ultrafast']);
+      assert.equal(gatewayModel.default_service_tier, null);
+      continue;
+    }
     assert.deepEqual(gatewayModel.service_tiers.map(tier => tier.id), gpt ? ['priority'] : []);
     assert.deepEqual(gatewayModel.additional_speed_tiers, gpt ? ['fast'] : []);
     assert(!gatewayModel.service_tiers.some(tier => /\d(?:\.\d+)?x speed/.test(tier.description)));
@@ -115,12 +126,15 @@ try {
   await (await fetch(base + '/readyz')).json();
   assert.deepEqual(menu().find(model => model.slug === 'Vendor/model').service_tiers, []);
   checks.push('Raw upstream Fast metadata stays in the cache, but non-GPT never inherits a native Fast control');
-  gatewayMetadata = { 'GPT/gpt-6.1-sol': { service_tiers: [], additional_speed_tiers: [] },
+  gatewayMetadata = { [sol]: { service_tiers: [solTiers[0]], additional_speed_tiers: ['fast'] },
+    'GPT/gpt-6.1-sol': { service_tiers: [], additional_speed_tiers: [] },
     'GPT/gpt-6-sol': { service_tiers: [{ id: 'fast', name: 'Gateway Fast', description: 'Gateway description' }], additional_speed_tiers: ['fast'] } };
   await (await fetch(base + '/readyz')).json();
   assert.deepEqual(menu().find(model => model.slug === 'GPT/gpt-6.1-sol').service_tiers, []);
   assert.deepEqual(menu().find(model => model.slug === 'GPT/gpt-6.1-sol').additional_speed_tiers, []);
   assert.deepEqual(menu().find(model => model.slug === 'GPT/gpt-6-sol').service_tiers, gatewayMetadata['GPT/gpt-6-sol'].service_tiers);
+  assert.deepEqual(menu().find(model => model.slug === sol).service_tiers, [solTiers[0]]);
+  assert.deepEqual(menu().find(model => model.slug === sol).additional_speed_tiers, ['fast']);
   gatewayMetadata = {};
   await (await fetch(base + '/readyz')).json();
   assert.equal(menu().find(model => model.slug === 'GPT/gpt-6.1-sol').service_tiers[0].id, 'priority');
@@ -218,6 +232,8 @@ try {
   assert.equal(records.length, officialCalls);
   assert.deepEqual(new Set(menu().map(model => model.slug)), new Set(gatewayIds));
   assert(menu().filter(model => model.slug.startsWith('GPT/')).every(model => model.service_tiers[0]?.id === 'priority' && model.additional_speed_tiers.includes('fast') && model.default_service_tier === null));
+  assert.deepEqual(menu().find(model => model.slug === sol).service_tiers, solTiers);
+  assert.deepEqual(menu().find(model => model.slug === sol).additional_speed_tiers, ['fast', 'ultrafast']);
   assert.deepEqual(menu().find(model => model.slug === 'Vendor/model').service_tiers, []);
   assert.equal(fs.existsSync(path.join(home, 'auth.json')), false);
   assert(menu().every(model => JSON.stringify(model.model_messages) === JSON.stringify(template.model_messages)));
