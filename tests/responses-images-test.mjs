@@ -189,8 +189,8 @@ async function start() {
   throw new Error('Fixture router did not start: ' + stderr);
 }
 let base;
-async function send(model, stream = false, suffix = '/responses', input = 'Draw fixture') {
-  return fetch(base + '/v1' + suffix, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model, stream, input }), signal: AbortSignal.timeout(10000) });
+async function send(model, stream = false, suffix = '/responses', input = 'Draw fixture', timeout = 10000) {
+  return fetch(base + '/v1' + suffix, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model, stream, input }), signal: AbortSignal.timeout(timeout) });
 }
 async function wsTurn(ws, model, previous, input = 'Continue') {
   const events = [];
@@ -294,7 +294,8 @@ try {
     chunk('IDAT', zlib.deflateSync(Buffer.alloc(1600 * (1 + 2048 * 4)), { level: 0 })), chunk('IEND', Buffer.alloc(0))]);
   const largeResult = largePng.toString('base64'); assert(largeResult.length > 16 * 1024 * 1024);
   imageOutput = [image('ig_large_fixture', largeResult)];
-  const largeStream = await send('GPT/gpt-test', true); let largeDelivered, largeTerminal;
+  // Hosted runners can take longer to encode and verify the large image.
+  const largeStream = await send('GPT/gpt-test', true, '/responses', 'Draw fixture', 30000); let largeDelivered, largeTerminal;
   for await (const packet of ssePackets(largeStream.body, { maxEventBytes: 64 * 1024 * 1024 })) {
     if (packet.data?.type === 'response.output_item.done') largeDelivered = packet.data.item;
     if (packet.data) largeTerminal = packet.data.type;
