@@ -8,8 +8,13 @@ const key = '__quota_test_' + Date.now();
 const source = 'export const __rspack_esm_ids=[];export const __webpack_modules__={gate(e,t,n){const{host:w,blocked:E,model:g,limits:T}=n,tk={is:(limits)=>limits.blocked};let u;u="local"===w&&E||(0,tk.is)(T,g);e.result={rateLimitWarningThreshold:50,sendBlocked:u}}};';
 const namedSubmitSource = 'var C=n("eLmE"),P=n("a6kU");let nF=host,n6={settings:{model}},nK=(0,i._U)(C.F9,nF),of=(0,i.Ul)("local"===nF&&P.U);let other=otherBlock&&"permission-blocked",reserve=nK&&"reserve-limit",usage=of&&"usage-limit";let disabled=[other,reserve,usage].filter(Boolean).join(",");return{activeCollaborationMode:n6,submitDisabledReasons:disabled};';
 const namedModule = 'export const __rspack_esm_ids=[];export const __webpack_modules__={composer(e,t,n){' + namedSubmitSource + '}};';
+const sharedSubmitSource = 'let{activeCollaborationMode:mode,submitDisabledReasons:upstream}=props,target={hostId:host},model=mode?.settings.model??null;'
+  + 'let banner={hostId:target.hostId,selectedModel:model},seat=otherBlock&&"view-only-seat",parts=[upstream,seat].filter(Boolean);'
+  + 'let reasons=parts.join(","),blocked=reasons.length>0;return{submitDisabledReasons:reasons,submitDisabled:blocked};';
+const sharedSubmitModule = 'export const __rspack_esm_ids=[];export const __webpack_modules__={sharedComposer(e,t,n){' + sharedSubmitSource + '}};';
 const contextSource = 'let selected=(0,hooks.i1)(scope.u,(thread,{get:read})=>read(settings,thread)?.model??null),usage=(0,store.tv)("tokenUsageInfo"),selector=(0,hooks.i1)(scope.u,(thread,{get:read})=>null==thread?null:read(usage,{hostId:read(hosts.qX,thread),threadId:thread}));return selector;';
 const contextModule = 'export const __rspack_esm_ids=[];export const __webpack_modules__={context(e,t,n){' + contextSource + '}};';
+const expressionModule = contextModule.replace('context(e,t,n)', '"ctx42":function(e,t,n)');
 const catalog = { official: [{ slug: 'official' }], gatewayIds: ['Gateway/model', 'official'] };
 const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'native-ui-index-'));
 const archive = path.join(fixture, 'app.asar'), index = path.join(fixture, 'index.json');
@@ -40,11 +45,30 @@ try {
   const refreshed = nativeQuotaAssets(archive, index);
   assert.equal(refreshed.length, 2, 'An old matcher cache hid a newly supported send-button module');
   assert(refreshed.some(asset => asset.submitCount === 1));
+  writeArchive({ 'quota.js': source, 'shared-composer.js': sharedSubmitModule });
+  assert(nativeQuotaAssets(archive, index).some(asset => asset.url.endsWith('/shared-composer.js') && asset.submitCount === 1));
   writeArchive({ 'quota.js': source, 'context.js': contextModule });
   const contextAssets = nativeQuotaAssets(archive, index);
   assert.equal(contextAssets.length, 2, 'The context selector was omitted from the runtime compatibility index');
   assert(contextAssets.some(asset => asset.factory && asset.source.startsWith('export const __webpack_modules__={')));
   assert.deepEqual(nativeQuotaAssets(archive, index), contextAssets, 'Cached module ranges changed the context bootstrap source');
+  writeArchive({ 'context.js': expressionModule });
+  const [expressionAsset] = nativeQuotaAssets(archive, index);
+  assert.equal(expressionAsset.moduleId, 'ctx42');
+  assert.deepEqual(expressionAsset.features, ['context']);
+  assert.deepEqual(nativeQuotaAssets(archive, index), [expressionAsset]);
+  for (const [original, asset] of [[contextModule, contextAssets.find(entry => entry.factory)], [expressionModule, expressionAsset]]) {
+    const testKey = key + '_' + asset.moduleId;
+    const url = 'data:text/javascript,' + encodeURIComponent(original);
+    try {
+      new Function(quotaBootstrap([{ ...asset, url }], [], testKey, testKey + '_notify'))();
+      const native = await import(url);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(globalThis[testKey].installed, 1);
+      assert(native.__webpack_modules__[asset.moduleId].toString().includes(testKey));
+      assert(!Object.hasOwn(native.__webpack_modules__, 'function'), 'The anonymous function name replaced the original factory ID');
+    } finally { delete globalThis[testKey]; }
+  }
   writeArchive(namedModule.replace('usage=of&&"usage-limit"', 'usage=of&&"changed-quota-reason"'));
   const unmatched = nativeQuotaAssets(archive, index);
   assert.equal(unmatched[0].legacySubmitCount, 1, 'An unmatched send gate disappeared from compatibility validation');
@@ -82,6 +106,18 @@ try {
   const native = await import(url);
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(globalThis[key].installed, 1);
+  const sharedComposer = new Function('props', 'host', 'otherBlock', scopeNativeQuota(sharedSubmitSource, key).text);
+  const usageReasons = 'reserve-limit,usage-limit';
+  for (const [host, model, remaining] of [
+    ['local', 'Gateway/model', ''], ['local', 'official', usageReasons],
+    ['remote', 'Gateway/model', usageReasons], ['local', 'unknown', usageReasons], ['local', null, usageReasons],
+  ]) {
+    const props = { activeCollaborationMode: { settings: { model } }, submitDisabledReasons: usageReasons };
+    assert.deepEqual(sharedComposer(props, host, false), { submitDisabledReasons: remaining, submitDisabled: Boolean(remaining) });
+    props.submitDisabledReasons = ['provider-blocked', usageReasons, 'policy-violation'].join(',');
+    const expected = ['provider-blocked', remaining, 'policy-violation', 'view-only-seat'].filter(Boolean).join(',');
+    assert.deepEqual(sharedComposer(props, host, true), { submitDisabledReasons: expected, submitDisabled: true });
+  }
   const foreignKey = key + '_browser';
   new Function('location', quotaBootstrap([{ url, source }], ['Gateway/model'], foreignKey, foreignKey + '_notify'))({ protocol: 'https:', host: 'example.com' });
   assert.equal(globalThis[foreignKey], undefined);
@@ -140,4 +176,4 @@ try {
     assert.equal(selected(null, { get }), null);
   }
 } finally { delete globalThis[key]; }
-console.log(JSON.stringify({ passed: true, checks: ['Native Boolean and named-reason submit gates scope both exhausted-subscription flags to the selected model', 'Official models, remote hosts, unknown models and other native blockers retain their original decisions', 'Model switching updates submit eligibility and catalog changes update the in-memory scope', 'Matcher upgrades invalidate old asset indexes; unadapted quota gates remain visible to validation', 'API model context windows follow the current model independently of missing upstream usage, preserving actual token counts and native records'] }));
+console.log(JSON.stringify({ passed: true, checks: ['Native Boolean and named-reason submit gates scope both exhausted-subscription flags to the selected model', 'Official models, remote hosts, unknown models and other native blockers retain their original decisions', 'Model switching updates submit eligibility and catalog changes update the in-memory scope', 'Matcher upgrades invalidate old asset indexes; unadapted quota gates remain visible to validation', 'Both anonymous factory expressions and method shorthand retain their original context module IDs', 'API model context windows follow the current model independently of missing upstream usage, preserving actual token counts and native records'] }));

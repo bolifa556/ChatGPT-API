@@ -117,7 +117,8 @@ function events(body, url, send) {
 }
 const server=http.createServer(async(req,res)=>{
   try{
-    if(req.url.includes('/models')){res.setHeader('content-type','application/json');res.end(JSON.stringify(req.url.startsWith('/backend-api')?{models:[official]}:{data:models.map(id=>({id,...(contextProbe&&id==='Vendor/small'?{context_window:128000}:{})}))}));return;}
+    // This fixture checks full history on every gateway tool round.
+    if(req.url.includes('/models')){res.setHeader('content-type','application/json');res.end(JSON.stringify(req.url.startsWith('/backend-api')?{models:[official]}:{data:models.map(id=>({id,supports_websockets:false,...(contextProbe&&id==='Vendor/small'?{context_window:128000}:{})}))}));return;}
     const body=await readRequestJson(req);
     res.writeHead(200,{'content-type':'text/event-stream'});
     if(req.url.endsWith('/chat/completions')){

@@ -2,6 +2,7 @@ import zlib from 'node:zlib';
 import { promisify } from 'node:util';
 import { isIP } from 'node:net';
 import { checkServerIdentity } from 'node:tls';
+import { once } from 'node:events';
 import { Agent, ProxyAgent, buildConnector, request } from 'undici';
 
 export const MAX_REQUEST_BYTES = 256 * 1024 * 1024;
@@ -10,6 +11,8 @@ export const CONNECT_TIMEOUT_MS = 10000;
 // default timers; cancellation and upstream completion still release requests.
 export const RESPONSE_TIMEOUTS = { headersTimeout: 0, bodyTimeout: 0 };
 export const NATIVE_RESPONSES_HEADER = 'x-openai-internal-codex-responses-lite';
+export const WS_LITE_FIELD = 'ws_request_header_x_openai_internal_codex_responses_lite';
+export const TURN_STATE_HEADER = 'x-codex-turn-state';
 export const FORWARDED_NATIVE_RESPONSES_HEADER = 'x-bf-eh-' + NATIVE_RESPONSES_HEADER;
 // Protocol metadata only: credentials and account/organization identities must
 // never be copied into Bifrost's explicit upstream-header mechanism.
@@ -17,6 +20,21 @@ export const NATIVE_PROTOCOL_HEADERS = [NATIVE_RESPONSES_HEADER, 'user-agent', '
   'x-codex-beta-features', 'x-codex-turn-metadata', 'x-codex-turn-state', 'x-client-request-id',
   'x-codex-window-id', 'thread-id', 'session-id', 'x-codex-image-turn-id'];
 export const FORWARDED_NATIVE_HEADERS = new Set(NATIVE_PROTOCOL_HEADERS.map(name => 'x-bf-eh-' + name));
+
+// Fetch port restrictions within the range of unprivileged ephemeral ports.
+const browserBlockedPorts = new Set([1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000,
+  6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080]);
+export async function listenBrowserLoopback(server) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const ready = once(server, 'listening');
+    server.listen(0, '127.0.0.1');
+    await ready;
+    const { port } = server.address();
+    if (!browserBlockedPorts.has(port)) return port;
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+  throw new Error('No browser-compatible loopback port was assigned.');
+}
 
 export function normalizeGatewayTransport(value) {
   // Match the Windows launcher's explicit SSH opt-in. Other values use the
@@ -143,6 +161,23 @@ export function releaseResponseBody(body) {
   body.destroy();
 }
 
+// A complete SSE event can reach the client before the HTTP reply ends.
+export function drainResponseTail(body) {
+  if (!body || body.destroyed || body.readableEnded) return;
+  let bytes = 0;
+  const stop = () => releaseResponseBody(body);
+  const timer = setTimeout(stop, 150).unref();
+  const clean = () => {
+    clearTimeout(timer);
+    body.off('end', clean); body.off('close', clean); body.off('error', clean);
+    body.off('data', consume);
+  };
+  const consume = chunk => { if ((bytes += chunk.length) > 8192) stop(); };
+  body.once('end', clean); body.once('close', clean); body.once('error', clean);
+  body.on('data', consume);
+  body.resume();
+}
+
 export async function writeChunk(res, chunk) {
   if (res.destroyed) throw Object.assign(new Error('Client disconnected'), { code: 'ABORT_ERR' });
   if (res.write(chunk)) return;
@@ -158,7 +193,11 @@ export async function writeChunk(res, chunk) {
 
 export function writeWebSocket(socket, value) {
   if (socket.readyState !== 1) return Promise.reject(Object.assign(new Error('Client disconnected'), { code: 'ABORT_ERR' }));
-  return new Promise((resolve, reject) => socket.send(value, error => error ? reject(error) : resolve()));
+  return new Promise((resolve, reject) => {
+    const sent = error => error ? reject(error) : resolve();
+    if (Buffer.isBuffer(value)) socket.send(value, { binary: false }, sent);
+    else socket.send(value, sent);
+  });
 }
 
 export function relayClose(client, code, reason) {

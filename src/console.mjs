@@ -12,6 +12,7 @@ import { imageOnlyModel, imageCapabilities, automaticImageCandidates } from './i
 import { modelStrengths } from './model-strength.mjs';
 import { probeModels } from './model-probe.mjs';
 import { cleanManagedLogs, createDiagnosticLog, describeError, errorDetails } from './diagnostics.mjs';
+import { listenBrowserLoopback } from './transport.mjs';
 
 const moduleRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const readJson = (file, fallback = null) => { try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { return fallback; } };
@@ -36,7 +37,7 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
   let env = readEnvFile(path.join(root, 'data/.env'));
   const version = readJson(path.join(root, 'package.json'), { version: '3.1.5' }).version;
   const build = crypto.createHash('sha256');
-  for (const file of ['src/console.mjs', 'src/model-probe.mjs', 'src/model-context.mjs', 'src/model-strength.mjs', 'src/settings.mjs', 'assets/console/index.html', 'assets/console/console.js', 'assets/console/console.css']) {
+  for (const file of ['src/console.mjs', 'src/model-probe.mjs', 'src/model-context.mjs', 'src/model-strength.mjs', 'src/settings.mjs', 'src/transport.mjs', 'assets/console/index.html', 'assets/console/console.js', 'assets/console/console.css']) {
     build.update(fs.readFileSync(path.join(moduleRoot, file)));
   }
   const buildId = build.digest('hex');
@@ -201,8 +202,7 @@ export async function startConsole({ root = process.env.CHATGPT_API_ROOT || modu
       if (!res.destroyed) json(res, error.status || 400, { error: redact(error.message, settings, [env.API_KEY]) });
     }
   });
-  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-  const port = server.address().port, url = 'http://127.0.0.1:' + port + '/#' + token;
+  const port = await listenBrowserLoopback(server), url = 'http://127.0.0.1:' + port + '/#' + token;
   server.on('close', () => {
     clearTimeout(idleTimer);
     if (readJson(stateFile)?.token === token) {

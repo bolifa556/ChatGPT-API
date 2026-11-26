@@ -99,7 +99,7 @@
 
 自定义 API 省略消息阶段时，适配层根据本轮工具调用与终止事件补齐 `commentary`／`final_answer`。文本增量立即发送，缺少阶段的消息完成事件在工具或结束状态确定后提交。已有阶段字段优先沿用。该规则共用于 Responses、Chat、HTTP 和 WebSocket。
 
-部分 Responses 接口仅在结束包的输出列表里返回正文或思考。此时只为尚未完成的项目发送客户端需要的完成事件，已经显示过的内容不会重复。Chat 接口返回分块正文或拒绝内容时保留对应类型和顺序；工具参数被截断时保留上游的中断原因。
+部分 Responses 接口只在结束包的 `output` 里返回正文、思考或已完成的工具调用。适配层把原始项目补进客户端消费的完成事件，只补缺失的项目。Chat 的纯工具回复在收到 `tool_calls` 结束原因时交付完整调用，用量仍在尾包读取。分块正文、拒绝内容和截断原因沿用上游格式。
 
 上下文窗口显示通过运行时的模型目录读取当前 API 模型容量，按客户端预留比例计算。上游缺少有效 usage 时，窗口显示仍随所选模型变化，token 统计继续使用客户端收到的真实数据。
 
@@ -123,11 +123,13 @@ WebSocket 的 `response.interrupt` 按 `response_id` 定位当前响应，仅支
 | Chat stop / tool_calls | response.completed |
 | length / content_filter | response.incomplete；不把未完成流当成功，不执行未完成的自定义工具参数 |
 | 上游错误、没有结束事件 | 明确返回 error/failed；不补一条模型回答，不悄悄重试已生成的内容 |
-| prompt/completion/total tokens | 映射为 input/output/total tokens；有实际缓存/思考计数时映射明细，缺失值不编造 0 |
+| prompt/completion/total tokens | 按输入、输出和总量映射，合并分块计数。已知输入与输出时可计算总量。保留可用的缓存和思考计数 |
 | Chat refusal | 还原 refusal 内容和事件，不改成普通回答 |
 | service_tier | 保留上游实际返回档位；最后一块才提供也会进入最终响应。缺失不编造，显式 null 保留，不用请求的 priority 覆盖上游 default |
 
 HTTP JSON 与 HTTP SSE/WebSocket 使用相同的项目转换规则。SSE 保留 Unicode、跨字节分片和 CRLF 语义。最终 output 项目按完整对象处理，不把不同项目的字段拼成上游从未生成过的消息。
+
+网关明确拒绝 `configuration_update` 时，适配层将可转换的有效设置移到发给同一来源的请求副本中，再提交一次。对 Chat 内置搜索的转换服从原请求的工具选择。
 
 官方 HTTP 未压缩请求可补充无损 zstd，解压后的请求字节不变；已有原生编码继续保留，必要转换后按原编码重压缩。网关不假定支持压缩。模型响应、原生上下文压缩及图片生成／编辑的响应等待均显式禁用适配层计时器，客户端和上游自身限制不变。用户取消、客户端断开及终止事件仍回收连接；Chat 最后一块 usage 在结束前完整读取。传输压缩不会改变上下文压缩协议。
 

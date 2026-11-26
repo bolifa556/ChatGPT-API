@@ -5,7 +5,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
-import { startQuotaCompatibleClient, quotaBootstrap } from '../src/native-quota.mjs';
+import { startQuotaCompatibleClient, quotaBootstrap, quotaWarningMessage } from '../src/native-quota.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'native-startup-'));
 const clientVersion = '26.1106.6628.0';
@@ -27,9 +27,11 @@ function writeArchive(name, entries) {
 const archive = writeArchive('app.asar', { 'quota.js': source });
 const updatedArchive = writeArchive('updated.asar', { 'unrecognized.js': 'const other = true;' });
 const partialArchive = writeArchive('partial.asar', { 'quota.js': source, 'changed.js': source.replace('__webpack_modules__', '__new_modules__') });
-const runtimePartialArchive = writeArchive('runtime-partial.asar', { 'quota.js': source, 'other.js': source.replace('gate(e,t,n)', 'otherGate(e,t,n)') });
-const cases = { ready: 'ready', notified: 'ready', 'script-error': 'native_command_failed', 'module-error': 'native_module_failed',
-  'partial-module-error': 'native_module_failed', 'updated-module-format': 'native_module_format',
+const context = 'export const __webpack_modules__={ctx:function(e,t,n){let selected=(0,hooks.i1)(scope.u,(thread,{get:read})=>read(settings,thread)?.model??null),usage=(0,store.tv)("tokenUsageInfo"),selector=(0,hooks.i1)(scope.u,(thread,{get:read})=>null==thread?null:read(usage,{hostId:read(hosts.qX,thread),threadId:thread}));return selector}};';
+const fast = 'export const __webpack_modules__={fast(e,t,n){const p=host,m=(0,i.tn)(p),h=m?.authMethod==="chatgpt"||m?.authMethod==="personalAccessToken"||m?.authMethod==="amazonBedrock";return{serviceTierAccess:h}}};';
+const runtimePartialArchive = writeArchive('runtime-partial.asar', { 'quota.js': source, 'context.js': context, 'fast.js': fast });
+const cases = { ready: 'ready', notified: 'ready', 'script-error': 'native_command_failed', 'module-error': 'native_module_import_failed',
+  'partial-module-error': 'native_module_changed', 'updated-module-format': 'native_module_format',
   pending: 'native_module_load_timeout', unstarted: 'native_bootstrap_not_started', 'foreign-page': 'native_page_not_attached',
   unresponsive: 'native_command_timeout', exit: 'exit', 'missing-archive': 'ENOENT', 'updated-renderer': 'native_ui_unsupported' };
 try {
@@ -77,11 +79,24 @@ try {
         assert.equal(child.exitCode, null, 'UI compatibility failure stopped the native client');
         assert.equal(child.signalCode, null, 'UI compatibility failure terminated the native client');
         assert.equal(warnings.length, 1, 'A degraded compatibility attempt must warn exactly once');
+        const warning = quotaWarningMessage(warnings[0]);
+        assert(warning.includes(clientVersion));
+        assert(warning.includes(final.failures[0].reason));
         if (['updated-module-format', 'partial-module-error'].includes(scenario)) {
           assert(final.ready && final.installed === 1, 'A failed asset prevented independent compatible assets from loading');
         }
         if (['missing-archive', 'updated-renderer'].includes(scenario)) assert.deepEqual(debugArgs, []);
         if (scenario === 'module-error') assert.equal(final.failedAsset, 'app://-/assets/quota.js');
+        if (scenario === 'partial-module-error') {
+          assert.equal(final.errors, 2);
+          assert.deepEqual(final.failures.map(failure => [failure.code, failure.asset, failure.features]), [
+            ['native_module_changed', 'app://-/assets/context.js', ['context']],
+            ['native_module_import_failed', 'app://-/assets/fast.js', ['fast']],
+          ]);
+          assert.match(warning, /上下文容量/);
+          assert.match(warning, /小闪电/);
+          assert.doesNotMatch(warning, /额度用完|发送按钮/);
+        }
       }
     } finally {
       if (child?.exitCode === null && child.signalCode === null) { child.kill(); await once(child, 'exit'); }
@@ -89,9 +104,11 @@ try {
   }
   const key = '__bootstrap_sync_failure';
   const broken = source.replace('export const __webpack_modules__=', 'throw Error("fixture prepare failure");export const __webpack_modules__=');
-  new Function(quotaBootstrap([{ source: broken, url: 'data:text/javascript,fixture' }], [], key, key + '_notify'))();
-  assert.equal(globalThis[key].error, 'Error: fixture prepare failure');
-  assert.equal(globalThis[key].failedAsset, 'data:text/javascript,fixture');
-  delete globalThis[key];
+  const notices = [];
+  globalThis[key + '_notify'] = value => notices.push(JSON.parse(value));
+  try {
+    new Function(quotaBootstrap([{ source: broken, url: 'data:text/javascript,fixture' }], [], key, key + '_notify'))();
+    assert.deepEqual(notices.at(-1).failure, { code: 'native_module_prepare_failed', message: 'Error: fixture prepare failure', asset: 0 });
+  } finally { delete globalThis[key]; delete globalThis[key + '_notify']; }
 } finally { fs.rmSync(root, { recursive: true, force: true }); }
 console.log(JSON.stringify({ passed: true, checks: Object.keys(cases).concat('synchronous preparation failure retains asset and cause') }));

@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { imageCandidates, imageModelUnavailable } from '../src/image-compat.mjs';
 import { readSettings, saveSettings } from '../src/settings.mjs';
+import { listenBrowserLoopback } from '../src/transport.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fixture = path.join(root, 'data/testing/image-generation-' + process.pid);
@@ -17,13 +18,16 @@ const nativeResult = { created: 1780000000, data: [{ b64_json: png, generation_i
 const officialModel = { ...JSON.parse(fs.readFileSync(path.join(root, 'assets/model-template.json'))).models[0], slug: 'gpt-6-sol' };
 const records = [], checks = [], servers = [], sockets = new Set(), children = [];
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-const listen = server => new Promise(resolve => {
+const listen = server => {
   servers.push(server); server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
-  server.listen(0, '127.0.0.1', () => resolve(server.address().port));
-});
+  return listenBrowserLoopback(server);
+};
 let gatewayModels = [{ id: 'Other/chat-model' }, { id: '绘图/任意别名', capabilities: { image_generation: true, image_edit: true } }];
 let officialStatus = 200, officialData = nativeResult, gatewayStatus = 200, gatewayData = { created: 1780000001, data: [{ b64_json: png }] };
 let officialAction = '', gatewayAction = '', downloadPort, downloadType = 'image/png';
+let finishImageStream;
+const preview = 'event: image_generation.partial_image\ndata: ' + JSON.stringify({ type: 'image_generation.partial_image', partial_image_index: 0, b64_json: png }) + '\n\n';
+const completedPreview = 'event: image_generation.completed\ndata: ' + JSON.stringify({ type: 'image_generation.completed', b64_json: png }) + '\n\n';
 let unavailableFirst = false;
 function peer(which) {
   return http.createServer(async (req, res) => {
@@ -43,6 +47,12 @@ function peer(which) {
     let data = which === 'official' ? officialData : gatewayData;
     if (which === 'gateway' && gatewayAction === 'multipart-only' && req.url.endsWith('/edits') && req.headers['content-type'] === 'application/json') {
       status = 400; data = { error: { message: 'at least one image or image_url is required' } };
+    }
+    if (which === 'gateway' && body.stream === true) {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(preview);
+      finishImageStream = () => res.end(completedPreview);
+      return;
     }
     if (which === 'gateway' && unavailableFirst && body.model === '绘图/任意别名') { status = 404; data = { error: { code: 'model_not_found', message: 'Image alias unavailable' } }; }
     res.writeHead(status, { 'content-type': 'application/json', 'x-native-image-peer': which });
@@ -69,12 +79,15 @@ async function start(mode, options = {}) {
   const ready = await fetch(base + '/readyz', { signal: AbortSignal.timeout(5000) }); assert.equal(ready.status, 200, stderr);
   return { base,dir };
 }
-async function send(router, operation = 'generations', extra = {}, routePrefix = '/v1', token = 'mock-api-key') {
+function requestImage(router, operation = 'generations', extra = {}, routePrefix = '/v1', token = 'mock-api-key') {
   const payload = { ...nativeBody,...extra };
-  const response = await fetch(router.base + routePrefix + '/images/' + operation, {
+  return fetch(router.base + routePrefix + '/images/' + operation, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token, 'chatgpt-account-id': 'must-not-leak', 'openai-organization': 'must-not-leak', 'x-codex-image-turn-id': 'original-turn-id', originator: 'Codex Desktop', version: '0.166.0', 'x-openai-actor-authorization': 'chatgpt-api-local' },
     body: JSON.stringify(payload), signal: AbortSignal.timeout(10000),
   });
+}
+async function send(...args) {
+  const response = await requestImage(...args);
   return { status: response.status,headers: response.headers,raw: await response.text() };
 }
 const count = which => records.filter(r => r.which === which && r.body).length;
@@ -144,6 +157,24 @@ try {
   result = await send(gatewayOnly, 'generations', { complexity: 'max' }); assert.equal(result.status, 200); assert.equal(count('official'), beforeOfficial);
   assert.equal(records.at(-1).body.complexity, undefined, 'Unverified API image model must not inherit native complexity');
   assert.equal(records.at(-1).body.model, '绘图/任意别名');
+  const stream = await requestImage(gatewayOnly, 'generations', { stream: true, partial_images: 1 });
+  assert.equal(stream.status, 200);
+  assert.equal(stream.headers.get('content-type'), 'text/event-stream');
+  assert.equal(records.at(-1).body.partial_images, 1);
+  const reader = stream.body.getReader();
+  const chunks = [];
+  let received = 0;
+  while (received < Buffer.byteLength(preview)) {
+    const { done, value } = await reader.read();
+    assert(!done, 'The preview stream ended before its first image');
+    chunks.push(Buffer.from(value)); received += value.length;
+  }
+  assert.equal(Buffer.concat(chunks).toString(), preview);
+  finishImageStream();
+  const rest = [];
+  for (;;) { const packet = await reader.read(); if (packet.done) break; rest.push(Buffer.from(packet.value)); }
+  assert.equal(Buffer.concat(rest).toString(), completedPreview);
+  checks.push('Requested Images previews reach the client while upstream is still generating, with the original SSE records');
   const noLogin = await start('mixed', { login: false }); result = await send(noLogin, 'edits', { images: [{ image_url: dataUrl }] });
   assert.equal(result.status, 200); assert.equal(count('official'), beforeOfficial); assert.deepEqual(records.at(-1).body.images, [{ image_url: dataUrl }]);
   checks.push('Provider-only ignores saved official credentials; missing sign-in also uses API directly, for generation and editing');
@@ -240,9 +271,26 @@ try {
   result = await send(customMixed, 'edits', { images: [{ file_id: 'file-native-original' }] });
   assert.equal(result.status, 200); assert.deepEqual(records.at(-1).body.images, [{ image_url: 'http://127.0.0.1:' + downloadPort + '/image.png' }]);
   assert(records.some(r => r.path === '/backend-api/files/download/file-native-original' && r.headers.authorization === 'Bearer mock-native-oauth'));
-  result = await send(gatewayOnly, 'edits', { images: [{ file_id: 'file-native-original' }] });
-  assert.equal(result.status, 400); assert.equal(JSON.parse(result.raw).error.code, 'image_reference_unavailable');
-  checks.push('Native file IDs resolve using the owning account only; without sign-in an unusable foreign file ID reports a precise error');
+  const nativeRef = { file_id: 'file-native-original' };
+  gatewayAction = 'multipart-only';
+  const beforeNativeEdit = records.length;
+  result = await send(customMixed, 'edits', { images: [nativeRef, nativeRef], mask: nativeRef });
+  const nativeEdit = records.slice(beforeNativeEdit);
+  assert.equal(result.status, 200);
+  assert.equal(nativeEdit.filter(r => r.path?.startsWith('/backend-api/files/download/')).length, 1);
+  assert.equal(nativeEdit.filter(r => r.which === 'download').length, 1);
+  assert.equal(nativeEdit.filter(r => r.which === 'gateway').length, 2);
+  const fileRefs = { images: [{ file_id: 'api-image-reference' }], mask: { file_id: 'api-mask-reference' } };
+  const beforeApiEdit = records.length;
+  result = await send(gatewayOnly, 'edits', fileRefs);
+  assert.equal(result.status, 400); assert.equal(records.length, beforeApiEdit + 1);
+  assert.equal(JSON.parse(result.raw).error.message, 'at least one image or image_url is required');
+  gatewayAction = '';
+  result = await send(gatewayOnly, 'edits', fileRefs);
+  assert.equal(result.status, 200); assert.deepEqual(records.at(-1).body.images, fileRefs.images);
+  assert.deepEqual(records.at(-1).body.mask, fileRefs.mask);
+  assert(records.slice(beforeApiEdit).every(r => r.which === 'gateway'));
+  checks.push('A native edit resolves and downloads each repeated reference once across JSON and multipart. API-only sends its file IDs to the selected source');
 
   for (const [status,data] of [
     [400, { error: { code: 'content_policy_violation', message: 'safety rejection' } }],

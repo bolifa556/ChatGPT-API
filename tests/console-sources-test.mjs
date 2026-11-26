@@ -3,11 +3,25 @@ import path from 'node:path';
 import http from 'node:http';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { startConsole } from '../src/console.mjs';
 import { readSettings, saveSettings, publicSettings, overrideKey } from '../src/settings.mjs';
+import { listenBrowserLoopback } from '../src/transport.mjs';
+
+{
+  const server = new EventEmitter(), assigned = [10080, 18150];
+  let chosen, closed = 0;
+  server.listen = (port, host) => {
+    assert.equal(port, 0); assert.equal(host, '127.0.0.1');
+    chosen = assigned.shift(); server.emit('listening');
+  };
+  server.address = () => ({ port: chosen });
+  server.close = callback => { closed++; callback(); };
+  assert.equal(await listenBrowserLoopback(server), 18150);
+  assert.equal(closed, 1);
+}
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 fs.mkdirSync(path.join(root, 'data/testing'), { recursive: true });
@@ -47,7 +61,7 @@ const peer = http.createServer(async (req, res) => {
 peer.on('connection', socket => { sockets.add(socket); socket.on('error', () => {}); socket.on('close', () => sockets.delete(socket)); });
 await new Promise(resolve => peer.listen(0, '127.0.0.1', resolve));
 const upstream = 'http://127.0.0.1:' + peer.address().port;
-const reserve = http.createServer(); await new Promise(resolve => reserve.listen(0, '127.0.0.1', resolve)); const port = reserve.address().port; await new Promise(resolve => reserve.close(resolve));
+const reserve = http.createServer(); const port = await listenBrowserLoopback(reserve); await new Promise(resolve => reserve.close(resolve));
 fs.writeFileSync(path.join(fixture, 'data/.env'), 'BASE_URL=' + upstream + '/a/v1\nAPI_KEY=' + keys.a + '\nSHIM_PORT=' + port + '\nIMAGE_MODEL=legacy-image-alias\nGATEWAY_TRANSPORT=vpn # existing OS route\n');
 fs.writeFileSync(path.join(fixture, 'data/state/route-state.json'), JSON.stringify({ entryMode: 'apionly', mode: 'gateway' }));
 const initial = readSettings(fixture), key = overrideKey('p_bbbbbbbb', models[0]);

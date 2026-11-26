@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
 import { HistoryCache } from '../src/response-state.mjs';
-import { officialDispatcherFor, requestWithAbort } from '../src/transport.mjs';
+import { officialDispatcherFor, requestWithAbort, WS_LITE_FIELD, TURN_STATE_HEADER } from '../src/transport.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 fs.mkdirSync(path.join(root, 'data/testing'), { recursive: true });
@@ -22,9 +22,14 @@ fs.writeFileSync(path.join(fixture, 'home/auth.json'), JSON.stringify({ auth_mod
 const sockets = new Set(), servers = [], peers = [], clients = [], children = [], records = [], checks = [];
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-let sequence = 0;
+let sequence = 0, socketId = 0;
+const socketIds = new WeakMap(), httpDowngrades = new Set();
+let temporaryUpgradeAttempts = 0;
 const output = model => ({ id: 'resp_transport_' + (++sequence), object: 'response', status: 'completed', model,
   output: [{ type: 'message', id: 'msg_transport_' + sequence, role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'fixture', annotations: [] }] }] });
+const originalToolCall = { type: 'custom_tool_call', id: 'ctc_fixture', call_id: 'call_fixture', name: 'fixture', input: 'original input', status: 'completed' };
+const toolContinuationError = { type: 'error', status: 400, error: { code: 'invalid_request_error',
+  message: 'No tool call found for custom tool call output with call_id call_fixture.' } };
 function record(body, extra = {}) {
   const input = Array.isArray(body.input) ? body.input : [];
   records.push({ ...extra, previous: body.previous_response_id, model: body.model, count: input.length,
@@ -55,19 +60,35 @@ try {
   const makeHttp = kind => http.createServer(async (req, res) => {
     try {
       if (kind === 'gateway') res.setHeader('x-bifrost-request-id', 'fixture-request');
-      if (req.url.includes('/models')) { res.end(JSON.stringify(kind === 'official' ? { models: [model] } : { data: [{ id: 'GPT/gpt-6-sol' }, { id: 'Other/test-model' }, { id: '阿里云订阅/config-fixture' }] })); return; }
+      if (req.url.includes('/models')) { res.end(JSON.stringify(kind === 'official' ? { models: [model] } : { data: [{ id: 'GPT/gpt-6-sol' }, { id: 'GPT/gpt-6.1-sol' }, { id: 'Other/test-model' }, { id: '阿里云订阅/config-fixture' }] })); return; }
+      if (!socketIds.has(req.socket)) socketIds.set(req.socket, ++socketId);
       const chunks = []; for await (const chunk of req) chunks.push(chunk);
       const raw = Buffer.concat(chunks), encoding = req.headers['content-encoding'];
       const decoder = { gzip: zlib.gunzipSync, deflate: zlib.inflateSync, br: zlib.brotliDecompressSync, zstd: zlib.zstdDecompressSync }[encoding];
       const decoded = decoder ? decoder(raw) : raw, body = JSON.parse(decoded), response = output(body.model);
-      record(body, { kind, transport: 'http', path: req.url, encoding, hash: digest(raw), headers: req.headers });
+      record(body, { kind, transport: 'http', path: req.url, encoding, hash: digest(raw), headers: req.headers, socketId: socketIds.get(req.socket) });
+      if (kind === 'gateway' && body.rejectLite && req.headers['x-openai-internal-codex-responses-lite']) {
+        httpDowngrades.add(body.model);
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { code: 'unsupported_value', message: 'Responses Lite additional_tools is unsupported.' } })); return;
+      }
+      if (kind === 'gateway' && body.rejectConfiguration && body.input?.some(item => item.type === 'configuration_update')) {
+        res.writeHead(422, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { code: 'unsupported_value', message: 'Unsupported input type configuration_update', param: 'input[1].type' } })); return;
+      }
       if (req.url.endsWith('/chat/completions')) {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ id: 'chat_config_fixture', model: body.model, choices: [{ index: 0, message: { role: 'assistant', content: '{"answer":"fixture"}' }, finish_reason: 'stop' }] })); return;
       }
       if (body.stream) {
         res.writeHead(200, { 'content-type': 'text/event-stream' });
-        res.end('data: ' + JSON.stringify({ type: 'response.created', response: { ...response, output: [], status: 'in_progress' } }) + '\n\ndata: ' + JSON.stringify({ type: 'response.completed', response }) + '\n\n');
+        const result = 'data: ' + JSON.stringify({ type: 'response.created', response: { ...response, output: [], status: 'in_progress' } }) + '\n\ndata: ' + JSON.stringify({ type: 'response.completed', response }) + '\n\n';
+        if (body.tail) {
+          const pendingTail = records.at(-1);
+          pendingTail.end = () => res.end('data: [DONE]\n\n');
+          pendingTail.closed = new Promise(resolve => res.once('close', resolve));
+          res.write(result);
+        } else res.end(result);
       } else if (body.compressedReply) {
         res.writeHead(200, { 'content-type': 'application/json', 'content-encoding': 'gzip' });
         res.end(zlib.gzipSync(JSON.stringify(response)));
@@ -75,6 +96,9 @@ try {
     } catch (error) { res.writeHead(500); res.end(error.message); }
   });
   const official = makeHttp('official'), wss = new WebSocketServer({ server: official, maxPayload: 256 * 1024 * 1024 });
+  wss.on('headers', (headers, req) => {
+    if (req.headers['x-test-turn-state'] === '1') headers.push(TURN_STATE_HEADER + ': official-turn-fixture');
+  });
   wss.on('connection', (ws, req) => {
     const peer = { ws, ids: new Set(), lanes: new Map() }; peers.push(peer); ws.on('error', () => {});
     ws.on('message', raw => {
@@ -87,13 +111,52 @@ try {
         if (body.reject || (body.previous_response_id && !peer.ids.has(body.previous_response_id))) {
           ws.send(JSON.stringify({ type: 'error', status: 400, error: { type: 'invalid_request_error', code: 'previous_response_not_found', message: 'Fixture previous response not found' }, ...extra })); return;
         }
+        if (body.rejectToolResult) { ws.send(JSON.stringify(toolContinuationError)); return; }
         const response = output(body.model); peer.ids.add(response.id);
+        if (body.toolCallFixture) response.output = [originalToolCall];
         ws.send(JSON.stringify({ type: 'response.created', response: { ...response, output: [], status: 'in_progress' }, ...extra }));
+        if (body.nativeTurnState) ws.send(JSON.stringify({ type: 'response.metadata', response_id: response.id,
+          headers: { 'X-Codex-Turn-State': 'official-stream-state' }, ...extra }));
         ws.send(JSON.stringify({ type: 'response.completed', response, ...extra }));
       }));
     });
   });
-  const officialPort = await listen(official), gatewayPort = await listen(makeHttp('gateway'));
+  const gateway = makeHttp('gateway'), gatewayWss = new WebSocketServer({ noServer: true });
+  gateway.on('upgrade', (req, socket, head) => {
+    if (req.headers['x-test-native-ws'] !== '1') { socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n'); return; }
+    if (req.headers['x-test-temporary-ws'] && ++temporaryUpgradeAttempts === 1) {
+      socket.end('HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'); return;
+    }
+    gatewayWss.handleUpgrade(req, socket, head, ws => {
+      const socketId = ++sequence;
+      let current;
+      ws.on('error', () => {});
+      ws.on('message', (raw, binary) => {
+        const body = JSON.parse(raw), send = event => ws.send(JSON.stringify(event));
+        record(body, { kind: 'gateway', transport: 'ws', headers: req.headers, socketId, binary, hash: digest(raw) });
+        if (body.type === 'response.interrupt') {
+          send({ type: 'response.interrupt.accepted', response_id: body.response_id });
+          send({ type: 'response.completed', response: { ...current, status: 'cancelled' } });
+          return;
+        }
+        if (body.expirePrevious && body.previous_response_id) {
+          send({ type: 'error', status: 409, error: { code: 'previous_response_not_found' } });
+          return;
+        }
+        if (body.rejectToolResult) { send(toolContinuationError); return; }
+        if (body.rejectNative || body.failAfterStart) {
+          if (body.failAfterStart) send({ type: 'response.created', response: { ...output(body.model), output: [], status: 'in_progress' } });
+          send({ type: 'error', status: 400, error: { code: 'unsupported_value', message: 'Responses Lite additional_tools is unsupported.' } });
+          return;
+        }
+        current = output(body.model);
+        if (body.toolCallFixture) current.output = [originalToolCall];
+        send({ type: 'response.created', response: { ...current, output: [], status: 'in_progress' } });
+        if (!body.waitForInterrupt) send({ type: 'response.completed', response: current });
+      });
+    });
+  });
+  const officialPort = await listen(official), gatewayPort = await listen(gateway);
   const reserved = http.createServer(), port = await listen(reserved); await new Promise(resolve => reserved.close(resolve));
   const base = 'http://127.0.0.1:' + port;
   fs.writeFileSync(path.join(fixture, 'data/.env'), `BASE_URL=http://127.0.0.1:${gatewayPort}/v1\nAPI_KEY=mock-gateway\nSHIM_PORT=${port}\nOFFICIAL_BASE=http://127.0.0.1:${officialPort}/backend-api/codex\n`);
@@ -215,6 +278,181 @@ try {
   }
   checks.push('Native close codes and reasons survive forwarding, including abnormal closure');
   {
+    const ws = await connect({ 'x-test-turn-state': '1' });
+    const forwarded = [];
+    ws.on('message', raw => forwarded.push(JSON.parse(raw)));
+    const first = await turn(ws, { model: 'gpt-6-sol', input: [] });
+    const metadata = forwarded.filter(event => event.type === 'response.metadata');
+    assert.deepEqual(metadata, [{ type: 'response.metadata', response_id: first.response.id, headers: { [TURN_STATE_HEADER]: 'official-turn-fixture' } }]);
+    await turn(ws, { model: 'gpt-6-sol', previous_response_id: first.response.id, input: [] });
+    assert.equal(forwarded.filter(event => event.type === 'response.metadata').length, 1);
+    ws.close();
+  }
+  {
+    const ws = await connect({ 'x-test-turn-state': '1' });
+    const forwarded = [];
+    ws.on('message', raw => forwarded.push(JSON.parse(raw)));
+    const warm = await turn(ws, { model: 'gpt-6-sol', generate: false, input: [] });
+    await turn(ws, { model: 'gpt-6-sol', previous_response_id: warm.response.id, input: [] });
+    assert(!forwarded.some(event => event.type === 'response.metadata'), 'A startup handshake token escaped its original turn');
+    ws.close();
+  }
+  checks.push('Official handshake state reaches the original live response exactly once and never leaks from startup prewarm');
+  {
+    const ws = await connect({ 'x-test-turn-state': '1', 'x-test-native-ws': '1', [TURN_STATE_HEADER]: 'official-incoming-state' });
+    const received = [];
+    ws.on('message', raw => received.push(JSON.parse(raw)));
+    const first = await turn(ws, { model: 'gpt-6-sol', nativeTurnState: true, input: [] });
+    assert.deepEqual(received.filter(event => event.type === 'response.metadata'), [{ type: 'response.metadata',
+      response_id: first.response.id, headers: { 'X-Codex-Turn-State': 'official-stream-state' } }]);
+    const gateway = await turn(ws, { model: 'GPT/gpt-6-sol', client_metadata: { [WS_LITE_FIELD]: 'true', [TURN_STATE_HEADER]: 'official-stream-state' }, input: [] });
+    assert.equal(gateway.type, 'response.completed');
+    assert.equal(records.at(-1).headers[TURN_STATE_HEADER], undefined);
+    assert.equal(records.at(-1).body.client_metadata[TURN_STATE_HEADER], undefined);
+    await turn(ws, { model: 'gpt-6-sol', client_metadata: { [TURN_STATE_HEADER]: 'gateway-stream-state' }, input: [] });
+    assert.equal(records.at(-1).body.client_metadata[TURN_STATE_HEADER], undefined);
+    ws.close();
+  }
+  checks.push('Real upstream turn metadata takes precedence over handshake state, and switches without a previous ID do not forward foreign state');
+  {
+    const ws = await connect({ 'x-test-native-ws': '1', authorization: 'Bearer mock-official', 'chatgpt-account-id': 'official-account' });
+    const model = 'GPT/gpt-6-sol', metadata = { [WS_LITE_FIELD]: 'true' };
+    const prefix = [{ type: 'additional_tools', role: 'developer', id: 'at_fixture', tools: [] }, { role: 'user', content: 'original context' }];
+    const before = records.length;
+    const warm = await turn(ws, { model, client_metadata: metadata, generate: false, input: [] });
+    assert.equal(records.length, before, 'Gateway preconnect must not generate upstream');
+    const first = await turn(ws, { model, client_metadata: metadata, previous_response_id: warm.response.id, input: prefix });
+    const one = records.at(-1);
+    assert.equal(one.transport, 'ws');
+    assert.equal(one.previous, undefined);
+    assert.equal(one.headers.authorization, 'Bearer mock-gateway');
+    assert.equal(one.headers['chatgpt-account-id'], undefined);
+    assert.deepEqual(one.body.input, prefix);
+    const delta = [{ role: 'user', content: 'incremental input' }];
+    const second = await turn(ws, { model, client_metadata: metadata, previous_response_id: first.response.id, input: delta });
+    const two = records.at(-1);
+    assert.equal(two.socketId, one.socketId);
+    assert.equal(two.previous, first.response.id);
+    assert.deepEqual(two.body.input, delta);
+    assert.equal(two.body.tools, undefined);
+    const branch = await turn(ws, { model, client_metadata: metadata, previous_response_id: first.response.id, input: [] });
+    assert.equal(records.at(-1).previous, undefined, 'A stale branch attempted to reuse the current response slot');
+    assert(records.at(-1).body.input.some(item => item.content === 'original context'));
+    const beforeRecovery = records.length;
+    const recovered = await turn(ws, { model, client_metadata: metadata, previous_response_id: branch.response.id, expirePrevious: true, input: [] });
+    const [rejection, recovery] = records.slice(beforeRecovery);
+    assert.equal(records.length, beforeRecovery + 2);
+    assert.equal(rejection.previous, branch.response.id);
+    assert.equal(recovery.previous, undefined);
+    assert.equal(recovery.socketId, one.socketId);
+    assert(recovery.body.input.some(item => item.content === 'original context'));
+    const done = events(ws);
+    ws.send(JSON.stringify({ type: 'response.create', model, client_metadata: metadata, previous_response_id: recovered.response.id, waitForInterrupt: true, input: [] }));
+    const [created] = await once(ws, 'message');
+    ws.send(JSON.stringify({ type: 'response.interrupt', mode: 'discard_partial_items', response_id: JSON.parse(created).response.id }));
+    const interrupted = (await done)[0];
+    assert.equal(interrupted.response.status, 'cancelled');
+    assert.equal(records.at(-1).body.type, 'response.interrupt');
+    const next = events(ws);
+    ws.send(JSON.stringify({ type: 'response.create', model, client_metadata: metadata, failAfterStart: true, input: [] }));
+    assert.equal((await next)[0].type, 'error');
+    assert.equal(records.at(-1).transport, 'ws', 'An accepted request was retried over HTTP');
+    ws.close();
+  }
+  checks.push('A native GPT source keeps incremental input, tool carriers and interrupts on the same gateway socket without reusing synthetic IDs or replaying accepted work');
+  for (const model of ['gpt-6-sol', 'GPT/gpt-6-sol']) {
+    const ws = await connect({ 'x-test-native-ws': '1' }), client_metadata = { [WS_LITE_FIELD]: 'true' };
+    const first = await turn(ws, { model, client_metadata, toolCallFixture: true, input: [] });
+    assert.deepEqual(first.response.output, [originalToolCall]);
+    const before = records.length;
+    const input = [{ type: 'custom_tool_call_output', call_id: originalToolCall.call_id, output: 'original result' }];
+    const reply = await turn(ws, { model, client_metadata, rejectToolResult: true, previous_response_id: first.response.id, input });
+    assert.deepEqual(reply, toolContinuationError);
+    assert.equal(records.length, before + 1);
+    assert.equal(records.at(-1).transport, 'ws');
+    assert.equal(records.at(-1).previous, first.response.id);
+    assert.deepEqual(records.at(-1).body.input, input);
+    ws.close();
+  }
+  checks.push('Both WebSocket routes forward the original tool result and preserve a tool-pairing rejection, without retrying a different request');
+  {
+    const ws = await connect({ 'x-test-native-ws': '1', 'x-test-temporary-ws': '1' });
+    const model = 'GPT/gpt-6-sol', metadata = { [WS_LITE_FIELD]: 'true' };
+    const first = await turn(ws, { model, client_metadata: metadata, input: [] });
+    assert.equal(first.type, 'response.completed');
+    assert.equal(records.at(-1).transport, 'http');
+    assert.equal((await turn(ws, { model, client_metadata: metadata, previous_response_id: first.response.id, input: [] })).type, 'response.completed');
+    assert.equal(records.at(-1).transport, 'http');
+    assert.equal(temporaryUpgradeAttempts, 1);
+    const raw = JSON.stringify({ type: 'response.create', model, client_metadata: metadata, input: [{ role: 'user', content: '原样' }] }, null, 2);
+    const result = events(ws);
+    ws.send(raw);
+    assert.equal((await result)[0].type, 'response.completed');
+    assert.equal(temporaryUpgradeAttempts, 2);
+    assert.equal(records.at(-1).transport, 'ws');
+    assert.equal(records.at(-1).hash, digest(raw));
+    assert.equal(records.at(-1).binary, false);
+    ws.close();
+  }
+  checks.push('A transient upgrade error keeps HTTP for the current chain and permits WebSocket on a later turn; unchanged requests keep the original text frame');
+  {
+    const ws = await connect({ 'x-test-native-ws': '1' });
+    const model = 'GPT/gpt-6-sol', metadata = { [WS_LITE_FIELD]: 'true', [TURN_STATE_HEADER]: 'state-fixture' };
+    const input = [{ type: 'additional_tools', role: 'developer', id: 'at_fixture', tools: [{ type: 'function', name: 'fixture', parameters: { type: 'object' } }] }];
+    const before = records.length;
+    const first = await turn(ws, { model, client_metadata: metadata, rejectNative: true, input });
+    assert.equal(first.type, 'response.completed');
+    const [wsRequest, httpRequest] = records.slice(before);
+    assert.equal(wsRequest.transport, 'ws');
+    assert.equal(httpRequest.transport, 'http');
+    assert.equal(httpRequest.headers[nativeProtocol], 'true');
+    assert.equal(httpRequest.headers[forwardedProtocol], 'true');
+    assert.equal(httpRequest.headers[TURN_STATE_HEADER], 'state-fixture');
+    assert.deepEqual(httpRequest.body.input, input);
+    const second = await turn(ws, { model, client_metadata: metadata, previous_response_id: first.response.id, rejectLite: true, input: [] });
+    assert.equal(second.type, 'response.completed');
+    assert(httpDowngrades.has(model));
+    assert.equal(records.at(-1).headers[nativeProtocol], undefined);
+    assert.equal(records.at(-1).body.tools[0].name, 'fixture');
+    assert(!records.at(-1).body.input.some(item => item.type === 'additional_tools'));
+    const next = records.length;
+    await turn(ws, { model, client_metadata: metadata, previous_response_id: second.response.id, input: [] });
+    assert.equal(records.length, next + 1, 'An unsupported transport was tried again during the next tool round');
+    ws.close();
+  }
+  checks.push('A provider that rejects native WebSocket validation falls back to native HTTP and then standard HTTP only on explicit validation errors');
+  {
+    const request = { model: 'GPT/gpt-6.1-sol', rejectConfiguration: true, reasoning: { effort: 'low', summary: 'auto' },
+      input: [{ role: 'user', content: 'Original message' }, { type: 'configuration_update', id: 'cfg_test', reasoning: { effort: 'high' }, text: { verbosity: 'low' } },
+        { type: 'item_reference', id: 'cfg_test' }, { role: 'user', content: 'Original follow-up' }] };
+    const post = () => fetch(base + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request) });
+    const before = records.length;
+    const reply = await post(); assert.equal(reply.status, 200); await reply.arrayBuffer();
+    const [original, compatible] = records.slice(before);
+    assert.equal(records.length, before + 2);
+    assert.deepEqual(original.body.input, request.input);
+    assert.deepEqual(compatible.body.input, [request.input[0], request.input[3]]);
+    assert.deepEqual(compatible.body.reasoning, { effort: 'high', summary: 'auto' });
+    assert.deepEqual(compatible.body.text, { verbosity: 'low' });
+    const next = await post(); assert.equal(next.status, 200); await next.arrayBuffer();
+    assert.equal(records.length, before + 3);
+  }
+  checks.push('A GPT source that explicitly rejects the configuration item receives its original effective settings at request level once and on later turns');
+  {
+    const ws = await connect();
+    const model = 'GPT/gpt-6-sol';
+    const first = await turn(ws, { model, input: [], tail: true });
+    const tail = records.at(-1);
+    assert.equal(first.type, 'response.completed');
+    tail.end();
+    await tail.closed;
+    await delay(25);
+    await turn(ws, { model, previous_response_id: first.response.id, input: [] });
+    assert.equal(records.at(-1).socketId, tail.socketId);
+    ws.close();
+  }
+  checks.push('The gateway sends completion before the SSE tail ends, then reuses the HTTP connection');
+  {
     const ws = await connect(), size = 65 * 1024 * 1024;
     const first = await turn(ws, { model: 'gpt-6-sol', input: [{ role: 'user', content: 'L'.repeat(size) }] });
     const next = await turn(ws, { model: 'gpt-6-sol', previous_response_id: first.response.id, input: [{ role: 'user', content: 'delta' }] });
@@ -240,7 +478,10 @@ try {
     const original = { type: 'message', role: 'user', content: [{ type: 'input_text', text: '代码、工具和对话。'.repeat(48000) }], optional: undefined };
     assert(cache.set('large', { input: [original], defaults: {}, lane: 'main', complete: true }));
     const stored = cache.entries.get('large').input[0];
-    assert(stored.packed.length < 10000, 'Compressible history retained a full-size resident item');
+    assert.equal(stored.packed, null, 'Packing blocked insertion on the main thread');
+    assert.equal(cache.get('large').input[0], original);
+    for (let n = 0; n < 200 && !stored.packed; n++) await delay(10);
+    assert(stored.packed?.length < 10000, 'Compressible history retained a full-size resident item');
     stored.current = null;
     const restored = cache.get('large').input[0];
     assert.deepEqual(restored, original);

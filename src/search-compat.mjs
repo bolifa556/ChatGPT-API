@@ -68,10 +68,19 @@ export function chatSearchStyle({ base, metadata = {} }) {
 }
 
 export function applyChatSearch(payload, gateway, settings = {}) {
-  const webIndex = payload.tools?.findIndex(tool => ['web_search', 'web_search_preview'].includes(tool.type)) ?? -1;
+  const isSearchTool = tool => tool?.type === 'web_search' || tool?.type === 'web_search_preview';
+  const webIndex = payload.tools?.findIndex(isSearchTool) ?? -1;
   if (webIndex < 0) return payload;
   const style = chatSearchStyle(gateway);
   if (style === 'tools') return payload;
+  // These providers can invoke built-in search independently of tool_choice.
+  // Translate a declaration only when the original choice permits that tool.
+  if (payload.tool_choice === 'none' || typeof payload.tool_choice === 'object' && payload.tool_choice !== null && !isSearchTool(payload.tool_choice)) {
+    const tools = payload.tools.filter(tool => !isSearchTool(tool));
+    const result = { ...payload, tools };
+    if (!tools.length) delete result.tools;
+    return result;
+  }
   const web = structuredClone(payload.tools[webIndex]);
   const result = { ...payload, tools: payload.tools.map((tool, index) => index === webIndex ? web : tool) };
   if ([false, 'cached', 'indexed'].includes(settings.external_web_access)) {
@@ -94,6 +103,6 @@ export function applyChatSearch(payload, gateway, settings = {}) {
       result.search_domain_filter ??= [...settings.filters.allowed_domains];
     }
   }
-  if (['web_search', 'web_search_preview'].includes(result.tool_choice?.type)) delete result.tool_choice;
+  if (isSearchTool(result.tool_choice)) delete result.tool_choice;
   return result;
 }

@@ -9,7 +9,7 @@ import { readSettings, settingsRevision, publicModelId, atomicPrivate, overrideK
 import { describeError, errorDetails } from './diagnostics.mjs';
 
 const TTL = 24 * 60 * 60 * 1000;
-const fields = ['id', 'type', 'capabilities', 'supported_endpoints', 'supported_parameters', 'output_modalities', 'architecture',
+const fields = ['id', 'type', 'capabilities', 'supported_endpoints', 'supported_parameters', 'output_modalities', 'architecture', 'supports_websockets', 'use_responses_lite',
   'service_tiers', 'additional_speed_tiers', 'default_service_tier', 'default_reasoning_level', ...contextFields, ...strengthMetadataFields];
 const readJson = file => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } };
 const fingerprint = profile => crypto.createHash('sha256').update(profile.baseUrl + '\n' + profile.apiKey).digest('hex');
@@ -23,6 +23,9 @@ export class GatewaySources {
     this.saved = readJson(this.file) || { version: 1, sources: [] };
     this.models = []; this.sources = [];
     this.protocols = new WeakMap();
+    this.wsUpgradeUnavailable = new Set();
+    this.httpOnly = new Set();
+    this.standardResponsesOnly = new Set();
   }
   profiles() {
     return this.settings.providers.filter(provider => provider.enabled).sort((a, b) => Number(b.id === this.settings.preferredProviderId) - Number(a.id === this.settings.preferredProviderId));
@@ -46,6 +49,8 @@ export class GatewaySources {
     return { profile, metadata: protocol ? { ...metadata, _protocol: protocol } : metadata,
       base: this.base(profile), dispatcher: this.dispatcher(profile), model: modelId };
   }
+  sourceKey(profile) { return profile.id + '\n' + this.identity(profile); }
+  transportKey({ profile, model }) { return this.sourceKey(profile) + '\n' + model; }
   rememberChat({ profile, model }) {
     if (!this.protocols.has(profile)) this.protocols.set(profile, new Map());
     this.protocols.get(profile).set(model, 'chat');
@@ -88,7 +93,7 @@ export class GatewaySources {
           // Older caches used this extension for every native request. Keep
           // that behavior until the existing one-shot discovery identifies the
           // endpoint; newly discovered ordinary APIs get no proprietary headers.
-          _nativeHeaderPrefix: record.nativeHeaderPrefix ?? 'x-bf-eh-' });
+          _nativeHeaderPrefix: record.nativeHeaderPrefix ?? 'x-bf-eh-', _nativeProxy: Boolean(record.nativeHeaderPrefix) });
       }
     }
     this.models = models; this.sources = sources;

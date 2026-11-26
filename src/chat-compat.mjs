@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { MAX_EVENT_BYTES } from './non-gpt-compat.mjs';
+import { nativeUsage } from './history-compat.mjs';
 import { applyChatSearch, searchParameters, searchResultFields, searchSources, searchCitationAnnotations } from './search-compat.mjs';
 
 const copy = value => structuredClone(value);
@@ -156,16 +157,14 @@ export function chatRequest(payload, metadata, gateway) {
   return gateway ? applyChatSearch(result, gateway, payload.tools?.find(tool => ['web_search', 'web_search_preview'].includes(tool.type))) : result;
 }
 
-function usage(value) {
-  if (!value) return undefined;
-  const result = {};
+function mergeUsage(previous, value) {
+  const result = { ...previous };
   for (const [source, target] of [['prompt_tokens','input_tokens'],['completion_tokens','output_tokens'],['total_tokens','total_tokens']]) {
-    if (value[source] !== undefined) result[target] = value[source];
+    if (Number.isSafeInteger(value[source]) && value[source] >= 0) result[target] = value[source];
   }
-  // Native clients require the named count when a details object is present.
-  // An upstream omitting that count means unknown, not an invented zero.
-  if (value.prompt_tokens_details?.cached_tokens !== undefined) result.input_tokens_details = copy(value.prompt_tokens_details);
-  if (value.completion_tokens_details?.reasoning_tokens !== undefined) result.output_tokens_details = copy(value.completion_tokens_details);
+  for (const [source, target] of [['prompt_tokens_details','input_tokens_details'],['completion_tokens_details','output_tokens_details']]) {
+    if (value[source]) result[target] = { ...result[target], ...copy(value[source]) };
+  }
   return result;
 }
 
@@ -260,7 +259,8 @@ export class ChatEvents {
       status: Number.isInteger(chunk.status) && chunk.status >= 400 && chunk.status <= 599 ? chunk.status : 502,
       upstreamError: copy(chunk.error), code: chunk.error.code || 'upstream_error' });
     const events = this.start(chunk);
-    if (chunk.usage) this.usage = usage(chunk.usage);
+    if (chunk.usage) this.usage = mergeUsage(this.usage, chunk.usage);
+    if (typeof chunk.end_turn === 'boolean') this.endTurn = chunk.end_turn;
     for (const field of searchResultFields) if (chunk[field] !== undefined) this.response[field] = copy(chunk[field]);
     const sources = searchSources(chunk);
     for (const choice of chunk.choices || []) {
@@ -303,6 +303,28 @@ export class ChatEvents {
       this.searchSources ||= new Map();
       for (const source of sources) this.searchSources.set(source.url, { ...this.searchSources.get(source.url), ...source });
     }
+    // A tool-only response can hand off complete calls before the accounting
+    // packet. Keep message-bearing responses open for any trailing citations.
+    if (this.finishReason === 'tool_calls' && !this.message && !this.reasoning) events.push(...this.finishTools(true));
+    return events;
+  }
+  finishTools(complete) {
+    if (this.toolsFinished || !this.calls.size) return [];
+    this.toolsFinished = true;
+    const events = [];
+    for (const [, call] of [...this.calls].sort(([a], [b]) => a - b)) {
+      if (!call.id || !call.name) {
+        if (!complete) continue;
+        throw Object.assign(new Error('Chat tool call is missing its id or name.'), { status: 502, code: 'invalid_upstream_tool_call' });
+      }
+      const index = this.items.length;
+      const item = { type: 'function_call', id: 'fc_' + id(this.response.id + '/' + index), call_id: call.id, name: call.name, arguments: call.arguments, status: complete ? 'completed' : 'incomplete' };
+      this.items.push(item);
+      if (complete) events.push({ type: 'response.output_item.added', output_index: index, item: { ...item, arguments: '', status: 'in_progress' } },
+        { type: 'response.function_call_arguments.delta', output_index: index, item_id: item.id, delta: call.arguments },
+        { type: 'response.function_call_arguments.done', output_index: index, item_id: item.id, name: call.name, arguments: call.arguments },
+        { type: 'response.output_item.done', output_index: index, item: copy(item) });
+    }
     return events;
   }
   finish() {
@@ -312,20 +334,12 @@ export class ChatEvents {
     const events = [], complete = ['stop','tool_calls'].includes(this.finishReason);
     const lastText = this.message?.item.content.findLast(part => part.type === 'output_text');
     if (lastText && this.searchSources) events.push(...this.annotate(searchCitationAnnotations([...this.searchSources.values()], lastText.text)));
-    events.push(...this.closeText('reasoning'), ...this.closeText('message', complete, this.calls.size ? 'commentary' : 'final_answer'));
-    for (const [, call] of [...this.calls].sort(([a], [b]) => a - b)) {
-      if (!call.id || !call.name) throw Object.assign(new Error('Chat tool call is missing its id or name.'), { status: 502, code: 'invalid_upstream_tool_call' });
-      const index = this.items.length;
-      const item = { type: 'function_call', id: 'fc_' + id(this.response.id + '/' + index), call_id: call.id, name: call.name, arguments: call.arguments, status: complete ? 'completed' : 'incomplete' };
-      this.items.push(item);
-      if (complete) events.push({ type: 'response.output_item.added', output_index: index, item: { ...item, arguments: '', status: 'in_progress' } },
-        { type: 'response.function_call_arguments.delta', output_index: index, item_id: item.id, delta: call.arguments },
-        { type: 'response.function_call_arguments.done', output_index: index, item_id: item.id, name: call.name, arguments: call.arguments },
-        { type: 'response.output_item.done', output_index: index, item: copy(item) });
-    }
+    events.push(...this.closeText('reasoning'), ...this.closeText('message', complete, this.calls.size ? 'commentary' : 'final_answer'), ...this.finishTools(complete));
     const limited = ['length','content_filter'].includes(this.finishReason);
+    const usage = nativeUsage(this.usage);
     this.response = { ...this.response, output: copy(this.items), status: complete ? 'completed' : limited ? 'incomplete' : 'failed',
-      ...(this.usage ? { usage: this.usage } : {}),
+      ...(usage !== undefined ? { usage } : {}),
+      ...(this.endTurn !== undefined ? { end_turn: this.endTurn } : {}),
       ...(limited ? { incomplete_details: { reason: this.finishReason === 'length' ? 'max_output_tokens' : 'content_filter' } } : {}),
       ...(!complete && !limited ? { error: { code: 'upstream_finish_reason', message: this.finishReason } } : {}) };
     events.push({ type: 'response.' + this.response.status, response: this.response });

@@ -27,10 +27,12 @@ wss.on('connection', socket => {
       if (!binding || call.params.runImmediately !== true || scenario === 'script-error') {
         return reply({ error: { message: 'Fixture document bootstrap failed' } });
       }
-      if (scenario !== 'unstarted') notify({ initial: true, pending: 1, installed: 0 });
-      if (scenario === 'module-error' || scenario === 'partial-module-error') {
-        notify({ pending: scenario === 'partial-module-error' ? 1 : 0, installed: 0,
-          error: 'TypeError: Failed to fetch dynamically imported module', failedAsset: 'app://-/assets/quota.js' });
+      if (scenario !== 'unstarted') notify({ initial: true, pending: scenario === 'partial-module-error' ? 3 : 1, installed: 0 });
+      if (scenario === 'module-error') {
+        notify({ pending: 0, installed: 0, failure: { code: 'native_module_import_failed', message: 'TypeError: Failed to fetch dynamically imported module', asset: 0 } });
+      } else if (scenario === 'partial-module-error') {
+        notify({ pending: 2, installed: 0, failure: { code: 'native_module_changed', message: 'Native module IDs no longer match', asset: 1 } });
+        notify({ pending: 1, installed: 0, failure: { code: 'native_module_import_failed', message: 'Failed to load Fast module', asset: 2 } });
       }
       if (['ready', 'notified', 'partial-module-error', 'updated-module-format'].includes(scenario)) {
         setTimeout(() => notify({ pending: 0, installed: 1 }), 40);

@@ -142,6 +142,26 @@ limited.convert({ id: 'limited', choices: [{ delta: { content: 'Partial' }, fini
 assert.equal(limited.finish().at(-1).type, 'response.incomplete');
 assert.throws(() => new ChatEvents(model).finish(), error => error.code === 'incomplete_upstream_response');
 checks.push('Chat JSON and SSE produce identical native output, reasoning, calls and usage; length limits remain incomplete');
+{
+  const stream = new ChatEvents(model);
+  const id = 'chat_tool_before_usage';
+  stream.convert({ id, usage: { prompt_tokens: 12, prompt_tokens_details: { cached_tokens: 4 } }, choices: [
+    { delta: { tool_calls: [{ index: 0, id: 'fixture-call', function: { name: 'fixture', arguments: '{' } }] } },
+  ] });
+  const confirmed = stream.convert({ id, end_turn: false, choices: [
+    { delta: { tool_calls: [{ index: 0, function: { arguments: '}' } }] }, finish_reason: 'tool_calls' },
+  ] });
+  const done = confirmed.find(event => event.type === 'response.output_item.done');
+  assert.equal(done.item.arguments, '{}');
+  assert(!confirmed.some(event => event.type === 'response.completed'));
+  assert.deepEqual(stream.convert({ id, usage: { completion_tokens: 3 }, choices: [] }), []);
+  const finished = stream.finish();
+  assert.deepEqual(finished.map(event => event.type), ['response.completed']);
+  assert.deepEqual(finished[0].response.usage, { input_tokens: 12, output_tokens: 3, total_tokens: 15, input_tokens_details: { cached_tokens: 4 } });
+  assert.equal(finished[0].response.end_turn, false);
+  assert.deepEqual(finished[0].response.output, [done.item]);
+}
+checks.push('A confirmed tool-only Chat response sends the completed call before the usage trailer and merges split token counts once');
 
 for (const reason of ['length', 'content_filter']) for (const partial of ['{"input":"unfinished', '{"input":', '']) {
   const incompleteChat = new ChatEvents(model), incompleteNative = new NonGptEvents(adapter), events = [];
@@ -239,6 +259,22 @@ assert.equal(plainMessage.phase, undefined);
 assert.equal(responseMessagePhases({ status: 'completed', output: [{ type: 'web_search_call' }, plainMessage] }).output[1].phase, 'final_answer');
 assert.equal(chatResponse({ id: 'explicit_phase', choices: [{ finish_reason: 'stop', message: { phase: 'commentary', content: 'Original commentary' } }] }, model).output[0].phase, 'commentary');
 checks.push('Missing gateway phases resolve from tool and stop events across JSON, SSE and Lite; text streams immediately, explicit phases and usage remain intact, and delayed done events retain monotonic sequence numbers');
+{
+  const phases = new ResponsePhases();
+  const original = { ...plainMessage, phase: 'partial_answer' };
+  phases.convert({ type: 'response.output_item.done', output_index: 0, item: original });
+  const thought = { type: 'reasoning', id: 'rs_terminal', summary: [{ type: 'summary_text', text: 'Original thought' }] };
+  const call = { type: 'function_call', id: 'fc_terminal', name: 'fixture', arguments: '{}', call_id: 'original-call', status: 'completed' };
+  const raw = { type: 'response.completed', response: { status: 'completed', output: [original, thought, call], usage: { input_tokens: 5, output_tokens: 3 } } };
+  const events = phases.convert(raw);
+  assert.deepEqual(events.filter(event => event.type === 'response.output_item.done').map(event => event.item), [thought, call]);
+  assert.deepEqual(events.at(-1).response.usage, { input_tokens: 5, output_tokens: 3, total_tokens: 8 });
+  assert.equal(raw.response.usage.total_tokens, undefined);
+  const incomplete = new ResponsePhases().convert({ type: 'response.incomplete', response: { status: 'incomplete', output: [plainMessage, call], usage: { input_tokens: 5 } } });
+  assert.deepEqual(incomplete.filter(event => event.type === 'response.output_item.done').map(event => event.item.type), ['message']);
+  assert.equal(Object.hasOwn(incomplete.at(-1).response, 'usage'), false);
+}
+checks.push('Terminal-only GPT output restores original messages, reasoning and completed tools without duplication; incomplete usage cannot invalidate the native response');
 // Desktop consumers complete items from item events, including when a gateway
 // sends text only in response.output. Never repeat a previously finished item.
 for (const already of ['none','added','done']) {

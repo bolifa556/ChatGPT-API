@@ -27,15 +27,15 @@ function save(file, bytes, replace = false) {
 // This is the already-generated result, not a new tool invocation or user turn.
 export function restoreHostedImageHistory(payload, codexHome) {
   if (!Array.isArray(payload?.input)) return { payload, changed: false };
-  const ids = new Map(); let changed = false;
-  let input = payload.input.map(item => {
+  const ids = new Map(); let input;
+  for (const [index, item] of payload.input.entries()) {
     if (item?.type !== 'message' || item.role !== 'assistant' || !/^msg_[a-f0-9]{32}$/.test(item.id || '') ||
-        item.status && item.status !== 'completed' || !Array.isArray(item.content) || item.content.length !== 2) return item;
+        item.status && item.status !== 'completed' || !Array.isArray(item.content) || item.content.length !== 2) continue;
     const [text, image] = item.content;
-    if (text?.type !== 'output_text' || image?.type !== 'input_image') return item;
+    if (text?.type !== 'output_text' || image?.type !== 'input_image') continue;
     const reference = /^!\[\]\(<[^\r\n]+\/generated_images\/chatgpt-api\/([a-f0-9]{64})\.(png|jpeg|webp|gif)>\)$/.exec(text.text);
     const data = /^data:image\/(png|jpeg|webp|gif);base64,([A-Za-z0-9+/]+={0,2})$/.exec(image.image_url || '');
-    if (!reference || !data) return item;
+    if (!reference || !data) continue;
     const digest = reference[1]; let bytes = Buffer.from(data[2], 'base64'), saved;
     if (codexHome) {
       try {
@@ -48,20 +48,20 @@ export function restoreHostedImageHistory(payload, codexHome) {
       // The native core converts a GIF's vision input to a PNG still when it
       // resumes history. Restore only our registered GIF carrier, using its
       // original local bytes and verified digest, never a caller-provided path.
-      if (!saved || reference[2] !== 'gif' || data[1] !== 'png') return item;
-      try { bytes = fs.readFileSync(path.resolve(codexHome, 'generated_images', 'chatgpt-api', digest + '.gif')); } catch { return item; }
-      if (imageFormat(bytes) !== 'gif' || crypto.createHash('sha256').update(bytes).digest('hex') !== digest) return item;
+      if (!saved || reference[2] !== 'gif' || data[1] !== 'png') continue;
+      try { bytes = fs.readFileSync(path.resolve(codexHome, 'generated_images', 'chatgpt-api', digest + '.gif')); } catch { continue; }
+      if (imageFormat(bytes) !== 'gif' || crypto.createHash('sha256').update(bytes).digest('hex') !== digest) continue;
     }
     // 3.1.8 did not keep the original result metadata. Its image bytes still
     // suffice for the documented result schema; use a stable result ID.
     let result = { type: 'image_generation_call', id: 'ig_' + item.id.slice(4), status: 'completed' };
     if (saved) result = saved;
-    changed = true; ids.set(item.id, result.id);
-    return { ...result, result: bytes.toString('base64') };
-  });
-  if (!changed) return { payload, changed: false };
-  input = input.map(item => item?.type === 'item_reference' && ids.has(item.id) ? { ...item, id: ids.get(item.id) } : item);
-  return { payload: { ...payload, input }, changed: true };
+    ids.set(item.id, result.id);
+    input ??= payload.input.slice();
+    input[index] = { ...result, result: bytes.toString('base64') };
+  }
+  if (!input) return { payload, changed: false };
+  return { payload: { ...payload, input: input.map(item => item?.type === 'item_reference' && ids.has(item.id) ? { ...item, id: ids.get(item.id) } : item) }, changed: true };
 }
 
 export function imageFormat(bytes) {

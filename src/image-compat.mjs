@@ -129,30 +129,42 @@ async function gatewayBody(original, model, operation, env, dispatcher, signal, 
     for (const key of ['size','quality','background']) if (payload[key] === 'auto') delete payload[key];
     if (payload.background === 'opaque') delete payload.background;
   }
-  if (operation === 'edits' && Array.isArray(payload.images)) {
-    for (let i = 0; i < payload.images.length; i++) {
-      const image = payload.images[i];
-      if (image.file_id && !image.image_url) payload.images[i] = { image_url: await resolveFile(image.file_id) };
+  if (operation === 'edits' && resolveFile) {
+    const resolve = async reference => {
+      if (!reference?.file_id || reference.image_url) return reference;
+      const { file_id, ...fields } = reference;
+      return { ...fields, image_url: await resolveFile(file_id) };
+    };
+    if (Array.isArray(payload.images)) {
+      for (const [index, reference] of payload.images.entries()) payload.images[index] = await resolve(reference);
     }
-    if (payload.mask?.file_id && !payload.mask.image_url) payload.mask = { image_url: await resolveFile(payload.mask.file_id) };
+    if (payload.mask) payload.mask = await resolve(payload.mask);
   }
   const format = env.IMAGE_EDIT_FORMAT || 'json';
   const imageOptions = { quality: payload.quality, output_format: payload.output_format };
   if (operation !== 'edits' || format === 'json') return { body: Buffer.from(JSON.stringify(payload)), contentType: 'application/json', imageOptions };
   if (format !== 'multipart') throw fail('IMAGE_EDIT_FORMAT must be json or multipart.', 'invalid_image_configuration');
   if (!Array.isArray(payload.images) || !payload.images.length) throw fail('Image editing requires image references.', 'invalid_image_request');
+  if (payload.images.some(image => !image?.image_url) || payload.mask && !payload.mask.image_url) {
+    throw fail('Multipart image edits require an image URL or inline image data for each reference.', 'image_reference_unavailable');
+  }
   const form = new FormData();
   for (const [key,value] of Object.entries(payload)) {
     if (key === 'images' || key === 'mask') continue;
     if (value != null) form.append(key, typeof value === 'object' ? JSON.stringify(value) : String(value));
   }
+  const loaded = new Map();
+  const load = url => {
+    if (!loaded.has(url)) loaded.set(url, imageBytes(url, dispatcher, signal));
+    return loaded.get(url);
+  };
   for (const [i,image] of payload.images.entries()) {
-    const { bytes,type } = await imageBytes(image.image_url, dispatcher, signal);
+    const { bytes,type } = await load(image.image_url);
     const extension = type === 'image/jpeg' ? 'jpg' : type.split('/')[1];
     form.append(payload.images.length === 1 ? 'image' : 'image[]', new Blob([bytes], { type }), 'image-' + i + '.' + extension);
   }
   if (payload.mask) {
-    const { bytes, type } = await imageBytes(payload.mask.image_url, dispatcher, signal);
+    const { bytes, type } = await load(payload.mask.image_url);
     form.append('mask', new Blob([bytes], { type }), 'mask.png');
   }
   const encoded = new Response(form);
@@ -179,6 +191,11 @@ export async function forwardImages({ req,res,url,body,operation,env,hasLogin,al
   // model selected by an ordinary Images API caller. Never inspect the prompt.
   const nativeDefault = Boolean(req.headers['x-codex-image-turn-id']) && original.model === 'gpt-image-2';
   const nativeImage = Boolean(req.headers['x-codex-image-turn-id']);
+  const links = new Map();
+  const resolveNative = nativeImage && resolveFile ? id => {
+    if (!links.has(id)) links.set(id, resolveFile(id));
+    return links.get(id);
+  } : undefined;
   const downloads = gateway => imageDispatcherFor ? (reference, original) => imageDispatcherFor(reference, gateway, original) : imageDispatcher;
   const forward = async (which, model, outgoing = { body, contentType: req.headers['content-type'] || 'application/json' }, gateway) => {
     let headers = headersFor(req.headers, which, gateway?.profile); headers['content-type'] = outgoing.contentType;
@@ -189,8 +206,10 @@ export async function forwardImages({ req,res,url,body,operation,env,hasLogin,al
     const upstream = await request(targetUrl(which, url, gateway), { method: 'POST', body: outgoing.body, headers, dispatcher: which === 'official' ? officialDispatcher : gateway?.dispatcher || gatewayDispatcher, signal, ...RESPONSE_TIMEOUTS });
     try {
       log(which + ' images operation=' + operation + ' model=' + model + ' status=' + upstream.statusCode);
-      if (which === 'official' && ok(upstream.statusCode)) {
+      const streaming = original.stream === true && /^text\/event-stream(?:\s*;|$)/i.test(upstream.headers['content-type'] || '');
+      if (ok(upstream.statusCode) && (which === 'official' || streaming)) {
         res.writeHead(upstream.statusCode, responseHeaders(upstream.headers));
+        if (streaming) res.flushHeaders();
         for await (const chunk of upstream.body) { if (res.destroyed) break; await writeChunk(res, chunk); }
         res.end(); return { completed: true };
       }
@@ -220,10 +239,12 @@ export async function forwardImages({ req,res,url,body,operation,env,hasLogin,al
   for (const model of candidates) {
     const gateway = resolveGateway?.(model);
     const selectedModel = gateway ? { ...model, id: gateway.model } : model, settings = gateway?.env || env;
-    const outgoing = await gatewayBody(original, selectedModel, operation, settings, downloads(gateway), signal, resolveFile, gateway?.strengths, nativeImage);
+    const outgoing = await gatewayBody(original, selectedModel, operation, settings, downloads(gateway), signal, resolveNative, gateway?.strengths, nativeImage);
     let result = await forward('gateway', model.id, outgoing, gateway);
-    if (operation === 'edits' && outgoing.contentType === 'application/json' && original.images?.length && imageEditNeedsMultipart(result)) {
-      const multipart = await gatewayBody(original, selectedModel, operation, { ...settings, IMAGE_EDIT_FORMAT: 'multipart' }, downloads(gateway), signal, resolveFile, gateway?.strengths, nativeImage);
+    const uploadable = image => Boolean(image?.image_url || resolveNative && image?.file_id);
+    if (operation === 'edits' && outgoing.contentType === 'application/json' && Array.isArray(original.images) && original.images.length &&
+        original.images.every(uploadable) && (!original.mask || uploadable(original.mask)) && imageEditNeedsMultipart(result)) {
+      const multipart = await gatewayBody(original, selectedModel, operation, { ...settings, IMAGE_EDIT_FORMAT: 'multipart' }, downloads(gateway), signal, resolveNative, gateway?.strengths, nativeImage);
       log('gateway images operation=edits model=' + model.id + ' format=multipart after JSON image-field rejection');
       result = await forward('gateway', model.id, multipart, gateway);
     }

@@ -182,6 +182,19 @@ test('a documented Chat search switch accepts original text when that API makes 
   assert.deepEqual(result.results, []);
 });
 
+test('Chat provider search switches honor a disabled or explicitly selected local tool', () => {
+  const web = { type: 'web_search' }, local = { type: 'function', function: { name: 'lookup' } };
+  for (const target of [
+    { ...gateway, metadata: { supported_parameters: ['enable_search'] } },
+    { ...gateway, base: 'https://api.z.ai/api/paas/v4' },
+    { ...gateway, base: 'https://api.openai.com/v1' },
+  ]) for (const choice of ['none', { type: 'function', function: { name: 'lookup' } }]) {
+    const original = { tools: [web, local], tool_choice: choice };
+    assert.deepEqual(applyChatSearch(original, target, { external_web_access: false }), { tools: [local], tool_choice: choice });
+    assert.deepEqual(original.tools, [web, local]);
+  }
+});
+
 test('documented search-source formats retain source metadata and only map existing numbered citations', () => {
   const raw = { id: 'chat-fixture', model: 'custom/model', choices: [{ index: 0,
     message: { content: 'Original fact [1].', role: 'assistant' }, finish_reason: 'stop' }],

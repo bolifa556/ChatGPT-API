@@ -99,7 +99,8 @@ try {
   assert.equal(record('Vendor/manual-only').strengths?.reasoning, undefined, 'A manual setting became a shared model capability');
   assert.equal(record('Vendor/with-known').capacity, 900000);
   assert.equal(record('Vendor/new').capacity, 262000);
-  assert.equal(readSettings(root).contextOverrides[overrideKey('default', 'Vendor/legacy')], 262000);
+  assert.equal(record('Vendor/legacy').capacity, 262000);
+  assert.equal(readSettings(root).contextOverrides[overrideKey('default', 'Vendor/legacy')], 500000, 'A missing capacity cannot reset a manual window');
   assert(peak > 1 && peak <= 4);
   const before = [...counts];
   await pool.discover(); await probeModels(pool);

@@ -27,8 +27,8 @@ export async function* ssePackets(stream, { maxEventBytes = MAX_EVENT_BYTES } = 
     }
     lines = []; eventBytes = 0;
     if (!values.length) return { raw: raw + '\n\n', [control]: true };
-    const data = values.join('\n');
-    return data && data !== '[DONE]' ? { raw, event, data: JSON.parse(data) } : { raw, done: data === '[DONE]' };
+    const text = values.join('\n');
+    return text && text !== '[DONE]' ? { raw, event, text, data: JSON.parse(text) } : { raw, done: text === '[DONE]' };
   }
   function append(text) {
     bytes += Buffer.byteLength(text);

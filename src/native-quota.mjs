@@ -9,13 +9,13 @@ import { setTimeout as delay } from 'node:timers/promises';
 import http from 'node:http';
 import net from 'node:net';
 import { pathToFileURL } from 'node:url';
-import { runInNewContext } from 'node:vm';
+import { Script, runInNewContext } from 'node:vm';
 import WebSocket from 'ws';
 import { atomicPrivate } from './settings.mjs';
 import { errorDetails, describeError } from './diagnostics.mjs';
 
 const quotaGuard = /(?<![\w$])([A-Za-z_$][\w$]*)="local"===([A-Za-z_$][\w$]*)&&([A-Za-z_$][\w$]*)\|\|\(0,([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)/g;
-const quotaAssetRevision = 5;
+const quotaAssetRevision = 7;
 const escaped = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function scopeContextWindow(source, key) {
   if (!source.includes('"tokenUsageInfo"')) return { text: source, count: 0 };
@@ -56,6 +56,29 @@ function scopeComposerSubmission(source, key) {
   const props = /activeCollaborationMode:([A-Za-z_$][\w$]*),[^{};]{0,1200}?\b(submitDisabled(?:Reasons)?):([A-Za-z_$][\w$]*)/g;
   const components = [...source.matchAll(props)], changes = [];
   let count = 0, legacyCount = 0;
+  // The shared composer receives account-level reasons from its caller. Scope
+  // those reasons where the selected model and host are both available.
+  for (const component of components) {
+    const [, mode, property, disabled] = component;
+    if (property !== 'submitDisabledReasons') continue;
+    const start = component.index + component[0].length;
+    const body = source.slice(start, start + 64 * 1024);
+    const selection = body.match(new RegExp(variable + '(' + identifier + ')=' + escaped(mode) +
+      '\\?\\.settings(?:\\?\\.|\\.)model\\?\\?null;[^;]{0,400}?\\{hostId:(' + identifier + '\\.hostId),selectedModel:\\1\\}'));
+    if (!selection) continue;
+    const list = body.match(new RegExp(variable + '(' + identifier + ')=\\[' + escaped(disabled) +
+      '(?:,' + identifier + ')*\\]\\.filter\\(Boolean\\)'));
+    if (!list || list.index <= selection.index) continue;
+    const joined = body.match(new RegExp(variable + '(' + identifier + ')=(' + escaped(list[1]) +
+      '\\.join\\(","\\)),(' + identifier + ')=\\1\\.length>0'));
+    if (!joined || joined.index <= list.index) continue;
+    const gateway = '"local"===' + selection[2] + '&&globalThis[' + JSON.stringify(key) + ']?.models?.has(' + selection[1] + ')';
+    const original = joined[2];
+    const scoped = '(' + list[1] + '.length&&' + gateway + '?' + original +
+      '.split(",").filter(reason=>reason!=="reserve-limit"&&reason!=="usage-limit").join(","):' + original + ')';
+    changes.push({ offset: start + joined.index + joined[1].length + 1, length: original.length, text: scoped });
+    count++;
+  }
   for (const hard of source.matchAll(hardReads)) {
     const [, blocked, hook, module, flag, host] = hard;
     const legacy = hook === '_U' && flag === 'F9' && source.includes(module + '=n("eLmE")');
@@ -137,9 +160,23 @@ function readAsset(fd, entry, buffer = Buffer.allocUnsafe(entry.size)) {
 
 function readAssetSources(fd, entries) {
   return entries.map(entry => {
-    const source = readAsset(fd, entry).toString();
-    return { ...entry, source: entry.factory ? 'export const __webpack_modules__={' + source + '};' : source };
+    let source = readAsset(fd, entry).toString();
+    if (entry.factory) {
+      // Function.toString() drops the object key for function expressions.
+      if (entry.factoryExpression) source = '[' + JSON.stringify(entry.moduleId) + ']:(' + source + ')';
+      source = 'export const __webpack_modules__={' + source + '};';
+    }
+    return { ...entry, source };
   });
+}
+
+function assetFeatures({ quotaCount, submitCount, legacySubmitCount, fastCount, contextCount }) {
+  return [quotaCount || submitCount || legacySubmitCount ? 'send' : '', fastCount ? 'fast' : '', contextCount ? 'context' : ''].filter(Boolean);
+}
+
+function isFactoryExpression(source) {
+  try { new Script('(' + source + ')'); return true; }
+  catch { return false; } // Method shorthand keeps its own key in the object literal.
 }
 
 export function nativeQuotaAssets(archive, cacheFile = '', includeSource = true) {
@@ -172,7 +209,7 @@ export function nativeQuotaAssets(archive, cacheFile = '', includeSource = true)
         const quota = contents.includes('sendBlocked:') && contents.includes('rateLimitWarningThreshold:');
         const fast = contents.includes('serviceTierAccess:') && contents.includes('authMethod==="amazonBedrock"');
         const composer = (contents.includes('submitDisabledReasons:') || contents.includes('submitDisabled:'))
-          && (contents.includes('"reserve-limit"') || contents.includes('n("eLmE")'));
+          && (contents.includes('"reserve-limit"') || contents.includes('n("eLmE")') || contents.includes('selectedModel:'));
         const context = contents.includes('"tokenUsageInfo"');
         if (!quota && !fast && !composer && !context) continue;
         const source = contents.toString(), adapted = scopeNativeQuota(source, 'quota_probe');
@@ -183,21 +220,23 @@ export function nativeQuotaAssets(archive, cacheFile = '', includeSource = true)
             // factories without running them, and retain only matching ranges.
             const definitions = source.replaceAll('export const ', 'const ');
             const modules = runInNewContext(definitions + '\n__webpack_modules__', Object.create(null), { timeout: 1000 });
-            for (const factory of Object.values(modules)) {
+            for (const [moduleId, factory] of Object.entries(modules)) {
+              if (typeof factory !== 'function') continue;
               const text = Function.prototype.toString.call(factory), scoped = scopeNativeQuota(text, 'quota_probe');
               if (!scoped.count && !scoped.legacySubmitCount) continue;
               const bytes = Buffer.from(text), offset = contents.indexOf(bytes);
               if (offset < 0) throw new Error('Native module source range is unavailable.');
               entries.push({ ...location, offset: location.offset + offset, size: bytes.length, factory: true,
+                moduleId, factoryExpression: isFactoryExpression(text), features: assetFeatures(scoped),
                 count: scoped.count, submitCount: scoped.submitCount, legacySubmitCount: scoped.legacySubmitCount, supportedFormat });
             }
-          } else entries.push({ ...location, count: adapted.count, submitCount: adapted.submitCount,
+          } else entries.push({ ...location, features: assetFeatures(adapted), count: adapted.count, submitCount: adapted.submitCount,
             legacySubmitCount: adapted.legacySubmitCount, supportedFormat });
         }
       }
     }
     scan(tree);
-    if (!entries.length) throw Object.assign(new Error('当前客户端的 API 界面兼容检查未通过，请更新官方客户端和适配层。'), { code: 'native_ui_unsupported' });
+    if (!entries.length) throw Object.assign(new Error('未找到可识别的客户端界面模块。'), { code: 'native_ui_unsupported' });
     if (cacheFile) atomicPrivate(cacheFile, { revision: quotaAssetRevision, identity, entries });
     return result(entries);
   } finally { fs.closeSync(fd); }
@@ -207,24 +246,24 @@ export function gatewayQuotaModels(catalog, mode = 'mixed') {
   return (catalog.gatewayIds || []).filter(model => !official.has(model));
 }
 export function quotaBootstrap(assets, models, key, binding, contextWindows = {}) {
-  const modules = assets.map(asset => {
+  const modules = assets.map((asset, index) => {
     const adapted = scopeNativeQuota(asset.source, key);
     const source = adapted.text.replace('export const __rspack_esm_ids=', 'const __rspack_esm_ids=')
       .replace('export const __webpack_modules__=', 'const __webpack_modules__=');
-    return '{const asset=' + JSON.stringify(asset.url) + ';try{const prepared=(()=>{"use strict";\n' + source + '\nreturn __webpack_modules__})();' +
-      'for(const id of Object.keys(prepared))if(!prepared[id].toString().includes(key))delete prepared[id];' +
+    return '{const asset=' + index + ';try{const prepared=(()=>{"use strict";\n' + source + '\nreturn __webpack_modules__})();' +
+      'const ids=Object.keys(prepared).filter(id=>typeof prepared[id]==="function"&&prepared[id].toString().includes(key));' +
+      'if(!ids.length){failed("native_module_not_found","No matching interface module",asset)}else{' +
       'import(' + JSON.stringify(asset.url) + ').then(native=>{' +
-      'const ids=Object.keys(prepared);if(!ids.length)throw Error("Native quota module was not found");' +
-      'if(ids.some(id=>typeof native.__webpack_modules__?.[id]!=="function"))throw Error("Native quota module changed");' +
+      'if(ids.some(id=>typeof native.__webpack_modules__?.[id]!=="function")){failed("native_module_changed","Native module IDs no longer match",asset);return}' +
       'for(const id of ids)native.__webpack_modules__[id]=prepared[id];' +
       'state.installed+=ids.length;state.pending--;notify()' +
-      '}).catch(error=>failed(error,asset))' +
-      '}catch(error){failed(error,asset)}}';
+      '},error=>failed("native_module_import_failed",error,asset)).catch(error=>failed("native_module_install_failed",error,asset))}' +
+      '}catch(error){failed("native_module_prepare_failed",error,asset)}}';
   }).join('\n');
   return '(()=>{if(typeof location!=="undefined"&&(location.protocol!=="app:"||location.host!=="-"||self!==top))return;const key=' + JSON.stringify(key) + ';if(globalThis[key])return;' +
-    'const state=globalThis[key]={models:new Set(' + JSON.stringify(models) + '),contextWindows:' + JSON.stringify(contextWindows) + ',pending:' + assets.length + ',installed:0,error:null};' +
-    'const notify=(initial=false)=>{const fn=globalThis[' + JSON.stringify(binding) + '];if(typeof fn==="function")fn(JSON.stringify({pending:state.pending,installed:state.installed,error:state.error,failedAsset:state.failedAsset,initial}))};' +
-    'const failed=(error,asset)=>{if(!state.error){state.error=String(error);state.failedAsset=asset}state.pending--;notify()};notify(true);' +
+    'const state=globalThis[key]={models:new Set(' + JSON.stringify(models) + '),contextWindows:' + JSON.stringify(contextWindows) + ',pending:' + assets.length + ',installed:0};' +
+    'const notify=(initial=false,failure)=>{const fn=globalThis[' + JSON.stringify(binding) + '];if(typeof fn==="function")fn(JSON.stringify({pending:state.pending,installed:state.installed,failure,initial}))};' +
+    'const failed=(code,error,asset)=>{state.pending--;notify(false,{code,message:String(error),asset})};notify(true);' +
     modules + '\n})()';
 }
 function nativePipe(child, socket, timeoutMs, disconnected) {
@@ -285,29 +324,81 @@ async function debuggerAddress(port, signal) {
   signal.throwIfAborted();
 }
 
-function noteUiFailure(status, error, failedAsset) {
-  if (status.errors) return;
-  status.errors = 1;
-  status.failurePhase = status.phase;
-  status.code = error.code || 'native_setup_failed';
+const featureEffects = {
+  send: '官方订阅额度用完时，自定义模型的发送按钮可能变灰。',
+  fast: '支持快速模式的自定义模型可能不显示小闪电。',
+  context: '切换自定义模型后，对话里显示的上下文容量可能未更新。',
+};
+const failureReasons = {
+  ENOENT: '启动器找不到当前客户端的界面资源文件。',
+  EACCES: '系统拒绝读取客户端界面资源。',
+  EPERM: '系统拒绝读取客户端界面资源。',
+  native_ui_unsupported: '启动器在当前客户端版本中未找到可识别的界面模块。',
+  native_send_unsupported: '当前客户端的发送按钮使用了启动器尚未支持的额度规则。',
+  native_module_format: '当前客户端使用了启动器尚未支持的界面模块格式。',
+  native_module_changed: '启动器定位的模块编号与客户端加载的模块不一致。',
+  native_module_import_failed: '客户端未能加载这项功能的界面模块。',
+  native_module_prepare_failed: '启动器未能解析这项功能的界面模块。',
+  native_module_not_found: '启动器在界面资源中未找到这项功能对应的模块。',
+  native_module_install_failed: '客户端加载了界面模块，但未能应用启动器的兼容处理。',
+  native_module_failed: '这项功能的界面模块未能加载。',
+  native_model_catalog_unavailable: '启动器未能读取本地自定义模型列表，无法确定要适配的模型。',
+  native_endpoint_unavailable: '客户端未在等待时间内开放本机界面连接。',
+  native_endpoint_invalid: '客户端返回了无效的本机界面连接地址。',
+  native_page_not_attached: '启动器未在等待时间内找到 ChatGPT 主界面。',
+  native_bootstrap_not_started: 'ChatGPT 主界面已打开，兼容脚本未在等待时间内开始执行。',
+  native_module_load_timeout: '兼容脚本已启动，部分界面模块未在等待时间内完成加载。',
+  native_command_timeout: '客户端未在等待时间内响应界面兼容请求。',
+  native_command_failed: '客户端拒绝执行界面兼容请求。',
+  native_debugger_closed: '客户端与启动器的本机界面连接提前断开。',
+};
+
+function noteUiFailure(status, error, asset, features = asset?.features || []) {
+  const code = error.code || 'native_setup_failed';
+  const stageReasons = {
+    scanning: '启动器读取客户端界面资源时失败。',
+    connecting: '启动器未能连接到客户端的本机界面。',
+    installing: '启动器在加载客户端界面模块时失败。',
+  };
+  const reason = Object.hasOwn(failureReasons, code) ? failureReasons[code] : stageReasons[status.phase] || '客户端的界面兼容连接已停止。';
+  const details = errorDetails(error);
+  const failure = { code, reason, phase: status.phase, features, details, ...(asset ? { asset: asset.url } : {}) };
+  status.failures = [...(status.failures || []), failure];
+  status.errors = status.failures.length;
+  if (status.errors !== 1) return;
+  status.failurePhase = failure.phase;
+  status.code = code;
   status.lastError = describeError(error);
-  status.failure = errorDetails(error);
-  if (failedAsset) status.failedAsset = failedAsset;
+  status.failure = details;
+  if (asset) status.failedAsset = asset.url;
 }
 
-function showQuotaWarning() {
-  const title = 'ChatGPT API';
-  const message = '部分自定义模型的发送额度或 Fast 兼容未加载。ChatGPT 可以继续使用。';
+export function quotaWarningMessage(status) {
+  const groups = new Map();
+  for (const failure of status.failures || []) {
+    if (!groups.has(failure.reason)) groups.set(failure.reason, new Set());
+    const effects = groups.get(failure.reason);
+    for (const feature of failure.features) if (Object.hasOwn(featureEffects, feature)) effects.add(featureEffects[feature]);
+  }
+  const messages = [...groups].map(([reason, effects]) => [...effects, reason].join('\n'));
+  const version = status.clientVersion ? '\n当前客户端版本 ' + status.clientVersion + '。' : '';
+  return ['ChatGPT 已启动，可以继续使用。' + version, ...messages].join('\n\n');
+}
+
+function showQuotaWarning(status) {
+  const title = 'ChatGPT API 界面兼容提示';
+  const message = quotaWarningMessage(status);
   let commands = [];
   if (process.platform === 'win32') {
-    const script = '$shell=New-Object -ComObject WScript.Shell\n[void]$shell.Popup("' + message + '",15,"' + title + '",48)';
+    const literal = value => "'" + value.replaceAll("'", "''").replaceAll('\n', '\r\n') + "'";
+    const script = '$shell=New-Object -ComObject WScript.Shell\n[void]$shell.Popup(' + literal(message) + ',30,' + literal(title) + ',48)';
     commands = [[path.join(process.env.WINDIR, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
       ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')]]];
   } else if (process.platform === 'darwin') {
-    commands = [['/usr/bin/osascript', ['-e', 'display alert "' + title + '" message "' + message + '" as warning giving up after 15']]];
+    commands = [['/usr/bin/osascript', ['-e', 'on run argv\ndisplay alert (item 1 of argv) message (item 2 of argv) as warning giving up after 30\nend run', title, message]]];
   } else if (process.env.DISPLAY || process.env.WAYLAND_DISPLAY) {
-    commands = [['zenity', ['--warning', '--timeout=15', '--title=' + title, '--text=' + message]],
-      ['kdialog', ['--title', title, '--passivepopup', message, '15']]];
+    commands = [['zenity', ['--warning', '--timeout=30', '--title=' + title, '--text=' + message]],
+      ['kdialog', ['--title', title, '--passivepopup', message, '30']]];
   }
   const next = () => {
     const command = commands.shift();
@@ -341,7 +432,7 @@ async function installQuota({ child, port, models, contexts, cache, archive, ass
     if (port) {
       const address = await debuggerAddress(port, signal), parsed = new URL(address);
       if (parsed.protocol !== 'ws:' || !['127.0.0.1', 'localhost'].includes(parsed.hostname) || Number(parsed.port) !== port) {
-        throw new Error('Invalid native compatibility endpoint.');
+        throw Object.assign(new Error('Invalid native compatibility endpoint.'), { code: 'native_endpoint_invalid' });
       }
       socket = new WebSocket(address, { handshakeTimeout: timeoutMs });
       socket.on('error', () => {});
@@ -372,11 +463,15 @@ async function installQuota({ child, port, models, contexts, cache, archive, ass
           const value = JSON.parse(event.params.payload);
           if (value.initial && seeds.get(id) !== latest) writeModels(id, latest).catch(error => failed(error, id));
           if (status.ready) return;
-          if (value.error) noteUiFailure(status, Object.assign(new Error(value.error), { code: 'native_module_failed' }), value.failedAsset);
+          if (value.failure) {
+            const { code, message, asset } = value.failure;
+            noteUiFailure(status, Object.assign(new Error(message), { code: code || 'native_module_failed' }), assets[asset]);
+          }
           status.pending = value.pending;
           status.installed = Math.max(status.installed, value.installed || 0);
           if (value.pending === 0) {
-            if (!status.installed) noteUiFailure(status, new Error('No native compatibility modules were installed.'));
+            if (!status.installed && !status.errors) noteUiFailure(status,
+              Object.assign(new Error('No native compatibility modules were installed.'), { code: 'native_module_not_found' }));
             status.ready = status.installed > 0;
             status.phase = status.errors ? 'degraded' : 'ready';
             report(); resolveReady();
@@ -458,7 +553,10 @@ export async function startQuotaCompatibleClient({ executable, archive, root, ho
   const cache = path.join(root, 'data/cache/catalog-state.json');
   let routeMode = 'mixed';
   try { routeMode = JSON.parse(fs.readFileSync(path.join(root, 'data/state/route-state.json'), 'utf8')).mode; } catch {}
-  const models = () => gatewayQuotaModels(JSON.parse(fs.readFileSync(cache, 'utf8')), routeMode);
+  const models = () => {
+    try { return gatewayQuotaModels(JSON.parse(fs.readFileSync(cache, 'utf8')), routeMode); }
+    catch (cause) { throw Object.assign(new Error('Could not read the local custom model catalog.', { cause }), { code: 'native_model_catalog_unavailable' }); }
+  };
   const contexts = ids => {
     try {
       const allowed = new Set(ids);
@@ -474,22 +572,22 @@ export async function startQuotaCompatibleClient({ executable, archive, root, ho
     const hasGateway = models().length > 0;
     for (const asset of candidates) {
       if (!asset.supportedFormat) {
-        noteUiFailure(status, Object.assign(new Error('客户端界面模块格式已变更。'), { code: 'native_module_format' }), asset.url);
+        noteUiFailure(status, Object.assign(new Error('客户端界面模块格式已变更。'), { code: 'native_module_format' }), asset);
       } else if (hasGateway && asset.legacySubmitCount > asset.submitCount) {
-        noteUiFailure(status, Object.assign(new Error('当前客户端的 API 发送界面规则已变更。'), { code: 'native_send_unsupported' }), asset.url);
+        noteUiFailure(status, Object.assign(new Error('当前客户端的 API 发送界面规则已变更。'), { code: 'native_send_unsupported' }), asset, ['send']);
       }
     }
     const supported = candidates.filter(asset => asset.supportedFormat && asset.count);
     status.modules = supported.length;
-    if (!supported.length) throw new Error('No supported native compatibility modules were found.');
-    if (launch) {
+    if (!supported.length && !status.errors) throw Object.assign(new Error('No supported native compatibility modules were found.'), { code: 'native_ui_unsupported' });
+    if (supported.length && launch) {
       // LaunchServices cannot pass the debugging pipe to the application.
       const reserve = net.createServer();
       reserve.listen(0, '127.0.0.1'); await once(reserve, 'listening');
       port = reserve.address().port;
       await new Promise(resolve => reserve.close(resolve));
     }
-    assets = supported;
+    if (supported.length) assets = supported;
   } catch (error) { setupError = error; }
   const debugArgs = !assets ? [] : port ? ['--remote-debugging-address=127.0.0.1', '--remote-debugging-port=' + port] : ['--remote-debugging-pipe'];
   let child;
@@ -502,8 +600,8 @@ export async function startQuotaCompatibleClient({ executable, archive, root, ho
   }
   onSpawn?.(child);
   status.pid = child.pid;
-  if (setupError) {
-    noteUiFailure(status, setupError);
+  if (!assets) {
+    if (setupError) noteUiFailure(status, setupError);
     status.phase = 'degraded';
     report();
   } else {

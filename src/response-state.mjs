@@ -1,6 +1,6 @@
 import { MAX_REQUEST_BYTES } from './transport.mjs';
 import { serialize, deserialize } from 'node:v8';
-import { constants, zstdCompressSync, zstdDecompressSync } from 'node:zlib';
+import { constants, zstdCompress, zstdDecompressSync } from 'node:zlib';
 
 export const DEFAULT_LANE = Symbol('implicit response lane');
 export const laneOf = event => event.stream_id ?? DEFAULT_LANE;
@@ -28,11 +28,36 @@ export class PendingResponses {
 const PACK_HISTORY_BYTES = 256 * 1024;
 const fastZstd = { params: { [constants.ZSTD_c_compressionLevel]: 1 } };
 
+// Run one large compression job at a time. The queue does not own chat entries.
+let packingHistory = false;
+const packingQueue = [];
+function packNext() {
+  let scheduled;
+  while ((scheduled = packingQueue.shift())) {
+    const cache = scheduled.cache.deref(), item = scheduled.item.deref();
+    if (!cache || !item) continue;
+    if (!cache.refs.has(item)) { item.attempted = false; continue; }
+    try {
+      const raw = serialize(item.value);
+      zstdCompress(raw, fastZstd, (error, packed) => {
+        if (!error && packed.length < raw.length * 0.8) {
+          item.packed = packed;
+          item.value = null;
+        }
+        setImmediate(packNext).unref();
+      });
+      return;
+    } catch { /* Keep the original value if packing is unavailable. */ }
+  }
+  packingHistory = false;
+}
+
 class PackedHistoryItem {
-  constructor(value, bytes, packed) {
+  constructor(value, bytes) {
+    this.value = value;
     this.current = new WeakRef(value);
     this.bytes = bytes;
-    this.packed = packed;
+    this.packed = null;
   }
 }
 
@@ -46,14 +71,16 @@ export class HistoryCache {
     this.latest = new Map(); this.bytes = 0;
     this.onDelete = onDelete;
   }
-  get(id) {
+  get(id, { materialize = true } = {}) {
     const entry = this.entries.get(id);
     if (!entry) return undefined;
     this.entries.delete(id); this.entries.set(id, entry);
-    if (!entry.hasPackedInput) return entry;
-    return { ...entry, input: entry.input.map(item => {
+    return materialize && entry.hasPackedInput ? { ...entry, input: this.materialize(entry.input) } : entry;
+  }
+  materialize(input) {
+    return input.map(item => {
       if (!(item instanceof PackedHistoryItem)) return item;
-      let value = item.current?.deref();
+      let value = item.value || item.current?.deref();
       if (!value) {
         value = deserialize(zstdDecompressSync(item.packed));
         item.current = new WeakRef(value);
@@ -61,7 +88,7 @@ export class HistoryCache {
         this.sizes.set(value, item.bytes);
       }
       return value;
-    }) };
+    });
   }
   itemBytes(item) {
     if (item instanceof PackedHistoryItem) return item.bytes;
@@ -73,17 +100,21 @@ export class HistoryCache {
   }
   pack(item) {
     if (!item || typeof item !== 'object') return item;
-    if (this.packed.has(item)) return this.packed.get(item);
     const bytes = this.itemBytes(item);
     if (bytes < PACK_HISTORY_BYTES) return item;
-    let reference = item;
-    try {
-      const raw = serialize(item), packed = zstdCompressSync(raw, fastZstd);
-      if (packed.length < raw.length * 0.8) reference = new PackedHistoryItem(item, bytes, packed);
-    } catch {
-      // The unchanged object remains usable if packing is unavailable.
+    let reference = item instanceof PackedHistoryItem ? item : this.packed.get(item);
+    if (!reference) {
+      reference = new PackedHistoryItem(item, bytes);
+      this.packed.set(item, reference);
     }
-    this.packed.set(item, reference);
+    if (reference.value && !reference.attempted && packingQueue.length < 16) {
+      reference.attempted = true;
+      packingQueue.push({ cache: new WeakRef(this), item: new WeakRef(reference) });
+      if (!packingHistory) {
+        packingHistory = true;
+        setImmediate(packNext).unref();
+      }
+    }
     return reference;
   }
   delete(id) {

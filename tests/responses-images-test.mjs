@@ -7,6 +7,7 @@ import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
+import { ResponsePhases } from '../src/history-compat.mjs';
 import { ResponseImages, restoreHostedImageHistory } from '../src/responses-images.mjs';
 import { ssePackets, encodeSse } from '../src/sse.mjs';
 import { readRequestJson } from './http-fixture.mjs';
@@ -128,6 +129,14 @@ for (const variant of ['full', 'terminal', 'duplicate', 'lite']) {
     assert.equal(events.filter(part => part.type === 'response.output_text.delta' && part.item_id === event.item.id).map(part => part.delta).join(''), event.item.content[0].text);
   }
 }
+for (const output of [[image('ig_before_text'), message], [message, image('ig_after_text')]]) {
+  const phases = new ResponsePhases(), images = new ResponseImages(home);
+  const stream = eventsFor(output, 'terminal').flatMap(event => phases.convert(event).flatMap(item => images.convert(item)));
+  const done = stream.filter(event => event.type === 'response.output_item.done');
+  assert.deepEqual(done.map(event => event.output_index), [0, 1]);
+  assert.deepEqual(done.map(event => Boolean(event.item.content[1]?.image_url)), output.map(item => item.type === 'image_generation_call'));
+}
+checks.push('Images and text delivered only in the terminal output appear once in the original order');
 assert.throws(() => { const images = new ResponseImages(home); eventsFor([image()], 'missing').forEach(event => images.convert(event)); }, error => error.code === 'invalid_upstream_image_response');
 const interrupted = new ResponseImages(home);
 assert.equal(interrupted.convert({ type: 'response.output_item.added', output_index: 0, item: { ...image(), status: 'in_progress', result: null } })[0].item.status, 'in_progress');

@@ -4,8 +4,8 @@ import { isGptModel } from './history-compat.mjs';
 import { imageCapabilities } from './image-compat.mjs';
 import { usesChat, chatEndpointUnavailable } from './chat-compat.mjs';
 import { modelStrengths, strengthLevels, PROBE_REASONING_LEVELS } from './model-strength.mjs';
-import { DEFAULT_CONTEXT_WINDOW, contextKey, rememberContexts } from './model-context.mjs';
-import { atomicPrivate, overrideKey, readSettings, saveSettings } from './settings.mjs';
+import { contextKey, rememberContexts } from './model-context.mjs';
+import { atomicPrivate, overrideKey } from './settings.mjs';
 import { requestWithAbort, releaseResponseBody } from './transport.mjs';
 import { decodedStream, ssePackets } from './sse.mjs';
 
@@ -101,25 +101,10 @@ export async function probeModels(pool, { signal } = {}) {
   const official = read(path.join(pool.root, 'data/cache/catalog-state.json')).official || [];
   const known = read(path.join(pool.root, 'assets/model-contexts.json'));
   let cache = read(file, { version: 1, entries: {} });
-  const previous = cache.entries;
   for (const profile of pool.profiles()) {
     cache = rememberContexts({ file, base: profile.baseUrl, official, known,
       models: pool.models.filter(model => model._providerId === profile.id && !imageCapabilities(model).known)
         .map(model => ({ ...model, id: model._upstreamId })) });
-  }
-  const resetContexts = pool.models.filter(model => {
-    const profile = pool.profile(model._providerId), key = contextKey(profile.baseUrl, model._upstreamId);
-    return cache.entries[key]?.source === 'default-context-window' && previous[key]?.source !== 'default-context-window'
-      && !pool.settings.modelCapacities[overrideKey(profile.id, model._upstreamId)];
-  }).map(model => overrideKey(model._providerId, model._upstreamId));
-  if (resetContexts.length) {
-    const current = readSettings(pool.root, pool.env);
-    let changed = false;
-    for (const key of resetContexts) if (Object.hasOwn(current.contextOverrides, key) && current.contextOverrides[key] !== DEFAULT_CONTEXT_WINDOW) {
-      current.contextOverrides[key] = DEFAULT_CONTEXT_WINDOW;
-      changed = true;
-    }
-    if (changed) pool.settings = saveSettings(pool.root, current, pool.env);
   }
   const models = pool.models.filter(model => !isGptModel(model._upstreamId) &&
     pool.saved.statuses?.some(source => source.id === model._providerId && source.ready));

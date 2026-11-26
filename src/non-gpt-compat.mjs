@@ -1,6 +1,6 @@
 // Desktop wire compatibility. This module never executes model-generated input.
 import { createHash } from 'node:crypto';
-import { portableReasoning, mergeTools } from './history-compat.mjs';
+import { portableReasoning, mergeTools, applyConfigurationUpdate } from './history-compat.mjs';
 
 export const MAX_EVENT_BYTES = 16 * 1024 * 1024;
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -90,14 +90,7 @@ export class NonGptAdapter {
           // Native GPT keeps these controls in history for prompt caching.
           // Other protocols express the effective settings on the request.
           // Apply them in order to this outgoing copy, never as chat text.
-          const known = ['type', 'id', 'reasoning', 'text', 'internal_chat_message_metadata_passthrough'];
-          if (Object.keys(item).some(key => !known.includes(key)) || !['reasoning', 'text'].some(key => item[key] !== undefined))
-            throw Object.assign(new Error('This configuration update cannot be represented by the selected model protocol.'), { status: 400, code: 'unsupported_configuration_update' });
-          for (const key of ['reasoning', 'text']) if (item[key] !== undefined) {
-            if (!item[key] || typeof item[key] !== 'object' || Array.isArray(item[key]))
-              throw Object.assign(new Error('Configuration update ' + key + ' must be an object.'), { status: 400, code: 'unsupported_configuration_update' });
-            data[key] = { ...data[key], ...item[key] };
-          }
+          applyConfigurationUpdate(data, item);
           this.stats.configurationsApplied++;
         } else if (item?.type === 'additional_tools') {
           carriers.push(...(item.tools || [])); this.stats.carriersRemoved++;
